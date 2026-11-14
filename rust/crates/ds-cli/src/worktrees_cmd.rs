@@ -200,26 +200,30 @@ pub fn disk_command(
         .map(|meta| std::os::unix::fs::MetadataExt::uid(&meta))
         .unwrap_or(u32::MAX);
     let scan = worktree_disk::busy_paths(Path::new("/proc"), &root, uid);
-    let uninspected = scan.as_ref().ok().map(|scan| {
-        serde_json::json!({"own": scan.uninspected_own, "other_users": scan.uninspected_other})
-    });
+    let uninspected = scan
+        .as_ref()
+        .ok()
+        .map(|scan| (scan.uninspected_own, scan.uninspected_other));
     let busy = scan.map(|scan| scan.paths);
     let budget = worktree_disk::Budget::new(
         max_seconds.unwrap_or(DEFAULT_MAX_SECONDS),
         max_dirs.map_or(DEFAULT_MAX_DIRS, |dirs| dirs.max(0) as usize),
     );
     match worktree_disk::report_within(&root, now, &link, &busy, &budget) {
-        Ok(mut report) => Outcome {
-            stdout: if json {
-                // Processes that refuse inspection and show no sign of building here.
-                report["uninspected_processes"] = serde_json::json!(uninspected);
-                format!("{}\n", sorted_json(&report))
-            } else {
-                worktree_disk::render_text(&report)
-            },
-            stderr: String::new(),
-            code: 0,
-        },
+        Ok(mut report) => {
+            if let Some((own, other_users)) = uninspected {
+                worktree_disk::note_uninspected(&mut report, own, other_users);
+            }
+            Outcome {
+                stdout: if json {
+                    format!("{}\n", sorted_json(&report))
+                } else {
+                    worktree_disk::render_text(&report)
+                },
+                stderr: String::new(),
+                code: 0,
+            }
+        }
         Err(error) => Outcome {
             stdout: String::new(),
             stderr: format!("worktrees disk: {error}\n"),

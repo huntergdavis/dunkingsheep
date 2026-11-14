@@ -10,6 +10,11 @@
 //! * nothing in the cache changed for `UNTOUCHED_S`;
 //! * no running process works in the directory or builds into the cache.
 //!
+//! `eligible` is a finding of this report, not a licence to delete. Processes that refuse
+//! inspection and show no sign of building here are counted, not proven idle, so "no running
+//! process" holds only under that assumption (`eligibility_assumes`). A cleanup must check
+//! every condition again, strictly, at the moment it deletes.
+//!
 //! Anything unknown keeps the cache: an unreadable pull-request state, a directory that is not
 //! a checkout, a process table that cannot be read.
 
@@ -485,6 +490,7 @@ pub fn report_within(
         "generated_at": now,
         "untouched_s": UNTOUCHED_S,
         "read_only": true,
+        "cleanup_note": "eligible is this report's finding, not a licence to delete: a cleanup must re-check every condition strictly at delete time",
         "partial": partial_reason.is_some() || dirs.iter().any(|dir| dir["truncated"] == true),
         "partial_reason": partial_reason.or_else(|| {
             dirs.iter()
@@ -524,13 +530,28 @@ fn age_text(seconds: Option<i64>) -> String {
     }
 }
 
+/// Record the processes that refused inspection in a report (`ProcessScan`'s two counts).
+/// When there are any, every `eligible` in the report rests on the assumption written here.
+pub fn note_uninspected(report: &mut Value, own: u64, other_users: u64) {
+    report["uninspected_processes"] = json!({"own": own, "other_users": other_users});
+    report["eligibility_assumes"] = if own + other_users > 0 {
+        json!(format!(
+            "{own} processes of this user and {other_users} of other users could not be inspected; \
+             they show no sign of building here (not a build tool, no path under the root on the \
+             command line) and are assumed not to use these caches"
+        ))
+    } else {
+        Value::Null
+    };
+}
+
 /// The operator's view of `report`: one line per directory, largest first, then its caches.
 pub fn render_text(report: &Value) -> String {
     let mut out = String::new();
     let totals = &report["totals"];
     let filesystem = &report["filesystem"];
     out.push_str(&format!(
-        "{}: {} in {} directories; build caches {}; safe to delete {} in {} caches\n",
+        "{}: {} in {} directories; build caches {}; eligible for cleanup {} in {} caches\n",
         report["root"].as_str().unwrap_or("?"),
         size_text(totals["bytes"].as_u64().unwrap_or(0)),
         totals["dirs"].as_u64().unwrap_or(0),
@@ -549,6 +570,12 @@ pub fn render_text(report: &Value) -> String {
         )),
     }
     out.push_str("read-only report: nothing was deleted\n");
+    if let Some(assumes) = report["eligibility_assumes"].as_str() {
+        out.push_str(&format!("ASSUMPTION: {assumes}\n"));
+    }
+    out.push_str(
+        "eligible is a finding, not a licence to delete: a cleanup must re-check at delete time\n",
+    );
     if report["partial"] == true {
         out.push_str(&format!(
             "PARTIAL: {}; {} of {} directories were not scanned, and the totals cover only the rest\n",
@@ -580,7 +607,11 @@ pub fn render_text(report: &Value) -> String {
         ));
         for target in dir["targets"].as_array().into_iter().flatten() {
             let verdict = if target["eligible"].as_bool() == Some(true) {
-                "safe to delete".to_string()
+                if report["eligibility_assumes"].is_string() {
+                    "eligible under the assumption above".to_string()
+                } else {
+                    "eligible".to_string()
+                }
             } else {
                 let reasons: Vec<&str> = target["keep_reasons"]
                     .as_array()
@@ -779,7 +810,38 @@ mod tests {
             text.contains("read-only report: nothing was deleted"),
             "{text}"
         );
-        assert!(text.contains("safe to delete"), "{text}");
+        assert!(
+            text.contains("\n") && text.contains("  eligible\n"),
+            "{text}"
+        );
+        assert!(!text.contains("safe to delete"), "{text}");
+        assert!(!text.contains("ASSUMPTION"), "{text}");
+        assert!(
+            text.contains("a cleanup must re-check at delete time"),
+            "{text}"
+        );
+        let mut assumed = report.clone();
+        note_uninspected(&mut assumed, 11, 227);
+        let text = render_text(&assumed);
+        assert!(
+            text.contains("ASSUMPTION: 11 processes of this user and 227 of other users could not be inspected"),
+            "{text}"
+        );
+        assert!(
+            text.contains("eligible under the assumption above"),
+            "{text}"
+        );
+        assert_eq!(
+            assumed["uninspected_processes"],
+            json!({"own": 11, "other_users": 227})
+        );
+        let mut none = report.clone();
+        note_uninspected(&mut none, 0, 0);
+        assert_eq!(none["eligibility_assumes"], Value::Null);
+        assert!(report["cleanup_note"]
+            .as_str()
+            .unwrap()
+            .contains("re-check every condition strictly at delete time"));
         assert!(text.contains("PR 7 merged"), "{text}");
         assert!(
             big.join("rust/target/debug/artifact").exists(),
