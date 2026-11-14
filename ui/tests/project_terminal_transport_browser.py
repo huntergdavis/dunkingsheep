@@ -141,7 +141,7 @@ try:
         page.wait_for_timeout(1500)
         (RUN/'output.bin').write_bytes(output)
         received = (RUN/'received').read_bytes() if (RUN/'received').exists() else b''
-        result = {'fixture':str(RUN),'host':HOST,'connect_address':'127.0.0.1','pane':pane,'non_owner':True,'sent':len(payload),'received':len(received),'exact':received==payload.encode(),'output_complete':b't4955-output-end' in output,'output_bytes':len(output),'timings':timings,'events':events,'status':page.locator('.project-terminal [role=status]').inner_text()}
+        result = {'fixture':str(RUN),'host':HOST,'connect_address':'127.0.0.1','pane':pane,'non_owner':True,'sent':len(payload),'received':len(received),'exact':received==payload.encode(),'output_complete':b't4955-output-end' in output,'output_bytes':len(output),'timings':timings,'events':events,'status':page.locator('.project-terminal-header > [role=status]:not(.project-terminal-note)').inner_text()}
         (RUN/'result.json').write_text(json.dumps(result,indent=2))
         print(json.dumps(result),flush=True)
         browser.close()

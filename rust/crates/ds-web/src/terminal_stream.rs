@@ -753,6 +753,12 @@ impl Snapshot {
         }
     }
 
+    /// The pane's size as the snapshot read it: `(columns, rows)`. A terminal client must use
+    /// exactly this size. tmux draws for it, so a client with another size wraps and jumps.
+    pub fn size(&self) -> (usize, usize) {
+        self.size
+    }
+
     /// Screen mode set explicitly, attributes reset, screen cleared (scrollback kept), rows with
     /// no newline after the last, attributes reset, cursor placed.
     fn frame(&self) -> Vec<u8> {
@@ -773,6 +779,18 @@ impl Snapshot {
         out.extend_from_slice(format!("\x1b[0m\x1b[{};{column}H", self.cursor.1 + 1).as_bytes());
         out
     }
+}
+
+/// The text message that tells a terminal client the pane's size (t5007). It goes out before
+/// each screen frame; pane output is always binary, so a client tells the two apart by type.
+pub fn size_message(cols: usize, rows: usize) -> String {
+    format!(r#"{{"type":"size","cols":{cols},"rows":{rows}}}"#)
+}
+
+/// True for the control notification tmux sends when a window's layout, and so possibly the
+/// pane's size, changed (another client resized the window).
+pub fn layout_changed(line: &[u8]) -> bool {
+    line.starts_with(b"%layout-change ")
 }
 
 /// Ignore notifications for other panes, and reject malformed escapes.
@@ -797,6 +815,7 @@ mod tests {
     use super::{
         decode_tmux_output, eligible_agent, input_command, pane_output, resolve_live_agent,
     };
+    use super::{layout_changed, size_message};
     use super::{snapshot_command, ControlClient, ControlLines, ControlReply, Snapshot};
     use serde_json::json;
 
@@ -1037,6 +1056,37 @@ mod tests {
             frame = snapshot.observe(line)?;
         }
         Ok(frame)
+    }
+
+    /// t5007: the client is told the pane's size, so it never draws for another one.
+    #[test]
+    fn the_snapshot_reports_the_pane_size_and_a_layout_change_is_recognised() {
+        let mut snapshot = Snapshot::default();
+        let lines: &[&[u8]] = &[
+            b"%begin 10 5 1\n",
+            b"0 0 0 132 2\n",
+            b"row one\n",
+            b"row two\n",
+            b"%end 10 5 1\n",
+        ];
+        let mut frame = None;
+        for line in lines {
+            frame = snapshot.observe(line).unwrap();
+        }
+        assert!(frame.is_some());
+        assert_eq!(snapshot.size(), (132, 2));
+        assert_eq!(
+            size_message(132, 2),
+            r#"{"type":"size","cols":132,"rows":2}"#
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&size_message(80, 24)).unwrap();
+        assert_eq!(parsed, json!({"type": "size", "cols": 80, "rows": 24}));
+
+        assert!(layout_changed(
+            b"%layout-change @3 b25d,132x40,0,0,7 b25d,132x40,0,0,7 *\n"
+        ));
+        assert!(!layout_changed(b"%output %7 %layout-change @3\n"));
+        assert!(!layout_changed(b"%window-renamed @3 x\n"));
     }
 
     /// t4601: rows are taken by count, so screen text that spells a reply marker is data; the
