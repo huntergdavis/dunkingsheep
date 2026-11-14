@@ -192,6 +192,12 @@ pub fn clean(
 pub fn render_text(result: &Value) -> String {
     let list = |key: &str| result[key].as_array().cloned().unwrap_or_default();
     let mut out = String::new();
+    // What "no process works there" rests on, when some processes refused inspection
+    // (`worktree_disk::note_uninspected`). Said before anything else, for a dry run and for a
+    // run that deleted.
+    if let Some(assumes) = result["eligibility_assumes"].as_str() {
+        out.push_str(&format!("ASSUMPTION: {assumes}\n"));
+    }
     if result["apply"] == true {
         for item in list("deleted") {
             out.push_str(&format!(
@@ -342,6 +348,19 @@ mod tests {
         assert!(lines.is_empty());
         assert!(dir.join("rust/target/debug/artifact").exists());
         assert!(render_text(&result).contains("dry run: nothing was deleted; 1 build caches"));
+        assert!(!render_text(&result).contains("ASSUMPTION"));
+        // With processes that refused inspection, the dry run says what it assumes.
+        let mut assumed = result.clone();
+        worktree_disk::note_uninspected(&mut assumed, 11, 227);
+        let text = render_text(&assumed);
+        assert!(
+            text.starts_with("ASSUMPTION: 11 processes of this user and 227 of other users could not be inspected"),
+            "{text}"
+        );
+        assert_eq!(
+            assumed["uninspected_processes"],
+            json!({"own": 11, "other_users": 227})
+        );
     }
 
     #[test]
@@ -387,6 +406,16 @@ mod tests {
         let leftovers: Vec<_> = fs::read_dir(dir.join("rust")).unwrap().flatten().collect();
         assert!(leftovers.is_empty(), "no renamed directory is left behind");
         assert!(render_text(&result).contains("deleted 1 build caches"));
+        // And a run that deleted says the same.
+        let mut assumed = result.clone();
+        worktree_disk::note_uninspected(&mut assumed, 0, 3);
+        let text = render_text(&assumed);
+        assert!(
+            text.starts_with("ASSUMPTION: 0 processes of this user and 3 of other users"),
+            "{text}"
+        );
+        assert!(text.contains("deleted 1 build caches"), "{text}");
+        assert!(assumed["eligibility_assumes"].is_string());
     }
 
     #[test]

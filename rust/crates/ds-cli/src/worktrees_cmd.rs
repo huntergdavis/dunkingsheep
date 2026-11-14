@@ -283,23 +283,39 @@ pub fn clean_command(
     let uid = std::fs::metadata("/proc/self")
         .map(|meta| std::os::unix::fs::MetadataExt::uid(&meta))
         .unwrap_or(u32::MAX);
-    let busy = || worktree_disk::busy_paths(Path::new("/proc"), &root, uid).map(|scan| scan.paths);
+    // Processes that refused inspection, at the scan and at every re-check: the largest count
+    // seen is what the result reports, because each deletion rested on that assumption.
+    let uninspected = std::cell::Cell::new((0u64, 0u64));
+    let busy = || {
+        worktree_disk::busy_paths(Path::new("/proc"), &root, uid).map(|scan| {
+            let (own, other) = uninspected.get();
+            uninspected.set((
+                own.max(scan.uninspected_own),
+                other.max(scan.uninspected_other),
+            ));
+            scan.paths
+        })
+    };
     let budget = worktree_disk::Budget::new(
         max_seconds.unwrap_or(DEFAULT_MAX_SECONDS),
         max_dirs.map_or(DEFAULT_MAX_DIRS, |dirs| dirs.max(0) as usize),
     );
     let mut log = |line: &str| eprintln!("worktrees clean: {line}");
     match ds_core::worktree_clean::clean(&root, &wall_now, &link, &busy, &budget, apply, &mut log) {
-        Ok(result) => Outcome {
+        Ok(mut result) => Outcome {
             code: i32::from(
                 result["failed"]
                     .as_array()
                     .is_some_and(|failed| !failed.is_empty()),
             ),
-            stdout: if json {
-                format!("{}\n", sorted_json(&result))
-            } else {
-                ds_core::worktree_clean::render_text(&result)
+            stdout: {
+                let (own, other) = uninspected.get();
+                worktree_disk::note_uninspected(&mut result, own, other);
+                if json {
+                    format!("{}\n", sorted_json(&result))
+                } else {
+                    ds_core::worktree_clean::render_text(&result)
+                }
             },
             stderr: String::new(),
         },
