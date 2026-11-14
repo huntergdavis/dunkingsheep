@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn the_fixture_screens_read_as_the_reader_reads_real_codex() {
         // The premise of the tests below: the hint is an empty box, the placeholder is text.
-        let mut p = codex_pane();
+        let p = codex_pane();
         script(&p, [codex_hint(), codex_paste(601)]);
         assert_eq!(Some(false), box_holds(&p, P, &long_text()));
         assert_eq!(Some(true), box_holds(&p, P, &long_text()));
