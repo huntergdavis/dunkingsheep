@@ -7006,3 +7006,118 @@ mod t3379_first_sighting {
         );
     }
 }
+
+// ---- t4681: an inbox notice leaves a draft alone only where a person types ----
+
+fn t4681_notice_flock(owner_lane: bool) -> (tempfile::TempDir, std::sync::Arc<Flock>) {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = std::sync::Arc::new(Flock::new(
+        dir.path().join("launches.json"),
+        dir.path(),
+        false,
+    ));
+    if owner_lane {
+        let mut roles = crate::roles::Roles::new(
+            &crate::config::Env::default(),
+            Some(dir.path().join("roles.json")),
+            Some(dir.path().join("tokens.json")),
+            None,
+        )
+        .unwrap();
+        roles
+            .register(P, "owner", None, None, None, None, None, None)
+            .unwrap();
+        flock.attach_roles(roles, None);
+    }
+    let mut notice = Message::new(
+        "m-notice",
+        P,
+        "worker",
+        "[inbox] new message for worker",
+        "notice",
+    );
+    notice.is_notice = true;
+    flock.outbox.lock().unwrap().insert(P.into(), vec![notice]);
+    (dir, flock)
+}
+
+fn t4681_notice_status(flock: &Flock) -> Option<String> {
+    outbox_lock(&flock.outbox)
+        .get(P)
+        .and_then(|queue| queue.iter().find(|row| row.id == "m-notice"))
+        .map(|row| row.status.clone())
+}
+
+#[test]
+fn a_notice_to_an_agent_lane_with_leftover_text_is_not_held_for_a_draft() {
+    // Exactly as before t4681: leftover text in an ordinary lane's box is flushed with one key
+    // and the notice goes in. Such a lane must never go deaf over stray text.
+    let (_dir, flock) = t4681_notice_flock(false);
+    let mut pane = submit_pane("idle");
+    pane.screen_script.borrow_mut().clear();
+    pane.screens
+        .insert(P.into(), submit_pending_screen("leftover text"));
+
+    let outcome = flock.deliver_message("m-notice", 1.0, &mut pane, || None);
+
+    assert!(
+        !pane.keys.is_empty(),
+        "the leftover text is flushed as before ({outcome:?})"
+    );
+    let detail = outbox_lock(&flock.outbox)
+        .get(P)
+        .and_then(|queue| queue.iter().find(|row| row.id == "m-notice"))
+        .and_then(|row| row.detail.clone())
+        .unwrap_or_default();
+    assert!(
+        !detail.contains("human_draft"),
+        "an agent lane's notice is never held for a draft: {detail}"
+    );
+}
+
+#[test]
+fn a_notice_to_an_owner_lane_waits_for_the_draft_and_is_never_undeliverable() {
+    let (_dir, flock) = t4681_notice_flock(true);
+    let mut pane = submit_pane("idle");
+    pane.screen_script.borrow_mut().clear();
+    pane.screens
+        .insert(P.into(), submit_pending_screen("the owner is typing"));
+
+    // 13 holds: more than the 10 that mark any refused message undeliverable.
+    for attempt in 0..13 {
+        let outcome =
+            flock.deliver_message("m-notice", 1.0 + attempt as f64 * 1000.0, &mut pane, || {
+                None
+            });
+        assert_eq!(DeliveryOutcome::Held, outcome, "attempt {attempt}");
+        assert_eq!(
+            Some("queued".to_string()),
+            t4681_notice_status(&flock),
+            "attempt {attempt}: a person's draft never makes the notice undeliverable"
+        );
+    }
+    assert!(pane.typed.is_empty(), "nothing typed after the draft");
+    assert!(pane.keys.is_empty(), "no key submits the owner's draft");
+
+    // The owner sends their message; the box is empty: the notice goes in.
+    pane.screens.insert(P.into(), submit_live_screen());
+    pane.receipt_ok = true;
+    let outcome = flock.deliver_message("m-notice", 99_000.0, &mut pane, || None);
+    let detail = flock
+        .message_history
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|row| row.id == "m-notice")
+        .and_then(|row| row.detail.clone());
+    assert_eq!(
+        DeliveryOutcome::Sent,
+        outcome,
+        "{detail:?} typed {:?}",
+        pane.typed
+    );
+    assert_eq!(
+        vec![(P.to_string(), "[inbox] new message for worker".to_string())],
+        pane.typed
+    );
+}

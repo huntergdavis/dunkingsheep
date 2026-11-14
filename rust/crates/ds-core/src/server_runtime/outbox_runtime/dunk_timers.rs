@@ -315,14 +315,6 @@ fn human_draft(blocker: Option<&str>) -> bool {
     matches!(blocker, Some("human_draft"))
 }
 
-/// t4681: a registered owner lane is a pane a person uses; scheduled text is never typed there.
-fn owner_lane(flock: &Flock, pane: &str) -> bool {
-    flock
-        .with_roles(|roles, _| roles.owners())
-        .map(|owners| owners.iter().any(|owner| owner == pane))
-        .unwrap_or(false)
-}
-
 /// t4681: store the dunk as an inbox row instead of typing it, log what happened and advance the
 /// schedule. `Some(done)` when it was stored or is already waiting; `None` when the store failed
 /// and the caller should hold.
@@ -569,7 +561,7 @@ fn run_dunk_timer(
         if signal.cancelled.load(Ordering::Acquire) {
             break;
         }
-        if owner_lane(&flock, pane) {
+        if flock.is_owner_lane(pane) {
             match store_instead_of_typing(&flock, &inbox, &handle, pane, "owner lane") {
                 Some(done) => {
                     save_timer_state(&flock, &handle, store.as_ref());
@@ -614,6 +606,7 @@ fn run_dunk_timer(
             continue;
         }
         if sent {
+            flock.set_dunk_draft(pane, false);
             log_dunk(
                 &handle,
                 pane,
@@ -633,7 +626,9 @@ fn run_dunk_timer(
             }
             timer_wait(&signal, &observed_wake, 1.0);
         } else if human_draft(blocker.as_deref()) {
-            // A person's text is in the box: nothing was typed. The dunk waits in the inbox.
+            // A person's text is in the box: nothing was typed. The dunk waits in the inbox, and
+            // its notice must not flush that draft either.
+            flock.set_dunk_draft(pane, true);
             match store_instead_of_typing(
                 &flock,
                 &inbox,

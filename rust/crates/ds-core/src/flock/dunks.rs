@@ -1362,6 +1362,38 @@ impl Flock {
         Ok((handle, running))
     }
 
+    /// t4681: whether `pane_id` is a registered owner lane, the pane a person types in. No role
+    /// registry, or a registry that cannot be read, is "no".
+    pub(crate) fn is_owner_lane(&self, pane_id: &str) -> bool {
+        self.with_roles(|roles, _| roles.owners())
+            .map(|owners| owners.iter().any(|owner| owner == pane_id))
+            .unwrap_or(false)
+    }
+
+    /// t4681: remember (or forget) that a scheduled dunk found a person's draft in this pane.
+    pub(crate) fn set_dunk_draft(&self, pane_id: &str, present: bool) {
+        let mut panes = self
+            .dunk_draft_panes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if present {
+            panes.insert(pane_id.to_owned());
+        } else {
+            panes.remove(pane_id);
+        }
+    }
+
+    /// t4681: whether a notice to this pane must leave a draft alone: a registered owner lane,
+    /// or a pane where a scheduled dunk has just been refused over a person's draft.
+    pub(crate) fn notice_preserves_draft(&self, pane_id: &str) -> bool {
+        self.is_owner_lane(pane_id)
+            || self
+                .dunk_draft_panes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(pane_id)
+    }
+
     /// t4681: store a scheduled dunk as ONE inbox row in its target lane's mailbox instead of
     /// typing it, for a pane a person is using. The row is keyed by the dunk (`dunk:<id>`): while
     /// an earlier row of the same dunk is still unread nothing is stored again, but the lane is

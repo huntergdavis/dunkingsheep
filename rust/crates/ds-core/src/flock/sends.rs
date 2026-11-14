@@ -4407,9 +4407,13 @@ impl Flock {
         let options = SendGuardOptions {
             hold_while_typing: message.hold_while_typing,
             allow_modal: message.kind == "keys",
-            // t4681: a one-line inbox notice and a queued dunk wait for an empty box; they are
-            // never typed after, and never submit, a draft a person left there.
-            preserve_draft: message.is_notice || message.dunk_delivery.is_some(),
+            // t4681: a queued dunk never submits or follows a draft that is not ours. A one-line
+            // inbox notice does the same ONLY for a registered owner lane (the pane a person
+            // types in) or a pane where a scheduled dunk has just been refused over a draft; for
+            // every other lane a notice behaves exactly as before (it flushes leftover text and
+            // goes in), so an agent lane with stray text cannot go deaf.
+            preserve_draft: message.dunk_delivery.is_some()
+                || (message.is_notice && self.notice_preserves_draft(&message.pane_id)),
             inconclusive_fallback: message.holds >= HOLD_ATTEMPT_LIMIT,
         };
         let is_keys = message.kind == "keys";
@@ -4487,12 +4491,16 @@ impl Flock {
             let reason = blocker_reason.as_deref();
             let permanent = detail.starts_with("dead session (")
                 || detail == "the lane's recorded process is gone";
+            // t4681: a person's draft in an owner lane's box is a wait, not a refusal. It is
+            // retried on the usual schedule and never counted toward `undeliverable`; the row
+            // stays in the mailbox meanwhile.
+            let waiting_for_person = reason == Some("human_draft") && self.is_owner_lane(&pane_id);
             self.record_outbox_hold(OutboxHold {
                 message: &message,
                 now,
                 permanent,
                 reason,
-                refused_detail: Some(&detail),
+                refused_detail: (!waiting_for_person).then_some(detail.as_str()),
                 signature: hold_signature,
             })
         } else {
@@ -4502,6 +4510,8 @@ impl Flock {
                 "failed"
             }
             .into();
+            // Something of ours went into the box: the person's draft is no longer there.
+            self.set_dunk_draft(&pane_id, false);
             message.detail = Some(detail.clone());
             message.finished_at = Some(clock::now_s());
             self.set_last_message(if ok.unwrap_or(false) {
