@@ -86,6 +86,20 @@ pub trait ReviewTaskActor {
 
     fn list_review_rows(&self) -> ReviewFuture<'_, Result<Vec<ReviewTaskRow>, String>>;
 
+    /// t4704: blocked tasks waiting on a pull request. A store that keeps none lists none.
+    fn pr_waits(&self) -> ReviewFuture<'_, Result<Vec<crate::tasks::pr_wait::PrWait>, String>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    /// t4704: record what was observed of a waited-on pull request; whether it was applied.
+    fn resolve_pr_wait<'a>(
+        &'a self,
+        _wait: &'a crate::tasks::pr_wait::PrWait,
+        _outcome: crate::tasks::pr_wait::PrOutcome,
+    ) -> ReviewFuture<'a, Result<bool, String>> {
+        Box::pin(async { Ok(false) })
+    }
+
     fn task_status<'a>(&'a self, id: &'a str) -> ReviewFuture<'a, Result<String, String>>;
 
     fn cancel_review<'a>(
@@ -196,6 +210,26 @@ impl ReviewTaskActor for Tasks {
             Tasks::get(self, id)
                 .await
                 .map(|task| task.status)
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn pr_waits(&self) -> ReviewFuture<'_, Result<Vec<crate::tasks::pr_wait::PrWait>, String>> {
+        Box::pin(async move {
+            Tasks::blocked_pr_waits(self)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn resolve_pr_wait<'a>(
+        &'a self,
+        wait: &'a crate::tasks::pr_wait::PrWait,
+        outcome: crate::tasks::pr_wait::PrOutcome,
+    ) -> ReviewFuture<'a, Result<bool, String>> {
+        Box::pin(async move {
+            Tasks::resolve_pr_wait(self, wait, outcome)
+                .await
                 .map_err(|error| error.to_string())
         })
     }
@@ -361,6 +395,30 @@ impl ReviewTaskActor for Flock {
         Box::pin(async move {
             let tasks = tasks.map_err(|error| error.to_string())?;
             Tasks::list_review_rows_visible(&tasks)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn pr_waits(&self) -> ReviewFuture<'_, Result<Vec<crate::tasks::pr_wait::PrWait>, String>> {
+        let tasks = attached_review_tasks(self);
+        Box::pin(async move {
+            let tasks = tasks.map_err(|error| error.to_string())?;
+            Tasks::blocked_pr_waits(&tasks)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn resolve_pr_wait<'a>(
+        &'a self,
+        wait: &'a crate::tasks::pr_wait::PrWait,
+        outcome: crate::tasks::pr_wait::PrOutcome,
+    ) -> ReviewFuture<'a, Result<bool, String>> {
+        let tasks = attached_review_tasks(self);
+        Box::pin(async move {
+            let tasks = tasks.map_err(|error| error.to_string())?;
+            Tasks::resolve_pr_wait(&tasks, wait, outcome)
                 .await
                 .map_err(|error| error.to_string())
         })
@@ -3010,7 +3068,102 @@ where
                 append_report(&mut report, "cancelled", Value::String(row.id.clone()));
             }
         }
+        // t4704: tasks blocked with `--waiting-on pr:<repo>#<n>`. A separate step after the
+        // review bookkeeping above; it only reopens or annotates a waiting task.
+        if !dry_run {
+            self.sweep_pr_waits(&listed, &seen, &token, &mut report)
+                .await;
+        }
         Ok(report)
+    }
+
+    /// t4704: for every blocked task waiting on a pull request of a repository this sweep
+    /// listed: still open (it was in the open listing) means nothing to do; otherwise its
+    /// detail is read once. Merged reopens the task; closed without merging leaves it blocked
+    /// with a note. A wait on a repository this sweep did not list, an unreadable detail and
+    /// a store error are reported and leave the task as it is. Never fails the sweep.
+    async fn sweep_pr_waits(
+        &self,
+        listed: &BTreeSet<String>,
+        seen: &BTreeSet<(String, i64)>,
+        token: &str,
+        report: &mut Value,
+    ) {
+        use crate::tasks::pr_wait::PrOutcome;
+        let waits = match self.flock.pr_waits().await {
+            Ok(waits) => waits,
+            Err(error) => {
+                append_report(
+                    report,
+                    "errors",
+                    Value::String(format!("pr waits: {error}")),
+                );
+                return;
+            }
+        };
+        for wait in waits {
+            let pr = format!("{}#{}", wait.repo, wait.number);
+            if !listed.contains(&wait.repo) {
+                append_report(
+                    report,
+                    "pr_waits_unwatched",
+                    serde_json::json!({"task": wait.id, "pr": pr}),
+                );
+                continue;
+            }
+            if seen.contains(&(wait.repo.clone(), wait.number)) {
+                continue;
+            }
+            let detail = match self.raw_pull_detail(&wait.repo, wait.number, token).await {
+                Ok(detail) => detail,
+                Err(error) => {
+                    append_report(
+                        report,
+                        "errors",
+                        Value::String(format!("{pr} wait of {}: {error}", wait.id)),
+                    );
+                    continue;
+                }
+            };
+            let state = detail.get("state").and_then(Value::as_str);
+            let merged = detail.get("merged").and_then(Value::as_bool) == Some(true)
+                || state == Some("merged")
+                || detail.get("merged_at").is_some_and(|at| at.is_string());
+            let outcome = match (state, merged) {
+                (Some("open"), false) => continue,
+                (_, true) => PrOutcome::Merged,
+                (Some("closed"), false) => PrOutcome::ClosedUnmerged,
+                _ => {
+                    append_report(
+                        report,
+                        "errors",
+                        Value::String(format!(
+                            "{pr} wait of {}: unknown PR state {}",
+                            wait.id,
+                            python_repr_value(detail.get("state"))
+                        )),
+                    );
+                    continue;
+                }
+            };
+            match self.flock.resolve_pr_wait(&wait, outcome).await {
+                Ok(true) => append_report(
+                    report,
+                    if outcome == PrOutcome::Merged {
+                        "pr_waits_opened"
+                    } else {
+                        "pr_waits_closed"
+                    },
+                    serde_json::json!({"task": wait.id, "pr": pr}),
+                ),
+                Ok(false) => {}
+                Err(error) => append_report(
+                    report,
+                    "errors",
+                    Value::String(format!("{pr} wait of {}: {error}", wait.id)),
+                ),
+            }
+        }
     }
 
     async fn raw_pull_detail(&self, repo: &str, number: i64, token: &str) -> Result<Value, String> {

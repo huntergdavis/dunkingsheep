@@ -4700,3 +4700,156 @@ async fn accounting_retry_holds_missing_provenance_and_a_moved_head() {
             .all(|r| r.method == "GET"));
     }
 }
+
+// ---- t4704 slice 2: tasks blocked with `--waiting-on pr:<repo>#<n>` ----
+
+async fn pr_wait_store(tag: &str, reasons: &[&str]) -> (tempfile::TempDir, Tasks, Vec<String>) {
+    let dir = crate::testsupport::dir(tag);
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let mut ids = Vec::new();
+    for reason in reasons {
+        let task = store.add("global", reason, "").await.unwrap();
+        store.block(&task.id, reason).await.unwrap();
+        ids.push(task.id);
+    }
+    (dir, store, ids)
+}
+
+#[tokio::test]
+async fn run_reopens_a_task_whose_waited_pr_merged_and_annotates_one_closed_unmerged() {
+    let (_dir, store, ids) = pr_wait_store(
+        "review-sync-pr-waits",
+        &[
+            "waiting-pr:o/r#10: the fix",
+            "waiting-pr:o/r#11: the other fix",
+            "waiting-pr:o/r#12:",
+            "waiting-pr:else/where#1: not a repository this sync lists",
+            "waiting-release: next daemon",
+        ],
+    )
+    .await;
+    // No open pull requests; then one detail read per wait on o/r, oldest first.
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, json!([])),
+        github_response(200, json!({"state": "closed", "merged": true})),
+        github_response(200, json!({"state": "closed", "merged": false})),
+        github_response(200, json!({"state": "open", "merged": false})),
+    ]);
+    let (sync, report) = run_actual_review_sync(store, transport, 1).await;
+    assert_eq!(
+        report["pr_waits_opened"],
+        json!([{"task": ids[0], "pr": "o/r#10"}])
+    );
+    assert_eq!(
+        report["pr_waits_closed"],
+        json!([{"task": ids[1], "pr": "o/r#11"}])
+    );
+    assert_eq!(
+        report["pr_waits_unwatched"],
+        json!([{"task": ids[3], "pr": "else/where#1"}])
+    );
+    assert_eq!(report["errors"], json!([]));
+    {
+        let requests = sync.transport.requests.lock().unwrap();
+        assert_eq!(4, requests.len(), "one listing and three detail reads");
+        assert!(requests.iter().all(|request| request.method == "GET"));
+        assert!(requests[1].url.ends_with("/repos/o/r/pulls/10"));
+    }
+    let store = sync.flock;
+    let merged = store.get(&ids[0]).await.unwrap();
+    assert_eq!(
+        (merged.status.as_str(), merged.block_reason),
+        ("open", None)
+    );
+    let closed = store.get(&ids[1]).await.unwrap();
+    assert_eq!(closed.status, "blocked");
+    assert!(closed
+        .block_reason
+        .unwrap()
+        .starts_with("waiting-pr-closed:o/r#11: "));
+    for (id, reason) in [
+        (&ids[2], "waiting-pr:o/r#12:"),
+        (
+            &ids[3],
+            "waiting-pr:else/where#1: not a repository this sync lists",
+        ),
+        (&ids[4], "waiting-release: next daemon"),
+    ] {
+        let task = store.get(id).await.unwrap();
+        assert_eq!(task.status, "blocked");
+        assert_eq!(task.block_reason.as_deref(), Some(reason));
+    }
+
+    // The next sweep reads only the wait that is still live; nothing is applied twice.
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, json!([])),
+        github_response(200, json!({"state": "open", "merged": false})),
+    ]);
+    let (sync, report) = run_actual_review_sync(store, transport, 1).await;
+    assert!(report.get("pr_waits_opened").is_none(), "{report}");
+    assert!(report.get("pr_waits_closed").is_none(), "{report}");
+    assert_eq!(2, sync.transport.requests.lock().unwrap().len());
+    assert_eq!(sync.flock.get(&ids[0]).await.unwrap().status, "open");
+}
+
+#[tokio::test]
+async fn run_leaves_a_pr_wait_alone_on_a_dry_run_an_unknown_state_or_a_failed_read() {
+    let (_dir, store, ids) = pr_wait_store(
+        "review-sync-pr-waits-untouched",
+        &["waiting-pr:o/r#10: a", "waiting-pr:o/r#11: b"],
+    )
+    .await;
+    // Dry run: the listing only, no detail read, nothing written.
+    let sync = ReviewSync::with_transport(
+        store,
+        FakeReviewTokens(Ok("test-token".into())),
+        FakeReviewPolicy { required: 1 },
+        "https://api.example.test",
+        FakeReviewTransport::with_responses([github_response(200, json!([]))]),
+    );
+    let report = sync.run(true).await.unwrap();
+    assert!(report.get("pr_waits_opened").is_none(), "{report}");
+    assert_eq!(1, sync.transport.requests.lock().unwrap().len());
+
+    // An unknown state and a server error are reported; both tasks stay blocked as they were.
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, json!([])),
+        github_response(200, json!({"state": "draft"})),
+        github_response(500, json!({"message": "boom"})),
+    ]);
+    let (sync, report) = run_actual_review_sync(sync.flock, transport, 1).await;
+    let errors = report["errors"].as_array().unwrap();
+    assert_eq!(2, errors.len(), "{report}");
+    assert!(errors[0].as_str().unwrap().contains("o/r#10 wait of"));
+    assert!(errors[0].as_str().unwrap().contains("unknown PR state"));
+    assert!(errors[1].as_str().unwrap().contains("o/r#11 wait of"));
+    for (id, reason) in [
+        (&ids[0], "waiting-pr:o/r#10: a"),
+        (&ids[1], "waiting-pr:o/r#11: b"),
+    ] {
+        let task = sync.flock.get(id).await.unwrap();
+        assert_eq!(task.status, "blocked");
+        assert_eq!(task.block_reason.as_deref(), Some(reason));
+    }
+}
+
+#[tokio::test]
+async fn run_does_not_read_the_detail_of_a_waited_pr_that_is_in_the_open_listing() {
+    let (_dir, store, ids) =
+        pr_wait_store("review-sync-pr-wait-open", &["waiting-pr:o/r#7: review"]).await;
+    // The same four requests a fresh open pull request costs without any wait.
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "fresh-head", "unclaimed/topic")),
+        github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+        github_response(
+            200,
+            json!({"body":"details", "additions":1, "deletions":0, "changed_files":1}),
+        ),
+        github_response(201, json!({"state":"pending"})),
+    ]);
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+    assert_eq!(4, sync.transport.requests.lock().unwrap().len());
+    assert!(report.get("pr_waits_opened").is_none(), "{report}");
+    let task = sync.flock.get(&ids[0]).await.unwrap();
+    assert_eq!(task.status, "blocked");
+}
