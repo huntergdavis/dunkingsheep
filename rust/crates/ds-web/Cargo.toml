@@ -9,6 +9,9 @@ description = "Dunking Sheep web adapter foundation (docs/rust/RUST_PORT.md sect
 axum = { workspace = true, features = ["ws", "query"] }
 base64 = "0.22"
 ring = "0.17"
+# Already locked through Tokio. Read local interfaces/hostname without shell commands or DNS.
+# Discovery failure keeps only independently discovered local names/addresses, or fails closed.
+libc = "0.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 subtle = "2"
 # Reuse the already-locked chrono used by ds-core to match Python's local log timestamp;
