@@ -495,7 +495,8 @@ where
     fn call(&mut self, mut request: Request<B>) -> Self::Future {
         let decoded = percent_decode(request.uri().path());
         if is_python_route(&decoded, request.method())
-            || (request.method() == Method::GET && decoded == "/api/projects")
+            || (request.method() == Method::GET
+                && matches!(decoded.as_str(), "/api/projects" | "/api/mailboxes"))
             || (request.method() == Method::POST && decoded == "/api/ops-board/question")
             || (request.method() == Method::POST && decoded == "/api/pane-inbox")
             || (self.terminal_stream && is_terminal_route(&decoded))
