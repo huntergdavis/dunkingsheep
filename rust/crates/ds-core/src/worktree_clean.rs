@@ -123,22 +123,56 @@ pub fn delete_cache(target: &Path) -> Result<(), String> {
     })
 }
 
-/// The cleanup. Scans like the report, then handles every cache the scan found eligible:
-/// without `apply` it is listed as `would_delete`; with `apply` it is re-checked with fresh
-/// readings (`link` and `busy` are called again for it) and deleted only if every condition
-/// still holds. `log` receives one line per deleted cache, with its size.
+/// The paths a reviewed dry run listed, from its JSON output. The file must be a dry run
+/// (`apply` false) of the same root, so a list made for one root cannot be applied to another.
+pub fn reviewed_list(text: &str, root: &Path) -> Result<Vec<PathBuf>, String> {
+    let listing: Value =
+        serde_json::from_str(text).map_err(|error| format!("it is not JSON: {error}"))?;
+    if listing["apply"] != false {
+        return Err("it is not the output of a dry run (apply is not false)".into());
+    }
+    if listing["root"].as_str().map(Path::new) != Some(root) {
+        return Err(format!(
+            "it was made for another root ({})",
+            listing["root"].as_str().unwrap_or("none")
+        ));
+    }
+    let Some(items) = listing["would_delete"].as_array() else {
+        return Err("it has no would_delete list".into());
+    };
+    items
+        .iter()
+        .map(|item| {
+            item["path"]
+                .as_str()
+                .map(PathBuf::from)
+                .ok_or_else(|| "a would_delete entry has no path".to_string())
+        })
+        .collect()
+}
+
+/// The cleanup. Scans like the report, then handles every cache the scan found eligible.
+///
+/// `reviewed` is `None` for a dry run: each cache is listed as `would_delete`. For a run that
+/// deletes it is the list of a dry run somebody looked at (`reviewed_list`): a cache is
+/// deleted only when it is in that list AND, re-checked with fresh readings (`link` and `busy`
+/// are called again for it), every condition still holds. An eligible cache that is not in
+/// the list is skipped and reported, and so is a listed path that is not eligible now. `log`
+/// receives one line per deleted cache, with its size.
 pub fn clean(
     root: &Path,
     now: &dyn Fn() -> f64,
     link: &dyn Fn(&Path) -> PrLink,
     busy: &dyn Fn() -> Result<Vec<PathBuf>, String>,
     budget: &Budget,
-    apply: bool,
+    reviewed: Option<&[PathBuf]>,
     log: &mut dyn FnMut(&str),
 ) -> Result<Value, String> {
     let report = worktree_disk::report_within(root, now(), link, &busy(), budget)?;
     let (mut deleted, mut would_delete, mut kept, mut failed) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut not_in_list = Vec::new();
+    let mut eligible_now: Vec<PathBuf> = Vec::new();
     let mut freed: u64 = 0;
     for dir in report["dirs"].as_array().into_iter().flatten() {
         let Some(dir_path) = dir["path"].as_str().map(PathBuf::from) else {
@@ -152,8 +186,13 @@ pub fn clean(
                 continue;
             };
             let bytes = target["bytes"].as_u64().unwrap_or(0);
-            if !apply {
+            let Some(reviewed) = reviewed else {
                 would_delete.push(json!({"path": path, "bytes": bytes}));
+                continue;
+            };
+            eligible_now.push(path.clone());
+            if !reviewed.contains(&path) {
+                not_in_list.push(json!({"path": path, "bytes": bytes}));
                 continue;
             }
             // Fresh readings for this one cache, taken now.
@@ -173,9 +212,17 @@ pub fn clean(
             }
         }
     }
+    // Listed in the reviewed dry run, but not eligible in this run's scan: reported, untouched.
+    let listed_not_eligible: Vec<&PathBuf> = reviewed
+        .unwrap_or_default()
+        .iter()
+        .filter(|path| !eligible_now.contains(path))
+        .collect();
     Ok(json!({
         "root": root,
-        "apply": apply,
+        "apply": reviewed.is_some(),
+        "skipped_not_in_list": not_in_list,
+        "listed_not_eligible": listed_not_eligible,
         "partial": report["partial"],
         "partial_reason": report["partial_reason"],
         "skipped_dirs": report["skipped_dirs"],
@@ -219,6 +266,18 @@ pub fn render_text(result: &Value) -> String {
                 reasons.join("; ")
             ));
         }
+        for item in list("skipped_not_in_list") {
+            out.push_str(&format!(
+                "skipped {} (eligible, but not in the reviewed dry-run list)\n",
+                item["path"].as_str().unwrap_or("?")
+            ));
+        }
+        for item in list("listed_not_eligible") {
+            out.push_str(&format!(
+                "kept {} (in the reviewed list, but not eligible now)\n",
+                item.as_str().unwrap_or("?")
+            ));
+        }
         for item in list("failed") {
             out.push_str(&format!(
                 "FAILED {}: {}\n",
@@ -245,7 +304,8 @@ pub fn render_text(result: &Value) -> String {
         }
         out.push_str(&format!(
             "dry run: nothing was deleted; {} build caches, {bytes} bytes, look eligible. \
-             --apply re-checks each one and deletes those that still qualify\n",
+             Save this run's --json output, have it reviewed, and pass it to \
+             --apply --from FILE: only listed caches that still pass a full re-check are deleted\n",
             list("would_delete").len(),
         ));
     }
@@ -317,11 +377,28 @@ mod tests {
         Ok(Vec::new())
     }
 
+    /// A dry run, or a run that deletes with every worktree's `rust/target` in the reviewed
+    /// list.
     fn run(
         root: &Path,
         link: &dyn Fn(&Path) -> PrLink,
         busy: &dyn Fn() -> Result<Vec<PathBuf>, String>,
         apply: bool,
+    ) -> (Value, Vec<String>) {
+        let mut all: Vec<PathBuf> = fs::read_dir(root)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path().join("rust").join("target"))
+            .collect();
+        all.sort();
+        run_listed(root, link, busy, apply.then_some(all.as_slice()))
+    }
+
+    fn run_listed(
+        root: &Path,
+        link: &dyn Fn(&Path) -> PrLink,
+        busy: &dyn Fn() -> Result<Vec<PathBuf>, String>,
+        reviewed: Option<&[PathBuf]>,
     ) -> (Value, Vec<String>) {
         let mut lines = Vec::new();
         let result = clean(
@@ -330,11 +407,82 @@ mod tests {
             link,
             busy,
             &Budget::unlimited(),
-            apply,
+            reviewed,
             &mut |line| lines.push(line.to_string()),
         )
         .unwrap();
         (result, lines)
+    }
+
+    #[test]
+    fn only_caches_in_the_reviewed_dry_run_list_are_deleted() {
+        let home = crate::testsupport::dir("worktree-clean-listed");
+        let listed = worktree(home.path(), "a-wt").join("rust/target");
+        let unlisted = worktree(home.path(), "b-wt").join("rust/target");
+        // The reviewed list comes from a real dry run of this root, then loses one entry and
+        // gains one that is not eligible.
+        let (dry, _) = run_listed(home.path(), &merged, &idle, None);
+        let mut reviewed = reviewed_list(&dry.to_string(), home.path()).unwrap();
+        reviewed.sort();
+        assert_eq!(reviewed, [listed.clone(), unlisted.clone()]);
+        reviewed.retain(|path| path != &unlisted);
+        let gone = home.path().join("c-wt/rust/target");
+        reviewed.push(gone.clone());
+
+        let (result, lines) = run_listed(home.path(), &merged, &idle, Some(reviewed.as_slice()));
+        assert!(!listed.exists());
+        assert!(
+            unlisted.join("debug/artifact").exists(),
+            "eligible but not reviewed: kept"
+        );
+        assert_eq!(lines.len(), 1);
+        assert_eq!(result["deleted"].as_array().unwrap().len(), 1);
+        assert_eq!(result["skipped_not_in_list"][0]["path"], json!(unlisted));
+        assert_eq!(result["listed_not_eligible"], json!([gone]));
+        let text = render_text(&result);
+        assert!(
+            text.contains("(eligible, but not in the reviewed dry-run list)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("(in the reviewed list, but not eligible now)"),
+            "{text}"
+        );
+        // An empty reviewed list deletes nothing.
+        let (none, lines) = run_listed(home.path(), &merged, &idle, Some(&[][..]));
+        assert_eq!(none["deleted"], json!([]));
+        assert!(lines.is_empty() && unlisted.exists());
+    }
+
+    #[test]
+    fn a_reviewed_list_must_be_a_dry_run_of_the_same_root() {
+        let root = Path::new("/work/trees");
+        let dry = json!({"apply": false, "root": "/work/trees", "would_delete": [{"path": "/work/trees/a/target", "bytes": 1}]});
+        assert_eq!(
+            reviewed_list(&dry.to_string(), root).unwrap(),
+            [PathBuf::from("/work/trees/a/target")]
+        );
+        let refused = |value: Value| reviewed_list(&value.to_string(), root).unwrap_err();
+        let mut applied = dry.clone();
+        applied["apply"] = json!(true);
+        assert_eq!(
+            refused(applied),
+            "it is not the output of a dry run (apply is not false)"
+        );
+        let mut other = dry.clone();
+        other["root"] = json!("/elsewhere");
+        assert_eq!(refused(other), "it was made for another root (/elsewhere)");
+        assert_eq!(
+            refused(json!({"apply": false, "root": "/work/trees"})),
+            "it has no would_delete list"
+        );
+        assert_eq!(
+            refused(json!({"apply": false, "root": "/work/trees", "would_delete": [{"bytes": 1}]})),
+            "a would_delete entry has no path"
+        );
+        assert!(reviewed_list("not json", root)
+            .unwrap_err()
+            .starts_with("it is not JSON"));
     }
 
     #[test]

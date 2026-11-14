@@ -15753,6 +15753,7 @@
   "namespace": {
    "apply": false,
    "command": "worktrees",
+   "from": null,
    "json": false,
    "max_dirs": null,
    "max_seconds": null,
@@ -15772,6 +15773,7 @@
   "namespace": {
    "apply": false,
    "command": "worktrees",
+   "from": null,
    "json": true,
    "max_dirs": null,
    "max_seconds": null,
@@ -15791,6 +15793,7 @@
   "namespace": {
    "apply": false,
    "command": "worktrees",
+   "from": null,
    "json": true,
    "max_dirs": null,
    "max_seconds": null,
@@ -15811,6 +15814,7 @@
   "namespace": {
    "apply": false,
    "command": "worktrees",
+   "from": null,
    "json": false,
    "max_dirs": null,
    "max_seconds": null,
@@ -15830,6 +15834,28 @@
   "namespace": {
    "apply": true,
    "command": "worktrees",
+   "from": null,
+   "json": false,
+   "max_dirs": null,
+   "max_seconds": null,
+   "no_start_daemon": false,
+   "root": null,
+   "self_pane": null,
+   "socket": null,
+   "worktrees_command": "clean"
+  }
+ },
+ {
+  "argv": [
+   "worktrees",
+   "clean",
+   "--from",
+   "x"
+  ],
+  "namespace": {
+   "apply": false,
+   "command": "worktrees",
+   "from": "x",
    "json": false,
    "max_dirs": null,
    "max_seconds": null,
@@ -15850,6 +15876,7 @@
   "namespace": {
    "apply": false,
    "command": "worktrees",
+   "from": null,
    "json": false,
    "max_dirs": null,
    "max_seconds": 1.5,
@@ -15870,6 +15897,7 @@
   "namespace": {
    "apply": false,
    "command": "worktrees",
+   "from": null,
    "json": false,
    "max_dirs": 1,
    "max_seconds": null,

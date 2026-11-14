@@ -273,11 +273,37 @@ fn wall_now() -> f64 {
 pub fn clean_command(
     root: Option<&str>,
     apply: bool,
+    from: Option<&str>,
     max_seconds: Option<f64>,
     max_dirs: Option<i64>,
     json: bool,
 ) -> Outcome {
     let root = default_root(root);
+    let usage = |text: String| Outcome {
+        stdout: String::new(),
+        stderr: format!("worktrees clean: {text}\n"),
+        code: 2,
+    };
+    // Deleting needs the list of a dry run somebody reviewed; a list without --apply is a
+    // mistake too, not a silent dry run.
+    let reviewed = match (apply, from.filter(|from| !from.is_empty())) {
+        (false, None) => None,
+        (false, Some(_)) => return usage("--from is only used with --apply".into()),
+        (true, None) => {
+            return usage(
+                "--apply needs --from FILE, the saved --json output of a reviewed dry run".into(),
+            )
+        }
+        (true, Some(file)) => {
+            let listed = std::fs::read_to_string(file)
+                .map_err(|error| error.to_string())
+                .and_then(|text| ds_core::worktree_clean::reviewed_list(&text, &root));
+            match listed {
+                Ok(listed) => Some(listed),
+                Err(error) => return usage(format!("--from {file}: {error}")),
+            }
+        }
+    };
     let cache = PrCache::default();
     let link = |dir: &Path| live_link(dir, &cache, Some(RECHECK_PR_MAX_AGE));
     let uid = std::fs::metadata("/proc/self")
@@ -301,7 +327,15 @@ pub fn clean_command(
         max_dirs.map_or(DEFAULT_MAX_DIRS, |dirs| dirs.max(0) as usize),
     );
     let mut log = |line: &str| eprintln!("worktrees clean: {line}");
-    match ds_core::worktree_clean::clean(&root, &wall_now, &link, &busy, &budget, apply, &mut log) {
+    match ds_core::worktree_clean::clean(
+        &root,
+        &wall_now,
+        &link,
+        &busy,
+        &budget,
+        reviewed.as_deref(),
+        &mut log,
+    ) {
         Ok(mut result) => Outcome {
             code: i32::from(
                 result["failed"]
@@ -520,13 +554,54 @@ mod tests {
 
     #[test]
     fn clean_without_apply_on_an_unreadable_root_is_a_usage_error_and_deletes_nothing() {
-        let outcome = clean_command(Some("/nonexistent/worktree/root"), false, None, None, true);
+        let outcome = clean_command(
+            Some("/nonexistent/worktree/root"),
+            false,
+            None,
+            None,
+            None,
+            true,
+        );
         assert_eq!(outcome.code, 2);
         assert!(
             outcome.stderr.starts_with("worktrees clean: "),
             "{}",
             outcome.stderr
         );
+    }
+
+    #[test]
+    fn apply_is_refused_without_a_reviewed_dry_run_list_of_the_same_root() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().to_str().unwrap();
+        let refused = |apply: bool, from: Option<&str>| {
+            let outcome = clean_command(Some(root), apply, from, None, None, true);
+            assert_eq!(
+                (outcome.code, outcome.stdout.as_str()),
+                (2, ""),
+                "{}",
+                outcome.stderr
+            );
+            outcome.stderr
+        };
+        assert!(refused(true, None).contains("--apply needs --from FILE"));
+        assert!(refused(false, Some("x.json")).contains("--from is only used with --apply"));
+        assert!(refused(true, Some("/nonexistent/dry-run.json"))
+            .contains("--from /nonexistent/dry-run.json: "));
+        let other = home.path().join("other-root.json");
+        std::fs::write(
+            &other,
+            r#"{"apply": false, "root": "/elsewhere", "would_delete": []}"#,
+        )
+        .unwrap();
+        assert!(refused(true, other.to_str()).contains("it was made for another root (/elsewhere)"));
+        let applied = home.path().join("applied.json");
+        std::fs::write(
+            &applied,
+            format!(r#"{{"apply": true, "root": "{root}", "would_delete": []}}"#),
+        )
+        .unwrap();
+        assert!(refused(true, applied.to_str()).contains("it is not the output of a dry run"));
     }
 
     #[test]

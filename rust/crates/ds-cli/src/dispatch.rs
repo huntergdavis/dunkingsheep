@@ -3879,6 +3879,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             Some("clean") => crate::worktrees_cmd::clean_command(
                 text(ns, "root"),
                 matches!(ns.get("apply"), Some(Value::Bool(true))),
+                text(ns, "from"),
                 ns.get("max_seconds").and_then(Value::as_f64),
                 ns.get("max_dirs").and_then(Value::as_i64),
                 json,

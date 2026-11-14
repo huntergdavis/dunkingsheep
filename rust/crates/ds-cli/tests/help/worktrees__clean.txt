@@ -1,11 +1,13 @@
-usage: dunkingsheep worktrees clean [-h] [--root DIR] [--apply]
+usage: dunkingsheep worktrees clean [-h] [--root DIR] [--apply] [--from FILE]
                                     [--max-seconds S] [--max-dirs N] [--json]
 
 options:
   -h, --help       show this help message and exit
   --root DIR       the worktree root (default: ~/workspace/.dunk-port-work)
-  --apply          delete; every cache is checked again right before it is
-                   deleted
+  --apply          delete; needs --from, and every cache is checked again
+                   right before it is deleted
+  --from FILE      the saved --json output of a reviewed dry run of the same
+                   root; only caches listed in it are deleted
   --max-seconds S  stop scanning after S seconds (default: 300)
   --max-dirs N     scan at most N directories (default: 2000)
   --json
