@@ -194,13 +194,40 @@ impl<'a> OwnerConversations<'a> {
         before: Option<f64>,
         self_pane_id: Option<&str>,
     ) -> Result<Conversation, DunkError> {
+        self.conversation_window(limit, before, None, self_pane_id)
+    }
+
+    pub fn conversation_cursor(
+        &self,
+        limit: i64,
+        before_id: Option<&str>,
+        self_pane_id: Option<&str>,
+    ) -> Result<Conversation, DunkError> {
+        if !(1..=201).contains(&limit) {
+            return Err(DunkError::Refused(
+                "history page limit must be 1..201".into(),
+            ));
+        }
+        self.conversation_window(Some(limit), None, Some(before_id), self_pane_id)
+    }
+
+    fn conversation_window(
+        &self,
+        limit: Option<i64>,
+        before: Option<f64>,
+        cursor: Option<Option<&str>>,
+        self_pane_id: Option<&str>,
+    ) -> Result<Conversation, DunkError> {
         let store = self.authorised_store(self_pane_id)?;
         let limit = limit.filter(|limit| *limit != 0).unwrap_or(50);
         let mailboxes = self.conversation_mailboxes(&store)?;
         // Routine lane mail (review verdicts and notes, marked by subject) is kept in storage and listed nowhere
         // here (t3592). Owner decisions, owner blockers, owner replies and unmarked legacy mail stay listed.
-        let mut messages: Vec<Value> =
-            store.conversation_across_visible(&mailboxes, Some(limit), before)?;
+        let mut messages: Vec<Value> = if let Some(before_id) = cursor {
+            store.conversation_visible_cursor(&mailboxes, limit, before_id)?
+        } else {
+            store.conversation_across_visible(&mailboxes, Some(limit), before)?
+        };
         // `waiting` is the desk's list of owner questions. The window now also carries lane
         // mailboxes (t3535), but `reply()` only answers rows in the owner mailbox, so a lane's
         // unread mail must not be listed here: the same predicate `reply()` enforces.

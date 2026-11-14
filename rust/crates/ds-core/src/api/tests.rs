@@ -9503,6 +9503,61 @@ fn reply_stats_propagates_inbox_query_failures() {
 }
 
 #[test]
+fn owner_history_cursor_dispatch_starts_and_advances_without_consuming() {
+    let (_dir, flock, env) = owner_api_fixture("owner-history-cursor");
+    let inbox = flock.stores().inbox.unwrap();
+    for _ in 0..3 {
+        inbox
+            .send(&crate::inbox_store::Outgoing {
+                mailbox: "owner",
+                body: Some("history"),
+                ..Default::default()
+            })
+            .unwrap();
+    }
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_stats_receipts_conversation();
+    let page = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_conversation",
+        args(json!({"limit":2,"before_id":null})),
+        Some("w1:p1"),
+    )
+    .unwrap();
+    assert_eq!(page["count"], 2);
+    let cursor = page["messages"][0]["id"].clone();
+    let older = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_conversation",
+        args(json!({"limit":2,"before_id":cursor})),
+        Some("w1:p1"),
+    )
+    .unwrap();
+    assert_eq!(older["count"], 1);
+    assert_ne!(older["messages"][0]["id"], cursor);
+    for value in [
+        json!({"before_id":true}),
+        json!({"before_id":"i01"}),
+        json!({"before_id":null,"before":100}),
+        json!({"before_id":null,"limit":202}),
+    ] {
+        assert!(dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_conversation",
+            args(value),
+            Some("w1:p1")
+        )
+        .is_err());
+    }
+}
+
+#[test]
 fn h_owner_conversation_matches_python() {
     let (_dir, flock, env) = owner_api_fixture("owner-conversation");
     let inbox = flock.stores().inbox.unwrap();

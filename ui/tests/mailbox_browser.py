@@ -59,7 +59,7 @@ def mock(route):
     if url.path == '/api/channels':
         return fulfill(route, {'channels': []})
     if url.path == '/api/owner-thread':
-        return fulfill(route, {'items': []})
+        return fulfill(route, {'items': [], 'next_before': None})
     if url.path == '/api/mailboxes':
         more = bool(query.get('after'))
         rows = [{'mailbox': 'retired box', 'destination': 'Retired', 'unread': 0, 'total': 1,
