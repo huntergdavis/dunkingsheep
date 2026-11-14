@@ -31,6 +31,12 @@ pub const ROLES: [&str; 8] = [
 pub const LANE_ROLES: [&str; 5] = ["desk", "planner", "worker", "reviewer", "owner"];
 pub const TOKEN_ROLES: [&str; 3] = ["web", "system", "owner"];
 pub const DEFAULT_ROLE: &str = "anonymous";
+/// t4782: whether the pane list may be believed: owned by the daemon's user, and not writable
+/// by group or others.
+pub fn system_token_panes_trusted(file_uid: u32, mode: u32, daemon_uid: u32) -> bool {
+    file_uid == daemon_uid && mode & 0o022 == 0
+}
+
 /// t4782: the owner's list of panes a system token may be used from, by token label.
 pub const SYSTEM_TOKEN_PANES_FILE: &str = "system-token-panes.json";
 /// With no registry file at all (a fresh install, the test suite) a bound pane is a
@@ -491,12 +497,34 @@ impl Roles {
 
     /// t4782: the panes a system token with this label may be used from, as the owner listed
     /// them in `system-token-panes.json` beside the token file: `{"<label>": ["%12", ...]}`.
-    /// A missing, unreadable or malformed file lists nothing.
+    /// A missing, unreadable or malformed file lists nothing, and so does a file that is not
+    /// the daemon user's own or that group or others can write (one warning is logged).
     pub fn system_token_panes(&self, label: &str) -> Vec<String> {
         let Some(dir) = self.tokens_path.parent() else {
             return Vec::new();
         };
-        let Ok(text) = std::fs::read_to_string(dir.join(SYSTEM_TOKEN_PANES_FILE)) else {
+        let path = dir.join(SYSTEM_TOKEN_PANES_FILE);
+        // The list widens who may use a system token, so it counts only when it is the
+        // daemon user's own file and nobody else can write it.
+        let Ok(meta) = std::fs::metadata(&path) else {
+            return Vec::new();
+        };
+        {
+            use std::os::unix::fs::MetadataExt;
+            if !system_token_panes_trusted(meta.uid(), meta.mode(), nix::unistd::geteuid().as_raw())
+            {
+                static WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!(
+                        "WARNING {} is ignored: it must be owned by the daemon's user and not writable by group or others",
+                        path.display()
+                    );
+                }
+                return Vec::new();
+            }
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
             return Vec::new();
         };
         serde_json::from_str::<Value>(&text)

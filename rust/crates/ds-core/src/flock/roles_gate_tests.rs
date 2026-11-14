@@ -863,7 +863,7 @@ fn a_system_token_is_accepted_from_a_service_unit_and_refused_from_a_detached_st
         assert!(line.starts_with("WARNING system token 'cos'"), "{line}");
         assert!(line.contains("%9"), "{line}");
     }
-    // The timers token from a pane is refused now; a pane the owner listed for it is not.
+    // The timers token is service-only: refused from any pane, even one the owner listed.
     let SystemTokenVerdict::Refuse(line) =
         system_token_verdict("timers", &SystemPeer::Panes(vec!["%9".into()]), &listed)
     else {
@@ -874,10 +874,10 @@ fn a_system_token_is_accepted_from_a_service_unit_and_refused_from_a_detached_st
         system_token_verdict("timers", &SystemPeer::Panes(vec![]), &listed),
         SystemTokenVerdict::Refuse(_)
     ));
-    assert_eq!(
+    assert!(matches!(
         system_token_verdict("timers", &SystemPeer::Panes(vec!["%7".into()]), &listed),
-        SystemTokenVerdict::Accept
-    );
+        SystemTokenVerdict::Refuse(_)
+    ));
     assert!(matches!(
         system_token_verdict("cos", &SystemPeer::Panes(vec![]), &listed),
         SystemTokenVerdict::Warn(_)
@@ -899,11 +899,30 @@ fn the_owners_pane_list_for_a_system_token_is_read_by_label_and_fails_empty() {
     assert!(panes("cos").is_empty(), "no file lists nothing");
     let file = dir.join(crate::roles::SYSTEM_TOKEN_PANES_FILE);
     std::fs::write(&file, r#"{"cos": ["%7", " %8 ", "", 4], "other": "%9"}"#).unwrap();
+    // Rewriting an existing file keeps its mode, so the umask does not decide this test.
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(panes("cos"), ["%7", "%8"]);
     assert!(panes("other").is_empty(), "a label needs a list");
     assert!(panes("timers").is_empty());
     std::fs::write(&file, "{").unwrap();
     assert!(panes("cos").is_empty(), "a malformed file lists nothing");
+
+    // The list is believed only as the daemon user's own file that nobody else can write.
+    std::fs::write(&file, r#"{"cos": ["%7"]}"#).unwrap();
+    for (mode, trusted) in [(0o600, true), (0o644, true), (0o664, false), (0o646, false)] {
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).unwrap();
+        assert_eq!(!panes("cos").is_empty(), trusted, "mode {mode:o}");
+    }
+    let me = nix::unistd::geteuid().as_raw();
+    assert!(crate::roles::system_token_panes_trusted(me, 0o100600, me));
+    assert!(!crate::roles::system_token_panes_trusted(
+        me.wrapping_add(1),
+        0o100600,
+        me
+    ));
+    assert!(!crate::roles::system_token_panes_trusted(me, 0o100620, me));
+    assert!(!crate::roles::system_token_panes_trusted(me, 0o100602, me));
 }
 
 #[test]
@@ -968,6 +987,14 @@ fn a_system_token_over_the_socket_is_checked_against_where_the_caller_runs() {
         format!(r#"{{"cos": ["{WORKER}"]}}"#),
     )
     .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            dir.join(crate::roles::SYSTEM_TOKEN_PANES_FILE),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
     assert_eq!(check(vec![mine]).unwrap(), "system");
 
     // The timers token from the same unlisted pane is refused, with no token in the text.

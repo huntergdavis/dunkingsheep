@@ -152,18 +152,18 @@ pub(crate) fn system_token_verdict(
         SystemPeer::Detached => SystemTokenVerdict::Refuse(format!(
             "system token '{label}' refused: the caller is outside every pane and is not a dunkingsheep-*.service unit"
         )),
-        SystemPeer::Panes(panes)
-            if !panes.is_empty() && panes.iter().all(|pane| allowed_panes.contains(pane)) =>
-        {
-            SystemTokenVerdict::Accept
-        }
-        // The timers run as units and never in a pane: their token in an unlisted pane is
-        // refused at once. Other labels get one release of warnings first.
+        // The timers run as units and never in a pane: their token is refused from ANY pane,
+        // listed or not. This arm is first so the owner's list cannot open it.
         SystemPeer::Panes(panes) if ENFORCED_SYSTEM_LABELS.contains(&label) => {
             SystemTokenVerdict::Refuse(format!(
                 "system token '{label}' refused: used from pane {}, and this token is for the dunkingsheep-*.service units only",
                 panes.join(", ")
             ))
+        }
+        SystemPeer::Panes(panes)
+            if !panes.is_empty() && panes.iter().all(|pane| allowed_panes.contains(pane)) =>
+        {
+            SystemTokenVerdict::Accept
         }
         SystemPeer::Panes(panes) => SystemTokenVerdict::Warn(format!(
             "WARNING system token '{label}' used from pane {}, which the owner has not listed for it; accepted for this release, to be refused in the next",
@@ -454,9 +454,10 @@ impl Flock {
     /// * a `dunkingsheep-*.service` unit (the timers): accepted, without needing the pane
     ///   listing, so the watchdog still delivers when the terminal backend is down;
     /// * outside every listed pane and not such a unit: REFUSED;
+    /// * inside any pane with the `timers` token: REFUSED, listed or not (it is service-only);
     /// * inside a pane the owner listed for this token label: accepted;
-    /// * inside any other pane: refused for the `timers` token; for other labels accepted for
-    ///   this release with a warning that names the label and the pane, never the token;
+    /// * inside any other pane: accepted for this release with a warning that names the label
+    ///   and the pane, never the token;
     /// * a place that cannot be established: accepted for this release with a warning.
     fn system_token_peer_check(&self, env: &dyn PaneInfoEnv, label: &str) -> Result<(), DunkError> {
         let unknown = || refuse("system token refused: peer identity unavailable");
