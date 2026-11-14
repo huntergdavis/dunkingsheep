@@ -138,8 +138,18 @@ pub(super) fn apply(
         "candidates":considered,"known_authors":authors,"assignees":assignees});
     conn.execute(
         "INSERT INTO task_events(task_id,event,at,actor,meta) VALUES (?1,?2,?3,'review-sync',?4)",
-        params![id,if assigned {"assigned"} else {"review_routing"},now,meta.to_string()],
-    ).map_err(db::map_sqlite)?;
+        params![
+            id,
+            if assigned {
+                "assigned"
+            } else {
+                "review_routing"
+            },
+            now,
+            meta.to_string()
+        ],
+    )
+    .map_err(db::map_sqlite)?;
     Ok(())
 }
 
