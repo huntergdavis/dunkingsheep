@@ -521,8 +521,16 @@ impl StalePanelReporter {
         if signature_kind != "modal" || now - since < MODAL_WAIT_S {
             return;
         }
-        let mut owner = |body: &str| crate::dialog_alerts::post_owner_from_environment(body);
-        let mut vp = |body: &str| crate::dialog_alerts::post_vp(flock, inbox, body, None);
+        // t4678: the owner mailbox, and the stuck lane's project coordinator (else the owner
+        // lane). Both go through the daemon's own inbox store; nothing is run or typed blind.
+        let target = flock.dialog_alert_lane(&inbox.list_panes(), pane_id);
+        let mut owner = |body: &str| crate::dialog_alerts::post_owner_mailbox(flock, inbox, body);
+        let mut vp = |body: &str| match &target {
+            Some((pane, wake_quiet)) => {
+                crate::dialog_alerts::post_lane(flock, inbox, body, pane, *wake_quiet)
+            }
+            None => Err("no project coordinator or owner lane to notify".to_string()),
+        };
         self.note_with_sinks(
             flock,
             pane_id,
@@ -554,22 +562,30 @@ impl StalePanelReporter {
         if signature_kind != "modal" || now - since < MODAL_WAIT_S {
             return;
         }
-        match crate::dialog_alerts::notify(
+        match crate::dialog_alerts::notify_stuck_for(
             pane_id,
             generation,
             signature,
+            Some(now - since),
             owner,
             vp,
             path,
             Some(now),
         ) {
             Ok(attempts) => {
-                for attempt in attempts.into_iter().filter(|attempt| !attempt.delivered) {
+                // t4678: a failing target is an error, said once per round. It is retried
+                // quietly (a bounded number of times, then a rest), not logged every minute.
+                for attempt in attempts
+                    .into_iter()
+                    .filter(|attempt| !attempt.delivered && attempt.failures == 1)
+                {
                     eprintln!(
-                        "dialog alert {} -> {} failed ({}); will retry",
+                        "ERROR dialog alert {} -> {} failed ({}); retrying quietly, at most {} times before a {}-minute rest",
                         pane_id,
                         attempt.sink,
-                        attempt.error.as_deref().unwrap_or("undeliverable")
+                        attempt.error.as_deref().unwrap_or("undeliverable"),
+                        crate::dialog_alerts::MAX_FAILURES,
+                        (crate::dialog_alerts::COOLDOWN_S / 60.0) as i64
                     );
                 }
             }

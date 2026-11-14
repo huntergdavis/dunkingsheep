@@ -158,6 +158,70 @@ impl Flock {
         out["pane_id"] = json!(pane);
         Ok(out)
     }
+    /// t4678: who is told about a dialog stuck in `stuck_pane`, and whether that notice must wake
+    /// a recipient whose mailboxes are configured silent. First a live project coordinator of
+    /// the stuck lane's project (a planner grant whose pane still runs the granted process),
+    /// never the stuck pane itself; otherwise the single registered owner lane, woken although
+    /// silent. `None` when neither exists. `panes` is the live pane listing.
+    pub(crate) fn dialog_alert_lane(
+        &self,
+        panes: &[Value],
+        stuck_pane: &str,
+    ) -> Option<(String, bool)> {
+        let live = |pane: &str| -> Option<(i64, String)> {
+            let row = panes
+                .iter()
+                .find(|row| row.get("pane_id").and_then(Value::as_str) == Some(pane))?;
+            let pid = row
+                .get("pane_pid")
+                .and_then(|v| {
+                    v.as_i64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                })
+                .filter(|pid| *pid > 0)?;
+            Some((pid, crate::proc::process_start(pid)?))
+        };
+        let coordinator = (|| {
+            let (pid, start) = live(stuck_pane)?;
+            let db = self.project_connection().ok()?;
+            let ProjectScope::Project(project) =
+                lane_project::get(&db, stuck_pane, pid, &start).ok()??.scope
+            else {
+                return None;
+            };
+            let mut statement = db
+                .prepare(
+                    "SELECT pane_id, pane_pid, proc_start FROM planner_scope_grants \
+                     WHERE scope_kind='project' AND project=?1 ORDER BY pane_id",
+                )
+                .ok()?;
+            let grants: Vec<(String, i64, String)> = statement
+                .query_map([&project], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .ok()?
+                .filter_map(Result::ok)
+                .collect();
+            grants
+                .into_iter()
+                .find(|(pane, pid, start)| {
+                    pane != stuck_pane
+                        && live(pane).is_some_and(|(live_pid, live_start)| {
+                            live_pid == *pid && live_start == *start
+                        })
+                })
+                .map(|(pane, _, _)| pane)
+        })();
+        if let Some(pane) = coordinator {
+            return Some((pane, false));
+        }
+        let owners = self.with_roles(|roles, _| roles.owners()).ok()?;
+        match owners.as_slice() {
+            [only] if !only.is_empty() && only != stuck_pane => Some((only.clone(), true)),
+            _ => None,
+        }
+    }
+
     /// Query representation for clients without treating missing membership as global.
     pub fn lane_project_view(&self, env: &dyn PaneInfoEnv, pane: &str) -> Value {
         match self.lane_project(env, pane) {
@@ -230,6 +294,101 @@ mod tests {
             .unwrap();
         assert_eq!(result["existing_dependencies"], json!([blocker.id]));
     }
+    /// t4678: a stuck dialog is reported to the stuck lane's live project coordinator, never to
+    /// the stuck pane itself or to a coordinator whose pane no longer runs the granted process;
+    /// without one it goes to the single registered owner lane, woken although silent.
+    #[tokio::test]
+    async fn dialog_alert_goes_to_the_live_project_coordinator_else_the_owner_lane() {
+        let dir = crate::testsupport::dir("dialog-alert-lane");
+        let flock = Flock::new(
+            dir.path().join("launches.json"),
+            dir.path().join("lanes.json"),
+            true,
+        );
+        let tasks = Arc::new(
+            crate::tasks::Tasks::open(dir.path().join("tasks.db"))
+                .await
+                .unwrap(),
+        );
+        flock.attach_stores(crate::flock::panes::Stores {
+            tasks: Some(tasks),
+            ..Default::default()
+        });
+        let me = i64::from(std::process::id());
+        let live = Pane(me);
+        let pane = |id: &str, pid: i64| json!({"pane_id": id, "pane_pid": pid});
+        let panes = vec![
+            pane("%3", me),
+            pane("%4", me),
+            pane("%5", me),
+            pane("%1", me),
+        ];
+
+        // No project, no owner lane: nobody to tell.
+        assert_eq!(None, flock.dialog_alert_lane(&panes, "%4"));
+
+        // %4 is a member of alpha; %3 and %5 hold alpha planner grants.
+        flock
+            .lane_project_set(&live, "%4", ProjectScope::Project("alpha".into()))
+            .unwrap();
+        for coordinator in ["%3", "%5"] {
+            flock
+                .planner_scope_admin(
+                    &live,
+                    &json!({"operation": "grant", "pane": coordinator, "project": "alpha"}),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            Some(("%3".to_string(), false)),
+            flock.dialog_alert_lane(&panes, "%4")
+        );
+        // The coordinator's pane is gone, or runs another process: the next live one is told.
+        let without_3 = vec![pane("%4", me), pane("%5", me)];
+        assert_eq!(
+            Some(("%5".to_string(), false)),
+            flock.dialog_alert_lane(&without_3, "%4")
+        );
+        let stale_3 = vec![pane("%3", 1), pane("%4", me), pane("%5", me)];
+        assert_eq!(
+            Some(("%5".to_string(), false)),
+            flock.dialog_alert_lane(&stale_3, "%4")
+        );
+        // A coordinator stuck on its own dialog is not told about itself.
+        flock
+            .lane_project_set(&live, "%3", ProjectScope::Project("alpha".into()))
+            .unwrap();
+        assert_eq!(
+            Some(("%5".to_string(), false)),
+            flock.dialog_alert_lane(&panes, "%3")
+        );
+
+        // No live coordinator: the single registered owner lane, woken although silent.
+        let mut roles = crate::roles::Roles::new(
+            &crate::config::Env::default(),
+            Some(dir.path().join("roles.json")),
+            Some(dir.path().join("tokens.json")),
+            None,
+        )
+        .unwrap();
+        roles
+            .register("%1", "owner", None, None, None, None, None, None)
+            .unwrap();
+        flock.attach_roles(roles, None);
+        let only_stuck = vec![pane("%4", me), pane("%1", me)];
+        assert_eq!(
+            Some(("%1".to_string(), true)),
+            flock.dialog_alert_lane(&only_stuck, "%4")
+        );
+        // A lane with no project membership also falls back to the owner lane.
+        assert_eq!(
+            Some(("%1".to_string(), true)),
+            flock.dialog_alert_lane(&panes, "%9")
+        );
+        // The owner lane's own dialog is not reported to itself.
+        assert_eq!(None, flock.dialog_alert_lane(&only_stuck, "%1"));
+    }
+
     #[tokio::test]
     async fn binding_survives_reopen_and_detects_process_change() {
         let dir = crate::testsupport::dir("lane-project-live");

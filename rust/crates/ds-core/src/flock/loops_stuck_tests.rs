@@ -317,7 +317,7 @@ fn cloned_reporters_share_warning_and_retry_only_failed_sinks() {
     };
     let mut vp = |body: &str| {
         vp_calls.set(vp_calls.get() + 1);
-        crate::dialog_alerts::post_vp(&flock, &inbox, body, Some("w9:pH"))
+        crate::dialog_alerts::post_lane(&flock, &inbox, body, "w9:pH", false)
     };
 
     loop_reporter.note_with_sinks(
