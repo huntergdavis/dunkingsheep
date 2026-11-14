@@ -1331,7 +1331,23 @@ impl NextJobs {
             };
         let allowed = dispatch_allowlist(&wanted, &lanes);
         if !allowed.contains(pane) && !registered {
-            return Some("not_allowed".into());
+            // t4697: neither listed by hand nor an allocation worker. A lane with a live
+            // worker or reviewer registration and a project or global membership is served
+            // too, unless the owner excluded it. The file list above stays an override.
+            let flock = Arc::clone(&self.flock);
+            let env_for_exclusions = env.clone();
+            let owned_pane = pane.to_owned();
+            let snapshot = lanes.clone();
+            let eligible = tokio::task::spawn_blocking(move || {
+                let exclude = dispatch_exclusions(&env_for_exclusions)?;
+                Ok::<bool, ()>(flock.handoff_role_eligible(&owned_pane, &snapshot, &exclude))
+            })
+            .await;
+            match eligible {
+                Ok(Ok(true)) => {}
+                Ok(Ok(false)) => return Some("not_allowed".into()),
+                _ => return Some("readiness_unknown".into()),
+            }
         }
         let mut present = false;
         for lane in &lanes {
@@ -1462,6 +1478,38 @@ pub(crate) fn dispatch_entries(env: &Env) -> Result<Vec<String>, ()> {
         );
     }
     Ok(entries)
+}
+
+/// t4697: the owner's exclusions from role-based handoff, the `exclude` key of
+/// `dispatch_lanes.json`: role names, pane ids or agent names, as a list or a comma-separated
+/// string. A missing file or key excludes nothing; anything else unreadable is an error, so a
+/// broken exclusion list cannot widen who is served.
+pub(crate) fn dispatch_exclusions(env: &Env) -> Result<Vec<String>, ()> {
+    let path = crate::config::config_dir(env)
+        .map_err(|_| ())?
+        .join("dispatch_lanes.json");
+    let data = match std::fs::read_to_string(path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err(()),
+    };
+    let loaded: Value = serde_json::from_str(&data).map_err(|_| ())?;
+    let texts: Vec<String> = match loaded.get("exclude") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::String(text)) => vec![text.clone()],
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| value.as_str().map(str::to_owned).ok_or(()))
+            .collect::<Result<_, _>>()?,
+        Some(_) => return Err(()),
+    };
+    Ok(texts
+        .iter()
+        .flat_map(|text| text.split(','))
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_owned)
+        .collect())
 }
 
 pub(crate) fn dispatch_allowlist(entries: &[String], lanes: &[Value]) -> BTreeSet<String> {
@@ -2893,6 +2941,87 @@ mod tests {
             ("DUNKINGSHEEP_TURN_END_DISPATCH", switch),
             ("DUNKINGSHEEP_DISPATCH_LANES", lanes),
         ])
+    }
+
+    /// t4697: a pane on no hand list is served on its live worker or reviewer registration
+    /// plus a membership, and the owner's `exclude` key takes it out again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn next_jobs_gate_serves_registered_roles_and_honours_the_owner_exclusion() {
+        let (dir, jobs, _tasks) = configured_jobs().await;
+        let pid = i64::from(std::process::id());
+        let start = crate::proc::process_start(pid).unwrap();
+        let lanes: Vec<Value> = ["%1", "%2", "%3", "%4"]
+            .iter()
+            .map(|pane| json!({"pane_id": pane, "pane_pid": pid, "agent_name": ""}))
+            .collect();
+        let mut roles = crate::roles::Roles::new(
+            &Env::default(),
+            Some(dir.path().join("roles.json")),
+            Some(dir.path().join("tokens.json")),
+            None,
+        )
+        .unwrap();
+        for (pane, role) in [("%1", "worker"), ("%2", "reviewer"), ("%3", "planner")] {
+            roles
+                .register(pane, role, Some(pid), Some(&start), None, None, None, None)
+                .unwrap();
+        }
+        jobs.flock.attach_roles(roles, None);
+        struct Panes(Vec<Value>);
+        impl crate::flock::panes::PaneInfoEnv for Panes {
+            fn list_panes_grouped(&self) -> Vec<Value> {
+                self.0.clone()
+            }
+            fn get_pane(&self, id: &str) -> Option<Value> {
+                self.0.iter().find(|lane| lane["pane_id"] == id).cloned()
+            }
+        }
+        for pane in ["%1", "%2", "%3"] {
+            jobs.flock
+                .lane_project_set(
+                    &Panes(lanes.clone()),
+                    pane,
+                    crate::tasks::lane_project::ProjectScope::Project("dunkingsheep".into()),
+                )
+                .unwrap();
+        }
+        let gate = |pane: &'static str| {
+            let lanes = lanes.clone();
+            let env = test_env(dir.path(), "1", "");
+            let jobs = &jobs;
+            async move { jobs.gate_with(pane, Some(lanes), env, None).await }
+        };
+        assert_eq!(gate("%1").await, None, "live worker");
+        assert_eq!(gate("%2").await, None, "live reviewer");
+        assert_eq!(gate("%3").await.as_deref(), Some("not_allowed"), "planner");
+        assert_eq!(
+            gate("%4").await.as_deref(),
+            Some("not_allowed"),
+            "unregistered"
+        );
+        // The pane id now belongs to another process: the old registration grants nothing.
+        let reused = vec![json!({"pane_id": "%1", "pane_pid": 1})];
+        assert_eq!(
+            jobs.gate_with("%1", Some(reused), test_env(dir.path(), "1", ""), None)
+                .await
+                .as_deref(),
+            Some("not_allowed")
+        );
+        let config = dir.path().join("dispatch_lanes.json");
+        std::fs::write(&config, r#"{"exclude": ["reviewer", "%9"]}"#).unwrap();
+        assert_eq!(gate("%1").await, None);
+        assert_eq!(gate("%2").await.as_deref(), Some("not_allowed"));
+        std::fs::write(&config, r#"{"exclude": "%1, planner"}"#).unwrap();
+        assert_eq!(gate("%1").await.as_deref(), Some("not_allowed"));
+        assert_eq!(gate("%2").await, None);
+        // The hand list is an explicit override: a listed pane is served although excluded.
+        std::fs::write(&config, r#"{"lanes": ["%1"], "exclude": ["%1"]}"#).unwrap();
+        assert_eq!(gate("%1").await, None);
+        // An exclusion list that cannot be understood never widens who is served.
+        std::fs::write(&config, r#"{"exclude": {"role": "reviewer"}}"#).unwrap();
+        assert_eq!(gate("%1").await.as_deref(), Some("readiness_unknown"));
+        std::fs::write(&config, r#"{"exclude": ["reviewer", 7]}"#).unwrap();
+        assert_eq!(gate("%2").await.as_deref(), Some("readiness_unknown"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

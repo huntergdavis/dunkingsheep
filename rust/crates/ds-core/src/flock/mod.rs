@@ -907,6 +907,7 @@ pub mod commands_turns;
 pub mod delivery;
 pub mod dunks;
 pub mod guarded_submit;
+pub mod handoff_role;
 pub mod lane_project;
 pub mod lane_registry_rows;
 pub mod lanes;
