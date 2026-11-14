@@ -184,35 +184,143 @@ pub fn find_targets(dir: &Path) -> Vec<(PathBuf, bool)> {
     found
 }
 
-/// Where running processes work and build: every readable process's current directory and its
-/// `CARGO_TARGET_DIR`. `Err` when the process table itself cannot be read.
-pub fn busy_paths(proc_root: &Path) -> Result<Vec<PathBuf>, String> {
+/// Programs that write into a Cargo build cache. `comm` holds at most 15 characters, so the
+/// names are matched as prefixes of it.
+const BUILD_TOOLS: [&str; 14] = [
+    "cargo",
+    "rustc",
+    "rustdoc",
+    "rust-analyzer",
+    "build-script",
+    "cc",
+    "gcc",
+    "clang",
+    "ld",
+    "lld",
+    "mold",
+    "make",
+    "ninja",
+    "sccache",
+];
+
+fn is_build_tool(comm: &str) -> bool {
+    let comm = comm.trim();
+    BUILD_TOOLS.iter().any(|tool| match *tool {
+        // Short names must match whole, or `cc` would claim every `ccache`-like name.
+        "cc" | "ld" | "gcc" | "lld" | "make" | "mold" => comm == *tool,
+        tool => comm.starts_with(tool),
+    })
+}
+
+/// What the process table says about where work is happening.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProcessScan {
+    /// Every inspected process's current directory and (absolute) `CARGO_TARGET_DIR`.
+    pub paths: Vec<PathBuf>,
+    /// Processes of this user whose directory or environment may not be read (non-dumpable
+    /// ones) and which show no sign of building under `root`.
+    pub uninspected_own: u64,
+    /// The same for other users' processes and kernel threads.
+    pub uninspected_other: u64,
+}
+
+/// Where running processes work and build. Fails closed: `Err`, which keeps every cache, when
+/// the process table cannot be read, or when a process that cannot be inspected
+///
+/// * is a build tool by its name,
+/// * names a path under `root`, or a relative path through a `target` directory, on its
+///   command line,
+/// * belongs to this user (`uid`) and mentions `target` or the root's own name anywhere on
+///   its command line, or
+/// * cannot be identified at all (name or command line unreadable).
+///
+/// Other uninspectable processes are counted, not trusted blindly and not fatal: on an
+/// ordinary host hundreds of other users' processes and kernel threads refuse these reads, and
+/// treating each as a possible build would mean no cache is ever known to be idle. A relative
+/// `CARGO_TARGET_DIR` is resolved against the directory of the process that has it. A process
+/// that is gone by the time it is read is not running.
+pub fn busy_paths(proc_root: &Path, root: &Path, uid: u32) -> Result<ProcessScan, String> {
+    use std::io::ErrorKind::NotFound;
     let entries = std::fs::read_dir(proc_root)
         .map_err(|error| format!("{}: {error}", proc_root.display()))?;
-    let mut paths = Vec::new();
+    let root_real = real(root);
+    let root_name = root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    let mut scan = ProcessScan::default();
     for entry in entries.flatten() {
         let name = entry.file_name();
-        if !name
+        let Some(pid) = name
             .to_str()
-            .is_some_and(|name| name.chars().all(|c| c.is_ascii_digit()))
-        {
+            .filter(|name| !name.is_empty() && name.chars().all(|c| c.is_ascii_digit()))
+        else {
             continue;
-        }
+        };
         let process = entry.path();
-        if let Ok(cwd) = std::fs::read_link(process.join("cwd")) {
-            paths.push(cwd);
-        }
-        if let Ok(environ) = std::fs::read(process.join("environ")) {
-            for variable in environ.split(|byte| *byte == 0) {
-                if let Some(value) = variable.strip_prefix(b"CARGO_TARGET_DIR=") {
-                    if !value.is_empty() {
-                        paths.push(PathBuf::from(String::from_utf8_lossy(value).into_owned()));
+        let cwd = std::fs::read_link(process.join("cwd"));
+        let environ = std::fs::read(process.join("environ"));
+        let gone = |error: &std::io::Error| error.kind() == NotFound;
+        match (&cwd, &environ) {
+            (Err(error), _) | (_, Err(error)) if gone(error) => continue,
+            (Ok(cwd), Ok(environ)) => {
+                scan.paths.push(cwd.clone());
+                for variable in environ.split(|byte| *byte == 0) {
+                    if let Some(value) = variable.strip_prefix(b"CARGO_TARGET_DIR=") {
+                        if !value.is_empty() {
+                            let value = PathBuf::from(String::from_utf8_lossy(value).into_owned());
+                            // `Path::join` keeps an absolute value as it is.
+                            scan.paths.push(cwd.join(value));
+                        }
                     }
+                }
+            }
+            _ => {
+                let comm = std::fs::read_to_string(process.join("comm"));
+                let cmdline = std::fs::read(process.join("cmdline"));
+                let (comm, cmdline) = match (comm, cmdline) {
+                    (Err(error), _) | (_, Err(error)) if gone(&error) => continue,
+                    (Ok(comm), Ok(cmdline)) => (comm, cmdline),
+                    _ => return Err(format!("process {pid} cannot be inspected or identified")),
+                };
+                if is_build_tool(&comm) {
+                    return Err(format!(
+                        "process {pid} ({}) is a build tool and cannot be inspected",
+                        comm.trim()
+                    ));
+                }
+                // An owner that cannot be read is treated as this user: the stricter rule.
+                let own = std::fs::metadata(&process).map_or(true, |meta| meta.uid() == uid);
+                for argument in cmdline.split(|byte| *byte == 0) {
+                    let text = String::from_utf8_lossy(argument).into_owned();
+                    let mentions = text.contains("target")
+                        || root_name.as_deref().is_some_and(|name| text.contains(name));
+                    if own && mentions {
+                        return Err(format!(
+                            "process {pid} is ours, cannot be inspected, and its command line mentions a build cache or the worktree root"
+                        ));
+                    }
+                    let argument = PathBuf::from(text);
+                    let under_root = argument.is_absolute()
+                        && (argument.starts_with(root) || real(&argument).starts_with(&root_real));
+                    let through_target = argument.is_relative()
+                        && argument
+                            .components()
+                            .any(|part| part.as_os_str() == "target");
+                    if under_root || through_target {
+                        return Err(format!(
+                            "process {pid} cannot be inspected and names a path that may be under the worktree root"
+                        ));
+                    }
+                }
+                if own {
+                    scan.uninspected_own += 1;
+                } else {
+                    scan.uninspected_other += 1;
                 }
             }
         }
     }
-    Ok(paths)
+    Ok(scan)
 }
 
 fn real(path: &Path) -> PathBuf {
@@ -289,6 +397,9 @@ pub fn report_within(
             let mut keep: Vec<String> = Vec::new();
             if !tagged {
                 keep.push("no Cargo cache tag: not known to be a build cache".into());
+            }
+            if used.unreadable > 0 {
+                keep.push("part of it could not be read, so its age is not known".into());
             }
             if used.truncated {
                 keep.push("the scan ran out of time before reading it fully".into());
@@ -538,6 +649,10 @@ mod tests {
         }
     }
 
+    fn me() -> u32 {
+        nix::unistd::Uid::effective().as_raw()
+    }
+
     fn only_target(report: &Value) -> Value {
         report["dirs"][0]["targets"][0].clone()
     }
@@ -732,28 +847,191 @@ mod tests {
         assert!(!usage(&dir, &[], &Budget::unlimited()).truncated);
     }
 
+    /// A fake process: `cwd` as a link (inspectable) or as a plain file (reading the link
+    /// fails, as it does for another user's process).
+    fn process(
+        proc_root: &Path,
+        pid: &str,
+        cwd: Option<&str>,
+        environ: &[u8],
+        comm: &str,
+        cmdline: &[u8],
+    ) {
+        let dir = proc_root.join(pid);
+        fs::create_dir_all(&dir).unwrap();
+        match cwd {
+            Some(cwd) => std::os::unix::fs::symlink(cwd, dir.join("cwd")).unwrap(),
+            None => fs::write(dir.join("cwd"), "").unwrap(),
+        }
+        fs::write(dir.join("environ"), environ).unwrap();
+        fs::write(dir.join("comm"), format!("{comm}\n")).unwrap();
+        fs::write(dir.join("cmdline"), cmdline).unwrap();
+    }
+
     #[test]
     fn busy_paths_reads_cwd_and_cargo_target_dir_of_numbered_processes() {
         let proc_root = crate::testsupport::dir("worktree-disk-proc");
-        let one = proc_root.path().join("101");
-        fs::create_dir_all(&one).unwrap();
-        std::os::unix::fs::symlink("/work/a-wt/rust", one.join("cwd")).unwrap();
-        fs::write(
-            one.join("environ"),
+        process(
+            proc_root.path(),
+            "101",
+            Some("/work/a-wt/rust"),
             b"HOME=/h\0CARGO_TARGET_DIR=/work/b-wt/target\0",
-        )
-        .unwrap();
+            "cargo",
+            b"cargo\0build\0",
+        );
+        // A relative target directory belongs under the directory of the process that has it.
+        process(
+            proc_root.path(),
+            "102",
+            Some("/work/c-wt/rust"),
+            b"CARGO_TARGET_DIR=target\0",
+            "cargo",
+            b"cargo\0",
+        );
         fs::create_dir_all(proc_root.path().join("self")).unwrap();
-        let mut paths = busy_paths(proc_root.path()).unwrap();
-        paths.sort();
+        // A process that exited between the listing and the read is not running.
+        fs::create_dir_all(proc_root.path().join("103")).unwrap();
+        let mut scan = busy_paths(proc_root.path(), Path::new("/work"), me()).unwrap();
+        scan.paths.sort();
         assert_eq!(
-            paths,
+            scan.paths,
             [
                 PathBuf::from("/work/a-wt/rust"),
-                PathBuf::from("/work/b-wt/target")
+                PathBuf::from("/work/b-wt/target"),
+                PathBuf::from("/work/c-wt/rust"),
+                PathBuf::from("/work/c-wt/rust/target"),
             ]
         );
-        assert!(busy_paths(&proc_root.path().join("missing")).is_err());
+        assert_eq!((scan.uninspected_own, scan.uninspected_other), (0, 0));
+        assert!(busy_paths(&proc_root.path().join("missing"), Path::new("/work"), me()).is_err());
+    }
+
+    /// The scan of one uninspectable process, as `uid`, with the root `/work/.agent-trees`.
+    fn scan_one(comm: &str, cmdline: &[u8], uid: u32) -> Result<ProcessScan, String> {
+        let proc_root = crate::testsupport::dir("worktree-disk-proc-closed");
+        process(proc_root.path(), "7", None, b"", comm, cmdline);
+        busy_paths(proc_root.path(), Path::new("/work/.agent-trees"), uid)
+    }
+
+    #[test]
+    fn an_uninspectable_process_of_ours_is_counted_unless_it_could_be_building_here() {
+        // A non-dumpable helper of ours: counted, and the scan still answers.
+        for (comm, cmdline) in [
+            ("agent-helper", &b""[..]),
+            ("sshd", b"/usr/sbin/sshd\0-D\0"),
+            ("ccache-daemon", b"ccache-daemon\0"),
+        ] {
+            let scan = scan_one(comm, cmdline, me()).unwrap();
+            assert_eq!(
+                (scan.uninspected_own, scan.uninspected_other),
+                (1, 0),
+                "{comm}"
+            );
+        }
+        // A build tool, by its name alone.
+        for tool in [
+            "cargo",
+            "rustc",
+            "build-script-bu",
+            "rust-analyzer",
+            "cc",
+            "ld",
+        ] {
+            let error = scan_one(tool, b"x\0", me()).unwrap_err();
+            assert!(
+                error.contains("is a build tool and cannot be inspected"),
+                "{tool}: {error}"
+            );
+        }
+        // One of ours that mentions a build cache or the root anywhere on its command line.
+        for cmdline in [
+            &b"sh\0-c\0cd somewhere && ls target\0"[..],
+            b"tool\0--dir=.agent-trees/x\0",
+            b"./target/debug/app\0",
+            b"python3\0/work/.agent-trees/a-wt/tool.py\0",
+        ] {
+            let error = scan_one("tool", cmdline, me()).unwrap_err();
+            assert!(
+                error.contains("command line mentions a build cache or the worktree root"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn another_users_uninspectable_process_blocks_only_on_a_path_that_may_be_under_the_root() {
+        // The fixture's process belongs to the test's user; scanning as a different uid makes
+        // it "another user's".
+        let other = me().wrapping_add(1);
+        let counted = scan_one("daemon", b"daemon\0--log=/var/log/target.log\0", other).unwrap();
+        assert_eq!((counted.uninspected_own, counted.uninspected_other), (0, 1));
+        assert_eq!(
+            scan_one("kworker/0:1", b"", other)
+                .unwrap()
+                .uninspected_other,
+            1
+        );
+        for cmdline in [
+            &b"/work/.agent-trees/a-wt/rust/target/debug/deps/unit-1\0"[..],
+            b"./target/debug/app\0",
+        ] {
+            let error = scan_one("unit-1", cmdline, other).unwrap_err();
+            assert!(
+                error.contains("names a path that may be under the worktree root"),
+                "{error}"
+            );
+        }
+        assert!(
+            scan_one("cargo", b"cargo\0", other).is_err(),
+            "a build tool of any user"
+        );
+    }
+
+    #[test]
+    fn a_process_that_cannot_even_be_identified_fails_the_scan() {
+        let proc_root = crate::testsupport::dir("worktree-disk-proc-blind");
+        process(proc_root.path(), "7", None, b"", "x", b"");
+        // The name cannot be read either (a directory where the file should be).
+        fs::remove_file(proc_root.path().join("7/comm")).unwrap();
+        fs::create_dir(proc_root.path().join("7/comm")).unwrap();
+        let error = busy_paths(proc_root.path(), Path::new("/work"), me()).unwrap_err();
+        assert_eq!(error, "process 7 cannot be inspected or identified");
+        // An unreadable environment alone is enough to be uninspectable.
+        let other = crate::testsupport::dir("worktree-disk-proc-env");
+        process(
+            other.path(),
+            "8",
+            Some("/elsewhere"),
+            b"",
+            "cargo",
+            b"cargo\0",
+        );
+        fs::remove_file(other.path().join("8/environ")).unwrap();
+        fs::create_dir(other.path().join("8/environ")).unwrap();
+        assert!(busy_paths(other.path(), Path::new("/work"), me()).is_err());
+    }
+
+    #[test]
+    fn a_cache_with_unreadable_content_is_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        if nix::unistd::Uid::effective().is_root() {
+            return; // root reads everything; the case cannot be built
+        }
+        let home = crate::testsupport::dir("worktree-disk-unreadable");
+        let dir = worktree(home.path(), "a-wt", true, OLD);
+        let locked = dir.join("rust/target/locked");
+        fs::create_dir(&locked).unwrap();
+        touch(&locked, OLD);
+        touch(&dir.join("rust/target"), OLD);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let report = report(home.path(), NOW, &link("merged"), &Ok(Vec::new()));
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = only_target(&report.unwrap());
+        assert_eq!(target["eligible"], false);
+        assert_eq!(
+            target["keep_reasons"],
+            json!(["part of it could not be read, so its age is not known"])
+        );
     }
 
     #[test]
