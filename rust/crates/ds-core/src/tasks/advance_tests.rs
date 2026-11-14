@@ -704,10 +704,9 @@ async fn inline_note_and_completion_commit_in_order() {
             < events.iter().position(|e| e == "completed").unwrap()
     );
     assert_eq!("done", store.get(&task.id).await.unwrap().status);
-    assert!(
+    assert_eq!(
+        json!(1),
         store.get_full_wire(&task.id, None).await.unwrap().wire["landed"]
-            .as_bool()
-            .unwrap()
     );
 }
 
@@ -884,6 +883,9 @@ async fn inline_author_guard_rolls_back_evidence_and_leaves_next_unclaimed() {
             "",
             super::super::AddOptions {
                 kind: Some("review".into()),
+                repo: Some("o/r".into()),
+                pr: Some("5".into()),
+                head: Some("abc".into()),
                 author: Some(OWNER.into()),
                 assignees: vec![OWNER.into()],
                 ..Default::default()
