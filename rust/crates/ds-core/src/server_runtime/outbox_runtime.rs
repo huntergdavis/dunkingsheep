@@ -1803,7 +1803,8 @@ mod tests {
                     ],
                 ),
                 (
-                    // The owner pane is busy: an only_when=idle dunk is still stored as mail.
+                    // The owner pane is busy: an only_when=idle dunk is still stored as mail, and
+                    // the one-line notice goes into its empty box like any other inbox notice.
                     "owner-busy",
                     vec![
                         "dunk d1 -> w1:p1: stored in the inbox as ",
@@ -2000,11 +2001,22 @@ mod tests {
             }
             "owner-busy" | "owner-midturn" => {
                 assert_eq!(1, rows, "stored although the pane was never idle");
-                assert!(
-                    typed.is_empty(),
-                    "the wake keeps its gates: nothing is typed into a busy pane: {typed:?}"
+                assert_eq!(
+                    0, dunk_typed,
+                    "the dunk text is never typed into an owner lane: {typed:?}"
                 );
-                assert!(fake.keys_sent.is_empty(), "{:?}", fake.keys_sent);
+                // The wake is the ordinary one-line notice, typed like every other inbox
+                // notice when the box is empty; nothing else is ever typed.
+                assert!(
+                    typed.iter().all(|text| text.starts_with("[inbox] ")),
+                    "only the one-line notice may be typed: {typed:?}"
+                );
+                if case == "owner-busy" {
+                    assert!(
+                        notices >= 1,
+                        "the busy owner lane is still woken: {typed:?}"
+                    );
+                }
                 assert!(status.starts_with("Stored (inbox) "), "{status}");
             }
             "owner-unclear" => {
