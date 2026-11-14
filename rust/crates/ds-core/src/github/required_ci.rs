@@ -1,7 +1,7 @@
 //! Fail-closed merge checks. Observed green checks never substitute for an unknown policy.
 use super::{request, GitHubTransport, RequestOptions};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
 
 const UNKNOWN: &str = "merge held: required checks unknown";
 
@@ -157,14 +157,14 @@ pub async fn require_merge_ci(
                 .and_then(|login| login.strip_suffix("[bot]"))
                 .filter(|slug| !slug.is_empty());
             let matches = if let Some(slug) = slug {
-                if !status_apps.contains_key(slug) {
+                if let Entry::Vacant(entry) = status_apps.entry(slug.to_owned()) {
                     let info =
                         get(transport, root, token, &format!("apps/{}", segment(slug))).await?;
                     let id = info["id"].as_i64().filter(|id| *id > 0).ok_or(UNKNOWN)?;
                     if info["slug"].as_str() != Some(slug) {
                         return Err(UNKNOWN.into());
                     }
-                    status_apps.insert(slug.to_owned(), id);
+                    entry.insert(id);
                 }
                 status_apps.get(slug) == Some(&app_id)
             } else {

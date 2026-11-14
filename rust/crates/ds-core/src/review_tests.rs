@@ -559,10 +559,11 @@ impl FakeReviewTransport {
     // Existing merge/accounting tests explicitly provide a known green policy before
     // exercising their original downstream behavior. Guard refusals have separate fixtures.
     fn with_green_merge_gate_at(self, index: usize, head: &str) -> Self {
-        self.responses
-            .lock()
-            .unwrap()
-            .splice(index..index, required_ci_responses(head));
+        let mut responses = self.responses.lock().unwrap();
+        for (offset, response) in required_ci_responses(head).into_iter().enumerate() {
+            responses.insert(index + offset, response);
+        }
+        drop(responses);
         self
     }
 
