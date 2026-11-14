@@ -15654,6 +15654,24 @@
  },
  {
   "argv": [
+   "worktrees",
+   "disk",
+   "--json"
+  ],
+  "namespace": {
+   "command": "worktrees",
+   "json": true,
+   "max_dirs": null,
+   "max_seconds": null,
+   "no_start_daemon": false,
+   "root": null,
+   "self_pane": null,
+   "socket": null,
+   "worktrees_command": "disk"
+  }
+ },
+ {
+  "argv": [
    "--json",
    "worktrees",
    "disk"

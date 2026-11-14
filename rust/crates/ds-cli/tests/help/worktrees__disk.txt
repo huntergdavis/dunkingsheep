@@ -1,5 +1,5 @@
 usage: dunkingsheep worktrees disk [-h] [--root DIR] [--max-seconds S]
-                                   [--max-dirs N]
+                                   [--max-dirs N] [--json]
 
 options:
   -h, --help       show this help message and exit
@@ -8,3 +8,4 @@ options:
                    (default: 300)
   --max-dirs N     scan at most N directories and mark the report partial
                    (default: 2000)
+  --json
