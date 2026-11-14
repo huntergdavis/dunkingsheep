@@ -521,6 +521,15 @@ async fn owner_thread(
     }
     let data = match state.backend.rpc("owner_conversation", args).await {
         Ok(data) => data,
+        Err(error) if cursor.is_some() => {
+            let message = match error {
+                OwnerWebError::Http { detail, .. } | OwnerWebError::Failure(detail) => detail,
+            };
+            return Err(OwnerWebError::Http {
+                status: StatusCode::BAD_GATEWAY,
+                detail: format!("history paging unavailable: {message}"),
+            });
+        }
         Err(error @ OwnerWebError::Http { .. }) => return Err(error),
         Err(OwnerWebError::Failure(error)) => {
             return Err(OwnerWebError::Http {
@@ -1690,6 +1699,42 @@ mod tests {
             backend.methods(),
             ["owner_conversation", "owner_conversation"]
         );
+    }
+
+    #[test]
+    fn owner_history_unavailable_is_502_and_legacy_window_still_works() {
+        let backend = Arc::new(FakeOwner::new());
+        backend.replace(
+            "owner_conversation",
+            Err(OwnerWebError::Http {
+                status: StatusCode::BAD_REQUEST,
+                detail: "unknown argument before_id".into(),
+            }),
+        );
+        let response = block_on(app(authorized(), backend.clone()).oneshot(request(
+            "GET",
+            "/api/owner-thread?paged=true",
+            None,
+        )))
+        .unwrap();
+        let (status, body, _) = response_json(response);
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("history paging unavailable"));
+        backend.reply("owner_conversation", json!({"messages":[{"id":"i7","created_at":100,"body":"legacy still visible"}],"waiting":[]}));
+        let response = block_on(app(authorized(), backend.clone()).oneshot(request(
+            "GET",
+            "/api/owner-thread?limit=200",
+            None,
+        )))
+        .unwrap();
+        let (status, body, _) = response_json(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["items"][0]["body"], "legacy still visible");
+        assert!(body.get("next_before").is_none());
+        assert_eq!(backend.calls.lock().unwrap()[1].1, json!({"limit":200}));
     }
 
     #[test]

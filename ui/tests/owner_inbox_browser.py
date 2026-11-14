@@ -20,6 +20,8 @@ requests = []
 mode = 'ready'
 history_fail = False
 history_cursors = []
+cursor_failure = False
+window_calls = []
 
 class Handler(SimpleHTTPRequestHandler):
     def translate_path(self, path):
@@ -40,6 +42,12 @@ def mock(route):
     if path == '/api/channels':
         value = {'channels': []}
     elif path == '/api/owner-thread':
+        window_calls.append((mode, query.get('paged') == ['true'], bool(query.get('before'))))
+        if mode in ('old_daemon', 'old_desk', 'auth_failure'):
+            if query.get('paged') == ['true'] and mode != 'old_desk':
+                status = 403 if mode == 'auth_failure' else 502
+                return route.fulfill(status=status, content_type='application/json', body=json.dumps({'detail': 'Forbidden history paging' if status == 403 else 'history paging unavailable'}))
+            return route.fulfill(status=200, content_type='application/json', body=json.dumps({'items': ITEMS}))
         if mode == 'failed':
             route.fulfill(status=503, content_type='application/json', body='{"detail":"Mailbox offline"}')
             return
@@ -47,6 +55,8 @@ def mock(route):
             assert query.get('paged') == ['true']
             before = query.get('before', [None])[0]
             history_cursors.append(before)
+            if before and cursor_failure:
+                return route.fulfill(status=502, content_type='application/json', body='{"detail":"History cursor removed; reload"}')
             if before and history_fail:
                 history_fail = False
                 return route.fulfill(status=503, content_type='application/json', body='{"detail":"Older page offline"}')
@@ -127,6 +137,49 @@ try:
                 page.screenshot(path=f"{os.environ['OWNER_HISTORY_SCREENSHOT_DIR']}/s-f-history-{width}.png")
             page.close()
         assert 'i251' in history_cursors and 'i51' in history_cursors
+        for width in (360, 768, 1280):
+            mode = 'old_daemon'
+            page = browser.new_page(viewport={'width': width, 'height': 900})
+            page.route('**/api/**', mock)
+            page.goto(base + '/dash/cos', wait_until='domcontentloaded')
+            note = page.get_by_text('Full-history paging is unavailable.', exact=False)
+            reader = page.get_by_role('article', name='Selected message')
+            note.wait_for()
+            reader.get_by_text('Full body 27', exact=False).wait_for()
+            assert page.get_by_role('button', name='Load older messages', exact=True).count() == 0
+            assert page.get_by_text('Start of conversation reached', exact=False).count() == 0
+            mode = 'old_desk'
+            page.reload(wait_until='domcontentloaded')
+            note.wait_for()
+            reader.get_by_text('Full body 27', exact=False).wait_for()
+            mode = 'history'
+            page.wait_for_function("document.querySelector('.owner-inbox-pages').textContent.includes('227 loaded')", timeout=10000)
+            assert note.count() == 0
+            mode = 'old_daemon'
+            page.get_by_role('button', name='Load older messages', exact=True).click()
+            note.wait_for()
+            assert '227 loaded' in page.locator('.owner-inbox-pages').inner_text()
+            reader.get_by_text('Full body 27', exact=False).wait_for()
+            assert page.get_by_role('button', name='Load older messages', exact=True).count() == 0
+            mode = 'history'
+            page.get_by_role('button', name='Load older messages', exact=True).wait_for(timeout=10000)
+            page.get_by_role('button', name='Load older messages', exact=True).click()
+            page.wait_for_function("document.querySelector('.owner-inbox-pages').textContent.includes('427 loaded')")
+            cursor_failure = True
+            page.get_by_role('button', name='Load older messages', exact=True).click()
+            page.get_by_role('alert').filter(has_text='History cursor removed').wait_for()
+            assert note.count() == 0, 'cursor expiry must not pretend the daemon lacks paging'
+            cursor_failure = False
+            page.get_by_role('button', name='Retry older messages', exact=True).click()
+            page.get_by_text('Start of conversation reached · 450 messages loaded', exact=True).wait_for()
+            mode = 'auth_failure'
+            page.goto(base + '/dash/cos', wait_until='domcontentloaded')
+            page.get_by_role('alert').filter(has_text='Forbidden history paging').wait_for()
+            assert note.count() == 0
+            page.close()
+        assert not any(mode == 'auth_failure' and not paged for mode, paged, before in window_calls), window_calls
+        assert any(mode == 'old_daemon' and not paged for mode, paged, before in window_calls)
+        assert any(mode == 'old_desk' and not paged for mode, paged, before in window_calls)
         mode = 'empty'
         page = browser.new_page()
         page.route('**/api/**', mock)
@@ -139,4 +192,4 @@ try:
         browser.close()
 finally:
     server.shutdown()
-print('owner inbox browser passed: 450-row complete cursor history/ties/retry/EOF/poll preservation, newest-first, paging, selection, polling, errors, empty, GET-only at 360, 768 and 1280')
+print('owner inbox browser passed: 450-row complete cursor history/ties/retry/EOF/poll preservation + legacy fallback/rollback/recovery/auth gating, newest-first, paging, selection, polling, errors, empty, GET-only at 360, 768 and 1280')

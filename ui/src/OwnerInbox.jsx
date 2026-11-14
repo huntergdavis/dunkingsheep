@@ -14,18 +14,37 @@ export default function OwnerInbox({ api }) {
   const [error, setError] = useState('');
   const [attempt, setAttempt] = useState(0);
   const [cursor, setCursor] = useState(undefined);
+  const [pagingAvailable, setPagingAvailable] = useState(null);
   const [history, setHistory] = useState({ busy: false, error: '' });
   const olderBusy = useRef(false);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  async function readWindow(before = null) {
+    let data;
+    try {
+      data = await api(`/owner-thread?limit=200&paged=true${before ? `&before=${encodeURIComponent(before)}` : ''}`);
+    } catch (e) {
+      // Auth/origin failures stay failures; only the server's paging-unavailable response falls back.
+      if (e.status !== 502) throw e;
+      if (before) {
+        const latest = await readWindow();
+        // An expired cursor is not a missing paging capability. Keep its error/reload guidance.
+        if (latest.pagingAvailable) throw e;
+        return latest;
+      }
+    }
+    if (data && Object.hasOwn(data, 'next_before')) return { ...data, pagingAvailable: true };
+    // An older desk can ignore paged=true and return the legacy shape. This endpoint is read-only too.
+    return { ...await api('/owner-thread?limit=200'), pagingAvailable: false };
+  }
   useEffect(() => {
     let live = true;
     async function load() {
       try {
-        const data = await api('/owner-thread?limit=200&paged=true');
-        if (!Object.hasOwn(data, 'next_before')) throw new Error('History paging is unavailable; a daemon upgrade may be needed.');
+        const data = await readWindow();
         if (!live) return;
-        setCursor(previous => previous === undefined ? data.next_before : previous);
+        setPagingAvailable(data.pagingAvailable);
+        setCursor(previous => !data.pagingAvailable ? undefined : previous === undefined ? data.next_before : previous);
         setItems(previous => {
           // Keep rows already loaded if a new arrival pushes one outside the API window.
           const merged = new Map((previous || []).map(item => [item.id, item]));
@@ -42,20 +61,21 @@ export default function OwnerInbox({ api }) {
     return () => { live = false; clearInterval(timer); };
   }, [api, attempt]);
   async function loadOlder() {
-    if (!cursor || olderBusy.current) return;
+    if (!pagingAvailable || !cursor || olderBusy.current) return;
     olderBusy.current = true;
     setHistory({ busy: true, error: '' });
     try {
-      const data = await api(`/owner-thread?limit=200&paged=true&before=${encodeURIComponent(cursor)}`);
+      const data = await readWindow(cursor);
       if (!mounted.current) return;
-      if (!Object.hasOwn(data, 'next_before') || data.next_before === cursor) throw new Error('History cursor did not advance; refresh the Inbox to restart.');
+      if (data.pagingAvailable && data.next_before === cursor) throw new Error('History cursor did not advance; reload this page to restart.');
       setItems(previous => {
         const merged = new Map((previous || []).map(item => [item.id, item]));
         for (const item of data.items || []) merged.set(item.id, item);
         return [...merged.values()].sort((a, b) => new Date(b.created_at) - new Date(a.created_at) || b.id - a.id);
       });
-      setCursor(data.next_before);
-      setPage(Math.floor((items?.length || 0) / PAGE_SIZE));
+      setPagingAvailable(data.pagingAvailable);
+      setCursor(data.pagingAvailable ? data.next_before : undefined);
+      if (data.pagingAvailable) setPage(Math.floor((items?.length || 0) / PAGE_SIZE));
       setHistory({ busy: false, error: '' });
     } catch (e) { if (mounted.current) setHistory({ busy: false, error: e.message }); }
     finally { olderBusy.current = false; }
@@ -73,8 +93,9 @@ export default function OwnerInbox({ api }) {
     <InboxCompose api={api} onSent={() => setAttempt(value => value + 1)} />
     {error && <div className="dash-error" role="alert">{items ? 'Updates unavailable. Showing previously loaded messages. ' : 'Inbox unavailable. '}{error} <button onClick={() => setAttempt(value => value + 1)}>Retry</button></div>}
     {items !== null && <div className="owner-inbox-history">
-      {cursor && <button disabled={history.busy} onClick={loadOlder}>{history.busy ? 'Loading older messages…' : 'Load older messages'}</button>}
-      {cursor === null && <p role="status">Start of conversation reached · {rows.length} messages loaded</p>}
+      {pagingAvailable === false && <p role="status">Full-history paging is unavailable. Showing up to 200 recent messages and any history already loaded.</p>}
+      {pagingAvailable && cursor && <button disabled={history.busy} onClick={loadOlder}>{history.busy ? 'Loading older messages…' : 'Load older messages'}</button>}
+      {pagingAvailable && cursor === null && <p role="status">Start of conversation reached · {rows.length} messages loaded</p>}
       {history.error && <p role="alert">Older messages unavailable. {history.error} <button onClick={loadOlder}>Retry older messages</button></p>}
     </div>}
     {items === null && !error && <p role="status">Loading inbox…</p>}

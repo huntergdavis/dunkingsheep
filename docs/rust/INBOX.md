@@ -166,6 +166,8 @@ no-store`, and retain a per-request limit of 1..200. That is a page size, not a 
 
 The existing daemon `owner_conversation` accepts one new optional nullable `before_id` argument:
 null opts into a stable first page, and a canonical message ID opts into a page before that row.
+The advertised schema uses plain `type=string` for strict grouped MCP clients; null is an internal
+RPC wire convention, not a nullable MCP type.
 It cannot be combined with the legacy timestamp `before`. Legacy calls retain their ordering
 and wire shape. Only cursor queries sort by creation time and numeric ID descending before
 returning the selected window oldest-first, so equal timestamps cross a boundary without
@@ -179,3 +181,10 @@ History is live rather than a database snapshot; refresh the page to restart aft
 cursor or changed lane membership. Deploy this daemon extension before the S-F desk. Older
 daemons refuse the new argument; there is no fallback to consuming reads or timestamp paging.
 The frozen `4cd8dc6a` desk stage does not include S-F. Human/owner-lane filters are a later slice.
+
+If paging is unavailable (including a daemon rollback), the Inbox loads the existing read-only
+recent window instead, retains history already loaded, hides Load older and shows a short note.
+It never calls consuming reads or pretends that the fallback reached the start of history.
+Newest polling probes for paging again, so the controls recover after an upgrade. Auth/origin
+failures never trigger this fallback. A cursor-only failure probes the first page: when paging
+still works, the cursor error and reload guidance stay visible rather than silently restarting.
