@@ -21,7 +21,10 @@ PORT_SOCKET = socket.socket()
 PORT_SOCKET.bind(('127.0.0.1', 0))
 PORT = PORT_SOCKET.getsockname()[1]
 PORT_SOCKET.close()
-BASE = f'http://127.0.0.1:{PORT}'
+# Exercise the owned-hostname authority accepted by the LAN-only policy without
+# exposing this fixture on a LAN interface. Chromium alone resolves it to 127.
+HOST = socket.gethostname().split('.')[0]
+BASE = f'http://{HOST}:{PORT}'
 for name, text in {
     'tmux': f'#!/bin/sh\nexec /usr/bin/tmux -L {SOCKET} "$@"\n',
     'gh': '#!/bin/sh\nexit 1\n',
@@ -52,10 +55,10 @@ env = {
     'DUNKINGSHEEP_TMUX_SOCKET': SOCKET,
     'DUNKINGSHEEP_TMUX_REGISTRY': str(RUN / 'config/tmux-panes.json'),
     'DUNKINGSHEEP_TERMINAL_STREAM': '1',
-    'DUNKINGSHEEP_TERMINAL_STREAM_HOSTS': f'127.0.0.1:{PORT}',
+    'DUNKINGSHEEP_TERMINAL_STREAM_HOSTS': f'{HOST}:{PORT}',
     'VP_CHANNELS_FILE': str(RUN / 'channels.json'),
     'VP_DATA_DIR': str(RUN / 'data'), 'VP_BIND': '127.0.0.1', 'VP_PORT': str(PORT),
-    'VP_PASSWORD': 'private-fixture-password', 'DS_DESK_SCHEME': 'http',
+    'VP_PASSWORD': 'fixture-only', 'DS_DESK_SCHEME': 'http',
     'TMPDIR': str(RUN),
 }
 (RUN / 'channels.json').write_text(json.dumps([{'id':'fixture','name':'Fixture','match':'fixture','kind':'monitor'}]))
@@ -73,15 +76,25 @@ try:
     for _ in range(100):
         if desk.poll() is not None: raise RuntimeError((RUN/'desk.log').read_text())
         try:
-            urllib.request.urlopen(BASE + '/', timeout=1)
+            probe = urllib.request.Request(f'http://127.0.0.1:{PORT}/', headers={'Host':f'{HOST}:{PORT}'})
+            urllib.request.urlopen(probe, timeout=1)
             break
         except Exception: time.sleep(.1)
     with sync_playwright() as p:
-        browser = p.chromium.launch(executable_path=os.environ['CHROMIUM_PATH'], headless=True, args=['--no-sandbox','--disable-dev-shm-usage'])
+        browser = p.chromium.launch(executable_path=os.environ['CHROMIUM_PATH'], headless=True, args=[
+            '--no-sandbox', '--disable-dev-shm-usage', '--no-proxy-server',
+            f'--host-resolver-rules=MAP {HOST} 127.0.0.1',
+        ])
         context = browser.new_context()
-        response = context.request.post(BASE+'/api/login', data={'password':'private-fixture-password'}, headers={'Origin':BASE})
-        assert response.status == 200, response.text()
         page = context.new_page()
+        # APIRequestContext uses OS DNS rather than Chromium's resolver rules.
+        # Browser fetch keeps both the login and WebSocket on the owned origin.
+        page.goto(BASE+'/', wait_until='domcontentloaded')
+        status = page.evaluate('''async () => (await fetch('/api/login', {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({password:'fixture-only'})
+        })).status''')
+        assert status == 200, status
         events = []
         output = bytearray()
         def ws_open(ws):
@@ -128,7 +141,7 @@ try:
         page.wait_for_timeout(1500)
         (RUN/'output.bin').write_bytes(output)
         received = (RUN/'received').read_bytes() if (RUN/'received').exists() else b''
-        result = {'fixture':str(RUN),'pane':pane,'non_owner':True,'sent':len(payload),'received':len(received),'exact':received==payload.encode(),'output_complete':b't4955-output-end' in output,'output_bytes':len(output),'timings':timings,'events':events,'status':page.locator('.project-terminal [role=status]').inner_text()}
+        result = {'fixture':str(RUN),'host':HOST,'connect_address':'127.0.0.1','pane':pane,'non_owner':True,'sent':len(payload),'received':len(received),'exact':received==payload.encode(),'output_complete':b't4955-output-end' in output,'output_bytes':len(output),'timings':timings,'events':events,'status':page.locator('.project-terminal [role=status]').inner_text()}
         (RUN/'result.json').write_text(json.dumps(result,indent=2))
         print(json.dumps(result),flush=True)
         browser.close()
