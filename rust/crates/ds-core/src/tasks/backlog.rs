@@ -160,7 +160,7 @@ impl Tasks {
             })
             .await?;
         let wanted = |r: &&Row| {
-            statuses.iter().any(|s| *s == r.status)
+            statuses.contains(&r.status)
                 && (query.priorities.is_empty() || query.priorities.contains(&r.priority))
                 && (query.kinds.is_empty() || query.kinds.contains(&r.kind))
                 && query.project.as_deref().is_none_or(|p| p == r.project)

@@ -204,7 +204,8 @@ fn the_table_accepts_exactly_the_subcommands_the_dispatcher_routes() {
             "followers",
             "stats",
             "metrics",
-            "reap"
+            "reap",
+            "backlog"
         ])
     );
     assert_eq!(
