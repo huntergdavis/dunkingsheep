@@ -339,12 +339,9 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
             let stderr = String::from_utf8_lossy(&output.stderr);
-            assert_eq!(
-                1,
-                stderr
-                    .matches("ERROR dialog alert %stuck-test -> coordinator failed")
-                    .count(),
-                "a failing sink is logged once, not on every retry:\n{stderr}"
+            assert!(
+                !stderr.contains("ERROR dialog alert"),
+                "both sinks deliver in this fixture, so no failure is logged:\n{stderr}"
             );
             return;
         }
@@ -429,32 +426,35 @@ mod tests {
                 now - 31.0,
             ));
         // The owner sink wrote one row to the owner mailbox. This fixture has no project
-        // coordinator and no registered owner lane, so the lane sink fails, with a reason.
+        // coordinator, so the lane sink told the registered owner lane (w9:pH): a second
+        // watchdog row, in that lane's own mailbox.
         assert_eq!(1, alert_rows(Some("owner")), "one row in the owner mailbox");
-        assert_eq!(1, alert_rows(None), "and nothing anywhere else");
+        assert_eq!(2, alert_rows(None), "and one notice to the owner lane");
         let alert_db = std::path::PathBuf::from(std::env::var("DUNKINGSHEEP_DIR").unwrap())
             .join("dialog-alerts.db");
-        let lane_failures = || -> i64 {
-            rusqlite::Connection::open(&alert_db)
-                .expect("alert database")
-                .query_row(
-                    "SELECT failures FROM alerts WHERE sink = ?1",
-                    [crate::dialog_alerts::LANE_SINK],
-                    |row| row.get(0),
+        let delivered: Vec<(String, i64)> = {
+            let db = rusqlite::Connection::open(&alert_db).expect("alert database");
+            let mut statement = db
+                .prepare(
+                    "SELECT sink, failures FROM alerts WHERE delivered IS NOT NULL ORDER BY sink",
                 )
-                .expect("lane sink ledger row")
+                .expect("ledger query");
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .expect("ledger rows")
+                .map(|row| row.expect("ledger row"))
+                .collect();
+            rows
         };
-        assert_eq!(1, lane_failures());
-        rusqlite::Connection::open(&alert_db)
-            .expect("alert database")
-            .execute(
-                "UPDATE alerts SET last_attempt = ?1 WHERE sink = ?2",
-                (
-                    crate::clock::now_s() - crate::dialog_alerts::RETRY_S - 1.0,
-                    crate::dialog_alerts::LANE_SINK,
-                ),
-            )
-            .expect("make the failed lane sink due for retry");
+        assert_eq!(
+            vec![
+                (crate::dialog_alerts::LANE_SINK.to_string(), 0),
+                ("owner".to_string(), 0)
+            ],
+            delivered,
+            "both sinks are recorded as delivered, with no failures"
+        );
+        // The same dialog a moment later: both sinks are inside their cooldown, nothing repeats.
         services
             .runtime
             .block_on(adapter.helper_stuckenv_note_stale_panel(
@@ -462,12 +462,7 @@ mod tests {
                 "Allow command?",
                 now - 31.0,
             ));
-        assert_eq!(2, lane_failures(), "the failed lane sink is retried");
-        assert_eq!(
-            1,
-            alert_rows(None),
-            "the delivered owner-mailbox alert is not repeated"
-        );
+        assert_eq!(2, alert_rows(None), "a delivered alert is not repeated");
         let metrics = services.flock.stores().metrics.expect("runtime metrics");
         let events = metrics
             .events_between(0.0, crate::clock::now_s() + 1.0)
