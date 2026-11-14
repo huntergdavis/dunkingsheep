@@ -15,3 +15,16 @@ Ending events are persisted before delivery through the existing `Flock.inbox_se
 CI completion uses the base branch's required-status-check endpoint. Missing checks remain pending. Check-run requirements bound to an App ID accept only that App's runs; superseded attempts are ignored. A completed canonical review task for the exact repo/PR/head ends the wait even when a multi-review repository still has a pending aggregate status. This reuses the daemon task actor without another API read. The `dunkingsheep/review` context also has its own verdict event and does not hold CI completion open. Unavailable required-check policy, malformed responses, or more than 100 check runs/statuses fail the observation and eventually produce “could not watch”; the service does not infer success. Ruleset-only requirements are not supported by this first slice. A branch with no configured CI checks waits for the other ending events or expiry. GitHub App installations need read access to PRs, commit statuses, checks and branch-protection metadata.
 
 Tests use in-process fixture transports only. The worktree's local commands use `ds-cargo` with an isolated target directory. This change ships in a later independently reviewed daemon release; it does not alter production services or release files. Python generator edits describe the Rust-only CLI/API extension and refresh test fixtures; the retired Python runtime is unchanged, so there is no Python behavior requiring a Rust parity task.
+
+
+When the required-check policy read returns 403 or 404, a wait can report observed
+CI outcomes without claiming branch protection is satisfied. A nonempty, complete
+set in which every observed run/status succeeded is labelled exactly
+`required checks unknown / all observed checks green`. Failures name the observed
+checks, while pending or empty results keep waiting. Missing, malformed, partial
+or truncated data never produces a green notice. Other HTTP failures retain the
+bounded error/retry behavior. A readable required policy keeps the existing
+required-check behavior.
+
+This is a notification fallback only. It does not alter review-sync's merge gate
+or substitute observed green results for a verified required-check policy.
