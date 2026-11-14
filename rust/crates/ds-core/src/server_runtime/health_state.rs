@@ -81,6 +81,9 @@ impl HealthEnv for CoreHealthEnv<'_, '_> {
     fn registry_pane_gap(&self) -> Option<Result<Vec<Value>, String>> {
         Some(Ok(self.adapter.health_registry_gap()))
     }
+    fn root_used_fraction(&self) -> Option<Result<f64, String>> {
+        Some(crate::health::used_fraction(std::path::Path::new("/")))
+    }
 }
 
 struct CoreCaptureEnv<'a, 'b> {
@@ -576,7 +579,32 @@ with open(traffic,'w') as out:
                 let command = request["cmd"].as_str().unwrap();
                 seen.push(command.to_owned());
                 let response = match dispatcher.dispatch(command, &request["args"], &worker()) {
-                    Ok(result) => json!({"ok":true,"result":result}),
+                    Ok(mut result) => {
+                        // `checks.disk_root` (t3912) is Rust-only and depends on how full this
+                        // machine's root filesystem is, so the recorded Python traffic cannot
+                        // hold it. It must be there, and it is left out of the comparison.
+                        if command == "health" {
+                            let disk = result["checks"]
+                                .as_object_mut()
+                                .and_then(|checks| checks.remove("disk_root"))
+                                .expect("the production health run samples the root filesystem");
+                            assert!(disk["used_percent"].is_i64(), "{disk}");
+                            if disk["alerting"] == true {
+                                // A nearly full test machine: the disk problem is not the
+                                // oracle's either.
+                                if let Some(problems) = result["problems"].as_array_mut() {
+                                    problems.retain(|problem| {
+                                        !problem
+                                            .as_str()
+                                            .is_some_and(|text| text.starts_with("root filesystem"))
+                                    });
+                                    let ok = problems.is_empty();
+                                    result["ok"] = json!(ok);
+                                }
+                            }
+                        }
+                        json!({"ok":true,"result":result})
+                    }
                     Err(error) => json!({"ok":false,"error":error.to_string()}),
                 };
                 writeln!(stream, "{response}").unwrap();

@@ -31,6 +31,11 @@ pub struct Thresholds {
     pub dispatch_stale_s: i64,
     /// `DISK_MIN_FREE_BYTES`: 512 MiB.
     pub disk_min_free_bytes: u64,
+    /// The root filesystem is a problem from this used fraction on (t3912): 85%.
+    pub disk_warn_used_fraction: f64,
+    /// ... and stays one until it is below this: 80%. The gap keeps a disk that hovers at the
+    /// warning level from alerting and clearing on every run.
+    pub disk_clear_used_fraction: f64,
 }
 
 impl Default for Thresholds {
@@ -39,6 +44,8 @@ impl Default for Thresholds {
             wal_warn_bytes: 64 * 1024 * 1024,
             dispatch_stale_s: 16 * 60,
             disk_min_free_bytes: 512 * 1024 * 1024,
+            disk_warn_used_fraction: 0.85,
+            disk_clear_used_fraction: 0.80,
         }
     }
 }
@@ -63,6 +70,45 @@ pub trait HealthEnv {
     fn registry_pane_gap(&self) -> Option<Result<Vec<Value>, String>> {
         None
     }
+    /// How full the root filesystem is, as `df` counts it (0.0 to 1.0); `None` when this
+    /// environment does not sample it, `Err` when the sample failed.
+    fn root_used_fraction(&self) -> Option<Result<f64, String>> {
+        None
+    }
+}
+
+/// The used fraction of the filesystem holding `path`, the way `df` prints it: used blocks over
+/// used plus the blocks an ordinary user may still take.
+pub fn used_fraction(path: &Path) -> Result<f64, String> {
+    let stat = statvfs(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let used = stat.blocks().saturating_sub(stat.blocks_free());
+    let usable = used + stat.blocks_available();
+    if usable == 0 {
+        return Err(format!(
+            "{}: the filesystem reports no blocks",
+            path.display()
+        ));
+    }
+    Ok(used as f64 / usable as f64)
+}
+
+/// Is the root filesystem a problem now? It becomes one at the warning level and stays one
+/// until it is below the clearing level.
+pub fn disk_alerting(used: f64, was_alerting: bool, thresholds: &Thresholds) -> bool {
+    if was_alerting {
+        used >= thresholds.disk_clear_used_fraction
+    } else {
+        used >= thresholds.disk_warn_used_fraction
+    }
+}
+
+/// Whether the last written health report had the root filesystem as a problem. A report that
+/// is missing or unreadable says no.
+fn disk_was_alerting(config_dir: &Path) -> bool {
+    std::fs::read_to_string(config_dir.join("health.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .is_some_and(|report| report["checks"]["disk_root"]["alerting"] == true)
 }
 
 /// `HEALTH_PATH`: `~/.config/dunkingsheep/health.json` (the Python expands `~`, it does not
@@ -283,6 +329,36 @@ pub fn run_health(
     checks.insert("disk_free_bytes".into(), json!(free));
     if free < thresholds.disk_min_free_bytes {
         problems.push(format!("disk free below threshold: {free} bytes"));
+    }
+    // t3912: the root filesystem filled up unnoticed. From 85% used it is a problem, and it
+    // stays one until it is below 80%. The watchdog's `health.failed` rule turns a problem
+    // into one alert and its disappearance into one "resolved" line, so this neither repeats
+    // per run nor flaps at the threshold. The previous state is the last written report.
+    if let Some(sample) = env.root_used_fraction() {
+        let was = disk_was_alerting(config_dir);
+        // Whole percent, rounded down (84.9% reads 84, never the 85 it has not reached); the
+        // small term absorbs binary noise such as 0.85 * 100.
+        let percent = |fraction: f64| (fraction * 100.0 + 1e-9).floor() as i64;
+        let disk = match sample {
+            Ok(used) => {
+                let alerting = disk_alerting(used, was, thresholds);
+                if alerting {
+                    problems.push(format!(
+                        "root filesystem {}% used (a problem from {}%, until below {}%)",
+                        percent(used),
+                        percent(thresholds.disk_warn_used_fraction),
+                        percent(thresholds.disk_clear_used_fraction),
+                    ));
+                }
+                json!({"used_percent": percent(used), "alerting": alerting, "reason": null})
+            }
+            // Unknown is not "fine": the state it had stays, and the failure is a problem.
+            Err(error) => {
+                problems.push(format!("root filesystem usage could not be read: {error}"));
+                json!({"used_percent": null, "alerting": was, "reason": error})
+            }
+        };
+        checks.insert("disk_root".into(), disk);
     }
 
     match env.task_totals() {
