@@ -127,6 +127,10 @@ struct PendingState {
     handed_out: Option<i64>,
     /// Cells dropped because the backlog was full.
     dropped: i64,
+    /// A write has failed and none has succeeded since.
+    failing: bool,
+    /// `dropped` when the current outage started.
+    dropped_before: i64,
 }
 
 /// The cells not yet written: the current minute, and any earlier one until it is written.
@@ -172,6 +176,28 @@ impl Pending {
             state.handed_out = Some(minute);
         }
         closed
+    }
+
+    /// A write failed: keep its cells (see `restore`). True when this starts an outage.
+    pub fn write_failed(&self, closed: Vec<(Key, Cell)>) -> bool {
+        self.restore(closed);
+        let mut state = self.state();
+        let first = !state.failing;
+        if first {
+            state.failing = true;
+            state.dropped_before = state.dropped;
+        }
+        first
+    }
+
+    /// A write succeeded. When that ends an outage: how many cells the outage dropped.
+    pub fn write_succeeded(&self) -> Option<i64> {
+        let mut state = self.state();
+        if !state.failing {
+            return None;
+        }
+        state.failing = false;
+        Some(state.dropped - state.dropped_before)
     }
 
     /// Put cells back after a failed write; the next minute tries again. Only `MAX_BACKLOG`

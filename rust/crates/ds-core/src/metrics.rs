@@ -99,34 +99,48 @@ impl MetricsStore {
         if closed.is_empty() {
             return;
         }
-        let rows = closed.clone();
-        let written = self.writer.call(move |conn| {
-            let tx = conn.transaction().map_err(crate::db::map_sqlite)?;
-            for ((minute, command, role), cell) in &rows {
-                tx.execute(
-                    "INSERT INTO command_minutes (minute, command, role, count, errors, \
-                     total_ms, max_ms, bytes, buckets) VALUES (?,?,?,?,?,?,?,?,?)",
-                    rusqlite::params![
-                        minute,
-                        command,
-                        role,
-                        cell.count,
-                        cell.errors,
-                        cell.total_ms,
-                        cell.max_ms,
-                        cell.bytes,
-                        cell.buckets_text()
-                    ],
-                )
-                .map_err(crate::db::map_sqlite)?;
-            }
-            tx.commit().map_err(crate::db::map_sqlite)
-        });
-        if written.is_err() {
-            self.commands.restore(closed);
+        if let Some(line) = self.write_commands(closed) {
+            tracing::warn!("{line}");
         }
     }
 
+    /// Write complete cells, waiting at most `COMMAND_WRITE_BUSY` for a locked database: this
+    /// runs inside a request, once per minute. A failed write keeps the cells (bounded) for the
+    /// next minute. Returns the one log line an outage gets when it starts and when it ends.
+    fn write_commands(
+        &self,
+        closed: Vec<(crate::command_stats::Key, crate::command_stats::Cell)>,
+    ) -> Option<String> {
+        let rows = closed.clone();
+        let written = self.writer.call(move |conn| {
+            let usual: i64 = conn
+                .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+                .map_err(crate::db::map_sqlite)?;
+            conn.busy_timeout(COMMAND_WRITE_BUSY)
+                .map_err(crate::db::map_sqlite)?;
+            let outcome = insert_command_rows(conn, &rows);
+            let _ = conn.busy_timeout(std::time::Duration::from_millis(usual.max(0) as u64));
+            outcome
+        });
+        match written {
+            Ok(()) => self.commands.write_succeeded().map(|dropped| {
+                format!(
+                    "command counters: metrics.db accepts writes again; {dropped} cells were \
+                     dropped during the outage"
+                )
+            }),
+            Err(error) => {
+                let first = self.commands.write_failed(closed);
+                first.then(|| {
+                    format!(
+                        "command counters: metrics.db write failed ({error}); keeping at most {} \
+                         cells and retrying once per minute",
+                        crate::command_stats::MAX_BACKLOG
+                    )
+                })
+            }
+        }
+    }
     /// Per-command cells lost because failed writes filled the backlog.
     pub fn commands_dropped(&self) -> i64 {
         self.commands.dropped()
@@ -275,6 +289,35 @@ impl MetricsStore {
                 .map_err(crate::db::map_sqlite)
         })
     }
+}
+
+/// How long a command-counter write waits for a locked database before it counts as failed.
+pub const COMMAND_WRITE_BUSY: std::time::Duration = std::time::Duration::from_millis(50);
+
+fn insert_command_rows(
+    conn: &mut rusqlite::Connection,
+    rows: &[(crate::command_stats::Key, crate::command_stats::Cell)],
+) -> Result<(), crate::error::DunkError> {
+    let tx = conn.transaction().map_err(crate::db::map_sqlite)?;
+    for ((minute, command, role), cell) in rows {
+        tx.execute(
+            "INSERT INTO command_minutes (minute, command, role, count, errors, total_ms, \
+             max_ms, bytes, buckets) VALUES (?,?,?,?,?,?,?,?,?)",
+            rusqlite::params![
+                minute,
+                command,
+                role,
+                cell.count,
+                cell.errors,
+                cell.total_ms,
+                cell.max_ms,
+                cell.bytes,
+                cell.buckets_text()
+            ],
+        )
+        .map_err(crate::db::map_sqlite)?;
+    }
+    tx.commit().map_err(crate::db::map_sqlite)
 }
 
 /// What each event means. Returned with every summary, so a consumer never guesses.
@@ -719,5 +762,51 @@ mod command_tests {
             .map(|(_, cell)| cell.count)
             .sum();
         assert_eq!(4, counts);
+    }
+}
+
+#[cfg(test)]
+mod command_outage_tests {
+    use super::*;
+
+    /// A locked database fails the write within the short wait, and an outage gets one line
+    /// when it starts and one when it ends, however many minutes it lasts.
+    #[test]
+    fn a_locked_database_fails_fast_and_an_outage_logs_its_start_and_end_once() {
+        let dir = crate::testsupport::dir("metrics-command-outage");
+        let store = MetricsStore::open(dir.path().join("metrics.db")).unwrap();
+        let other = rusqlite::Connection::open(dir.path().join("metrics.db")).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        store
+            .commands
+            .add(600.0, "task_list", "worker", 3, 100, true);
+        let closed = store.commands.add(660.0, "roster", "owner", 1, 10, true);
+        let started = std::time::Instant::now();
+        let line = store.write_commands(closed).expect("the outage starts");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(line.contains("write failed"), "{line}");
+
+        let closed = store.commands.add(720.0, "roster", "owner", 1, 10, true);
+        assert_eq!(2, closed.len(), "the held minute is retried with the next");
+        assert_eq!(None, store.write_commands(closed), "no second line");
+
+        other.execute_batch("COMMIT").unwrap();
+        let closed = store.commands.add(780.0, "roster", "owner", 1, 10, true);
+        let line = store.write_commands(closed).expect("the outage ends");
+        assert!(line.contains("accepts writes again; 0 cells"), "{line}");
+        let closed = store.commands.add(840.0, "roster", "owner", 1, 10, true);
+        assert_eq!(
+            None,
+            store.write_commands(closed),
+            "a healthy write logs nothing"
+        );
+        let counts: i64 = store
+            .command_cells(0.0, 900.0)
+            .unwrap()
+            .iter()
+            .map(|(_, cell)| cell.count)
+            .sum();
+        assert_eq!(5, counts, "nothing was lost");
     }
 }
