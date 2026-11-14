@@ -1190,6 +1190,14 @@ fn a_dunk_held_by_a_draft_is_one_inbox_row_and_wakes_even_a_silent_mailbox_each_
             .is_empty(),
         "a stored dunk never shows in the owner's conversation"
     );
+    assert!(
+        inbox
+            .store
+            .conversation(&summary.mailbox, None, None)
+            .unwrap()
+            .is_empty(),
+        "nor through the plain conversation query"
+    );
     inbox
         .store
         .upsert_digest(crate::inbox_store::DigestUpsert::new(
