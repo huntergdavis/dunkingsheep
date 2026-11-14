@@ -637,6 +637,32 @@ pub fn task_row(task: &Value) -> String {
 
 /// `print_task`.
 pub fn render_task(task: &Value, stamp: Stamp) -> String {
+    if get(task, "summary").as_bool() == Some(true) {
+        let mut out = format!(
+            "{} {}  {}\nassignees   {}\n",
+            py_str(get(task, "id")),
+            py_str(get(task, "status")),
+            py_str(get(task, "title")),
+            join(get(task, "assignees"), ", ")
+        );
+        if get(task, "assignees_more").as_u64().unwrap_or(0) > 0 {
+            out += &format!("assignees   {} more\n", py_str(get(task, "assignees_more")));
+        }
+        if truthy(get(task, "block_reason")) {
+            out += &format!("blocked     {}\n", py_str(get(task, "block_reason")));
+        }
+        out += &format!("\n{}\n\nlatest notes by kind:\n", py_str(get(task, "body")));
+        for row in get(task, "notes").as_array().into_iter().flatten() {
+            out += &format!(
+                "  {} {} {}\n    {}\n",
+                py_str(get(row, "kind")),
+                stamp(num(get(row, "at"))),
+                row["actor"].as_str().unwrap_or("-"),
+                py_str(get(row, "reason"))
+            );
+        }
+        return out;
+    }
     let mut out = format!(
         "{} [{}] {}  {}\n",
         py_str(get(task, "id")),
@@ -732,7 +758,11 @@ pub fn render_task(task: &Value, stamp: Stamp) -> String {
             } else {
                 "note".into()
             };
-            out += &format!("  {} {actor} {event}\n", stamp(num(get(row, "at"))));
+            let label = row["kind"]
+                .as_str()
+                .map(|kind| format!("{kind} ({event})"))
+                .unwrap_or(event);
+            out += &format!("  {} {actor} {label}\n", stamp(num(get(row, "at"))));
             let reason = if truthy(get(row, "reason")) {
                 py_str(get(row, "reason"))
             } else {
@@ -745,6 +775,20 @@ pub fn render_task(task: &Value, stamp: Stamp) -> String {
             for line in lines {
                 out += &format!("    {line}\n");
             }
+        }
+    }
+    if get(task, "notes_more").as_bool() == Some(true) {
+        if let Some(cursor) = get(task, "next_before_note").as_str() {
+            let kind = get(task, "notes_kind")
+                .as_str()
+                .map(|kind| format!(" --kind {kind}"))
+                .unwrap_or_default();
+            out += &format!(
+                "\nmore notes: task read {} --notes all --before-note {cursor}{kind}\n",
+                py_str(get(task, "id"))
+            );
+        } else {
+            out += "\nmore notes available\n";
         }
     }
     out

@@ -281,7 +281,7 @@ fn truthy(value: &Value) -> bool {
     }
 }
 
-fn python_repr(value: &Value) -> String {
+pub(super) fn python_repr(value: &Value) -> String {
     match value {
         Value::Null => "None".into(),
         Value::Bool(true) => "True".into(),

@@ -1015,6 +1015,10 @@ pub static ROOT: Cmd = Cmd {
                     args: &[
                         Arg { id: "json", dest: "json", tri: false, default_int: false, flags: &["--json"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: None, hidden: true, metavar: None, version: None },
                         Arg { id: "id", dest: "id", tri: false, default_int: false, flags: &[], positional: true, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: true, help: None, hidden: false, metavar: None, version: None },
+                        Arg { id: "summary", dest: "summary", tri: false, default_int: false, flags: &["--summary"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: Some("bounded body and latest note of each kind"), hidden: false, metavar: None, version: None },
+                        Arg { id: "notes", dest: "notes", tri: false, default_int: false, flags: &["--notes"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("latest N notes (CEILING 200), or all for a 200-note history page, oldest first"), hidden: false, metavar: Some("N|all"), version: None },
+                        Arg { id: "kind", dest: "kind", tri: false, default_int: false, flags: &["--kind"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &["evidence", "decision", "handoff", "progress", "correction", "note"], default: None, required: false, help: Some("filter --notes by kind; note includes legacy events"), hidden: false, metavar: None, version: None },
+                        Arg { id: "before_note", dest: "before_note", tri: false, default_int: false, flags: &["--before-note"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("continue --notes before this scoped note cursor"), hidden: false, metavar: Some("ID"), version: None },
                     ],
                     groups: &[],
                     sub_dest: None, sub_metavar: None, sub_required: false,
@@ -1163,6 +1167,7 @@ pub static ROOT: Cmd = Cmd {
                         Arg { id: "id", dest: "id", tri: false, default_int: false, flags: &[], positional: true, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: true, help: None, hidden: false, metavar: None, version: None },
                         Arg { id: "event", dest: "event", tri: false, default_int: false, flags: &["--event"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: Some("note"), required: false, help: None, hidden: false, metavar: None, version: None },
                         Arg { id: "reason", dest: "reason", tri: false, default_int: false, flags: &["--reason"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: None, hidden: false, metavar: None, version: None },
+                        Arg { id: "kind", dest: "kind", tri: false, default_int: false, flags: &["--kind"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &["evidence", "decision", "handoff", "progress", "correction"], default: None, required: false, help: Some("fixed note classification; free --event names remain legacy notes"), hidden: false, metavar: None, version: None },
                     ],
                     groups: &[],
                     sub_dest: None, sub_metavar: None, sub_required: false,

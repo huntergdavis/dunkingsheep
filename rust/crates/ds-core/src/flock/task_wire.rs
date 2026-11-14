@@ -377,6 +377,18 @@ impl Flock {
     }
 
     /// Authorize and read full row/notes inside the store's single snapshot callback.
+    pub async fn task_read_history_wire(
+        &self,
+        task_id: &str,
+        self_pane_id: Option<&str>,
+        view: crate::tasks::history::HistoryView,
+    ) -> Result<Value, DunkError> {
+        self.task_store()?
+            .read_history_wire(task_id, self_pane_id, view)
+            .await
+    }
+
+    /// Authorize and read full row/notes inside the store's single snapshot callback.
     pub async fn task_read_wire_with_notes(
         &self,
         task_id: &str,

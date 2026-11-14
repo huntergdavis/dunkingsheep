@@ -1,9 +1,14 @@
-usage: dunkingsheep task note [-h] [--event EVENT] [--reason REASON] id
+usage: dunkingsheep task note [-h] [--event EVENT] [--reason REASON]
+                              [--kind {evidence,decision,handoff,progress,correction}]
+                              id
 
 positional arguments:
   id
 
 options:
-  -h, --help       show this help message and exit
+  -h, --help            show this help message and exit
   --event EVENT
   --reason REASON
+  --kind {evidence,decision,handoff,progress,correction}
+                        fixed note classification; free --event names remain
+                        legacy notes

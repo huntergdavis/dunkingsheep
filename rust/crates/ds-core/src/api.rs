@@ -3523,6 +3523,19 @@ fn with_task_project(context: &HandlerContext<'_>, mut wire: Value) -> Result<Va
 /// `dunk_api.h_task_read`.
 pub fn h_task_read(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let id = args.get("id").map(python_value_string).unwrap_or_default();
+    if let Some(view) = crate::tasks::history::HistoryView::from_args(&args)? {
+        let summary = matches!(view, crate::tasks::history::HistoryView::Summary);
+        let wire = context.block_on(context.flock.task_read_history_wire(
+            &id,
+            context.self_pane_id(),
+            view,
+        ))??;
+        return if summary {
+            Ok(wire)
+        } else {
+            Ok(with_block_kind(with_task_project(context, wire)?))
+        };
+    }
     let task = context.block_on(
         context
             .flock
@@ -3820,9 +3833,13 @@ pub fn h_task_note(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
         .filter(|value| truthy(value))
         .cloned()
         .unwrap_or_else(|| json!("note"));
-    let meta = match args.get("reason").filter(|value| truthy(value)) {
+    let mut meta = match args.get("reason").filter(|value| truthy(value)) {
         Some(reason) => json!({"reason": reason}),
         None => json!({}),
+    };
+    meta["kind"] = match args.get("note_kind") {
+        Some(kind) => json!(crate::tasks::history::validate_note_kind(kind)?),
+        None => json!("note"),
     };
     // t4781: a note from the owner's detached tooling (no pane, owner token) is recorded with
     // the actor `owner-service` rather than no actor at all. Everything else is unchanged.

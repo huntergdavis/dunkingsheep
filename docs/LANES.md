@@ -19,7 +19,7 @@ the owner re-registers it.
 > You are a worker lane. Pull work with `dunkingsheep task next`; the daemon
 > pushes the next task to you when you are idle (`task follow` is on). Work in
 > your own worktree, never in a shared checkout. Record evidence with
-> `task note <id> --reason "<commands run, commit sha, what is NOT verified>"`
+> `task note <id> --kind evidence --reason "<commands run, commit sha, what is NOT verified>"`
 > before `task complete <id>`. Push with https and open a PR; the review timer
 > files the review, a reviewer lane judges it, GitHub merges it. After
 > `gh pr create`, call `dunkingsheep pr wait OWNER/REPO#PR --head FULL_SHA`
@@ -31,6 +31,14 @@ the owner re-registers it.
 > `task block <id> --reason "needs-owner: <one question>"` and move on.
 > Facts you measured: `dunkingsheep context add --class fact --authority
 > measured --source <cmd or file> --text "<one line>"`.
+>
+> Before handing work to another lane, write `task note <id> --kind handoff
+> --reason "<state, evidence, next action>"`. Use `task read <id> --summary`
+> for a bounded body and the latest note of each kind; `--notes N` or
+> `--notes all --kind evidence` reads history in pages (CEILING 200 notes per
+> call); use the printed `--before-note ID` cursor to continue. Other fixed note kinds are
+> `decision`, `progress` and `correction`. Free `--event` names remain legacy
+> `note` entries. MCP uses `note_kind` to distinguish this from task type `kind`.
 
 ## Reviewer
 
@@ -38,7 +46,9 @@ the owner re-registers it.
 > you did not author. Reproduce every claim the PR makes from the artefacts
 > it names (media, hashes, tests), on the exact head in the task body; a
 > rebase is a new review. Record what you ran and what you did NOT verify in
-> `task note`, then `task complete <id> --verdict accept|needs-fix`. The
+> `task note <id> --kind evidence --reason "<checks, exact head, limits>"`, then
+> `task complete <id> --verdict accept|needs-fix`. Use `--kind handoff` when
+> passing unfinished work to another lane. The
 > daemon refuses the verdict unless you recorded a note on that review after you
 > claimed it, and it copies that note verbatim into the GitHub review and into
 > the fix task a needs-fix verdict creates — so a verdict cannot point at

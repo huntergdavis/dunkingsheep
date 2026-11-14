@@ -72,6 +72,15 @@ def load_parser():
     # t4648: the backlog query is Rust-only; the Python CLI had no project mapping to count by.
     task = root.choices["task"]
     task_actions = next(a for a in task._actions if isinstance(a, argparse._SubParsersAction))
+    # t4703: opt-in task history; the archived Python parser stays unchanged.
+    note_kinds = ["evidence", "decision", "handoff", "progress", "correction"]
+    task_actions.choices["note"].add_argument("--kind", choices=note_kinds,
+        help="fixed note classification; free --event names remain legacy notes")
+    task_read = task_actions.choices["read"]
+    task_read.add_argument("--summary", action="store_true", help="bounded body and latest note of each kind")
+    task_read.add_argument("--notes", metavar="N|all", help="latest N notes (CEILING 200), or all for a 200-note history page, oldest first")
+    task_read.add_argument("--kind", choices=note_kinds + ["note"], help="filter --notes by kind; note includes legacy events")
+    task_read.add_argument("--before-note", metavar="ID", help="continue --notes before this scoped note cursor")
     # t4701: a new task takes its creator lane's project; these two override that. Rust-only:
     # the Python task store had no project mapping.
     task_add = task_actions.choices["add"]

@@ -1224,7 +1224,7 @@ pub static COMMANDS: &[Command] = &[
     Command {
         name: "task_note",
         description: "Append an explanatory event to a task's history, including after the task row was deleted; the board's history explains its own gaps.",
-        params: &[Param { name: "id", schema: "{\"type\":\"string\",\"description\":\"Task id, e.g. t12.\"}" }, Param { name: "event", schema: "{\"type\":\"string\",\"description\":\"Event name (default 'note').\"}" }, Param { name: "reason", schema: "{\"type\":\"string\",\"description\":\"Human rationale stored in meta.reason.\"}" }],
+        params: &[Param { name: "id", schema: "{\"type\":\"string\",\"description\":\"Task id, e.g. t12.\"}" }, Param { name: "event", schema: "{\"type\":\"string\",\"description\":\"Event name (default 'note').\"}" }, Param { name: "reason", schema: "{\"type\":\"string\",\"description\":\"Human rationale stored in meta.reason.\"}" }, Param { name: "note_kind", schema: "{\"type\":\"string\",\"enum\":[\"evidence\",\"decision\",\"handoff\",\"progress\",\"correction\"],\"description\":\"Fixed note classification; omitted means legacy note.\"}" }],
         dispatch_required: &["id"],
         required: &["id"],
         mcp: true,
@@ -1254,7 +1254,7 @@ pub static COMMANDS: &[Command] = &[
     Command {
         name: "task_read",
         description: "Read one task with its children, live leases and blocking dependencies.",
-        params: &[Param { name: "id", schema: "{\"type\":\"string\",\"description\":\"Task id, e.g. t12.\"}" }],
+        params: &[Param { name: "id", schema: "{\"type\":\"string\",\"description\":\"Task id, e.g. t12.\"}" }, Param { name: "summary", schema: "{\"type\":\"boolean\",\"description\":\"Bounded summary with latest note of each kind; cannot combine with notes, note_kind or before_note.\"}" }, Param { name: "notes", schema: "{\"type\":\"string\",\"description\":\"Latest 1..200 notes (CEILING), or all for a 200-note page; oldest first. Use next_before_note to continue. Default read unchanged.\"}" }, Param { name: "note_kind", schema: "{\"type\":\"string\",\"enum\":[\"evidence\",\"decision\",\"handoff\",\"progress\",\"correction\",\"note\"],\"description\":\"Filter notes by kind; requires notes. note includes legacy events.\"}" }, Param { name: "before_note", schema: "{\"type\":\"string\",\"description\":\"Continue notes before this task/kind-scoped canonical note id; requires notes.\"}" }],
         dispatch_required: &["id"],
         required: &["id"],
         mcp: true,

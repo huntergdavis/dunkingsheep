@@ -4746,6 +4746,18 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             "read" => {
                 let mut args = Map::new();
                 args.insert("id".into(), ns.get("id").cloned().unwrap_or(Value::Null));
+                if ns.get("summary") == Some(&Value::Bool(true)) {
+                    args.insert("summary".into(), Value::Bool(true));
+                }
+                for (flag, key) in [
+                    ("notes", "notes"),
+                    ("kind", "note_kind"),
+                    ("before_note", "before_note"),
+                ] {
+                    if let Some(value) = ns.get(flag).filter(|value| !value.is_null()) {
+                        args.insert(key.into(), value.clone());
+                    }
+                }
                 crate::daemon_cmd::run_command(ns, "task_read", args, |task| {
                     crate::render_print::render_task(task, &task_stamp)
                 })
@@ -4803,6 +4815,9 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                     "reason".into(),
                     ns.get("reason").cloned().unwrap_or(Value::Null),
                 );
+                if let Some(kind) = ns.get("kind").filter(|value| !value.is_null()) {
+                    args.insert("note_kind".into(), kind.clone());
+                }
                 crate::daemon_cmd::run_command(ns, "task_note", args, |result| {
                     format!(
                         "noted {}: {}\n",

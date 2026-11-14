@@ -642,6 +642,111 @@
      }
     ]
    ]
+  },
+  "task_note": {
+   "params": [
+    [
+     "id",
+     {
+      "type": "string",
+      "description": "Task id, e.g. t12."
+     }
+    ],
+    [
+     "event",
+     {
+      "type": "string",
+      "description": "Event name (default 'note')."
+     }
+    ],
+    [
+     "reason",
+     {
+      "type": "string",
+      "description": "Human rationale stored in meta.reason."
+     }
+    ],
+    [
+     "note_kind",
+     {
+      "type": "string",
+      "enum": [
+       "evidence",
+       "decision",
+       "handoff",
+       "progress",
+       "correction"
+      ],
+      "description": "Fixed note classification; omitted means legacy note."
+     }
+    ]
+   ],
+   "roles": [
+    "owner",
+    "system",
+    "web",
+    "desk",
+    "planner",
+    "worker",
+    "reviewer"
+   ]
+  },
+  "task_read": {
+   "params": [
+    [
+     "id",
+     {
+      "type": "string",
+      "description": "Task id, e.g. t12."
+     }
+    ],
+    [
+     "summary",
+     {
+      "type": "boolean",
+      "description": "Bounded summary with latest note of each kind; cannot combine with notes, note_kind or before_note."
+     }
+    ],
+    [
+     "notes",
+     {
+      "type": "string",
+      "description": "Latest 1..200 notes (CEILING), or all for a 200-note page; oldest first. Use next_before_note to continue. Default read unchanged."
+     }
+    ],
+    [
+     "note_kind",
+     {
+      "type": "string",
+      "enum": [
+       "evidence",
+       "decision",
+       "handoff",
+       "progress",
+       "correction",
+       "note"
+      ],
+      "description": "Filter notes by kind; requires notes. note includes legacy events."
+     }
+    ],
+    [
+     "before_note",
+     {
+      "type": "string",
+      "description": "Continue notes before this task/kind-scoped canonical note id; requires notes."
+     }
+    ]
+   ],
+   "roles": [
+    "owner",
+    "system",
+    "web",
+    "desk",
+    "planner",
+    "worker",
+    "reviewer",
+    "anonymous"
+   ]
   }
  },
  "groups": {
