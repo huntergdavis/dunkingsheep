@@ -120,15 +120,24 @@ fn assert_matches_python(args: &[&str]) {
     let rust = run_binary_without_command(args);
     let python = run_python_reference(args);
     assert_eq!(rust.status.code(), python.status.code(), "args: {args:?}");
-    // The frozen Python oracle describes the old inbox default. Compare the
-    // rest of the guide byte for byte while explicitly checking this Rust-only
-    // behavior change instead of changing the archived oracle.
+    // The frozen Python oracle describes the old inbox default and the old dunk-poll
+    // default. Compare the rest of the guide byte for byte while explicitly checking
+    // these Rust-only behavior changes instead of changing the archived oracle.
     let python_stdout = if matches!(args.first().copied(), Some("guide" | "help" | "docs")) {
         let text = String::from_utf8(python.stdout).unwrap();
         let old = "automatically. `inbox_read` includes global and pane task queues by default;\nuse `dunkingsheep inbox read --messages-only` or\n`inbox_read(include_tasks=false)` to omit them.";
         let new = "automatically. `inbox_read` returns messages without task queues by default;\nuse `dunkingsheep inbox read --with-tasks` or\n`inbox_read(include_tasks=true)` to include the queues. The existing\n`--messages-only` option remains supported and overrides `--with-tasks`.";
         assert!(text.contains(old), "archived guide changed unexpectedly");
-        text.replacen(old, new, 1).into_bytes()
+        let text = text.replacen(old, new, 1);
+        // t4696: the archived guide describes dunk-poll's old default (every fleet dunk, with
+        // text). The Rust guide describes the compact default, --all and --full.
+        let old_poll = "`dunk-poll` is a stdlib-only client: one socket request returns status +\ninbox count + unread messages + dunks (optionally panes/tasks). It\nreplaces three full CLI startups per sidebar poll (the owner's CPU note)\nand never asks the terminal for `pane current`; identity comes from\nTMUX_PANE (HERDR_PANE_ID on the herdr rollback). `dunkingsheep poll` is\nthe same batch for a human, and `dunkingsheep install` writes\n`~/.local/bin/dunk-poll`. The status half skips the terminal probe\nunless --check-herdr is given.";
+        let new_poll = "`dunk-poll` is a small native client: one socket request returns status +\ninbox count + unread messages + dunks (optionally panes/tasks). By default\nthe answer is compact: only the dunks that target the caller's pane (a\ndunk records its target, not who created it), each without the text it\ntypes, and `--tasks` rows reduced to id, status,\npriority, scope, assignees and title. `--all` lists every dunk in the\nfleet (still without text); `--full` returns everything the daemon sent.\nA caller that shows the fleet's dunks (a sidebar, a status board) must\npass `--all`. It\nreplaces three full CLI startups per sidebar poll (the owner's CPU note)\nand never asks the terminal for `pane current`; identity comes from\nTMUX_PANE (HERDR_PANE_ID on the herdr rollback). `dunkingsheep poll` is\nthe daemon's full batch for a human (the same as `dunk-poll --full`), and\n`dunkingsheep install` writes\n`~/.local/bin/dunk-poll`. The status half skips the terminal probe\nunless --check-herdr is given.";
+        assert!(
+            text.contains(old_poll),
+            "archived guide's dunk-poll paragraph changed unexpectedly"
+        );
+        text.replacen(old_poll, new_poll, 1).into_bytes()
     } else {
         python.stdout
     };
