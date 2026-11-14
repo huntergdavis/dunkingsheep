@@ -7265,3 +7265,54 @@ fn an_agent_lane_notice_still_falls_back_at_an_unreadable_box_after_the_hold_lim
         pane.typed
     );
 }
+
+// ---- t4779: the long confirmation ladder also settles a collapsed paste ----
+
+#[test]
+fn the_long_ladder_presses_once_more_for_our_collapsed_paste_and_records_it() {
+    let codex = |prompt_row: &str| {
+        format!("synthetic transcript\n\n{prompt_row}\n\n  GPT-6.1 Terra low \u{b7} ~/work\n")
+    };
+    let hint = codex("\u{203a} \x1b[2mAsk Codex to do anything\x1b[0m");
+    let text = "inspect every coordinator. ".repeat(30)[..600].to_string();
+    let paste = codex("\x1b[1m\u{203a}\x1b[22m \x1b[38;5;6m[Pasted Content 601 chars]\x1b[0m");
+
+    let mut pane = submit_pane("idle");
+    pane.harness.insert(P.into(), "codex".into());
+    // After the script runs out every read is the empty hint.
+    pane.screens.insert(P.into(), hint.clone());
+    {
+        let mut script = pane.screen_script.borrow_mut();
+        // The ladder's own Enter (one read before the key), three empty confirmation reads,
+        // one empty settle read, then the collapsed paste (settle read, and the read before
+        // the extra key).
+        for _ in 0..5 {
+            script.push_back(Some(hint.clone()));
+        }
+        for _ in 0..2 {
+            script.push_back(Some(paste.clone()));
+        }
+    }
+
+    let (ok, detail) = submit(&mut pane, &text, StatusBaseline::ReadNow);
+
+    assert!(ok, "{detail}");
+    assert_eq!("sent (a collapsed paste needed one more Enter)", detail);
+    assert_eq!(
+        vec![
+            (P.to_string(), "Enter".to_string()),
+            (P.to_string(), "Enter".to_string())
+        ],
+        pane.keys,
+        "the ladder's Enter, and exactly one more"
+    );
+    assert_eq!(
+        Some(&(
+            P.to_string(),
+            "ok-collapsed-paste".to_string(),
+            1,
+            text.len()
+        )),
+        pane.submit_metrics.last()
+    );
+}
