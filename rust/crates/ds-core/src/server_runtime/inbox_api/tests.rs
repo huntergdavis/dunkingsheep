@@ -1215,3 +1215,171 @@ fn inbox_archive_falsey_mailbox_uses_python_required_mailbox_error() {
     );
     dispatcher.close();
 }
+
+#[test]
+fn mailbox_summary_pages_preserve_state_audience_and_legacy_defaults() {
+    let (dir, services) = make_services("summary-pages", factory(None), None);
+    let store = services.flock().stores().inbox.unwrap();
+    let mut ids = Vec::new();
+    for index in 0..5 {
+        let message = store
+            .send_snapshot_wire_agent_only(
+                &crate::inbox_store::Outgoing {
+                    mailbox: "w1:p1",
+                    body: Some("body must never be in summaries"),
+                    subject: Some("subject"),
+                    ..Default::default()
+                },
+                None,
+                None,
+                index == 4,
+            )
+            .unwrap();
+        ids.push(message.summary.message_id);
+    }
+    store.ack(&ids[..1], Some("w1:p1")).unwrap();
+    let db = rusqlite::Connection::open(dir.path().join("summary-pages-inbox.db")).unwrap();
+    // Equal timestamps exercise the exclusive ID tie-breaker at every page boundary.
+    db.execute("UPDATE messages SET created_at=100", [])
+        .unwrap();
+    let snapshot = || {
+        db.prepare(
+            "SELECT id,state,read_at,acked_at,cancelled_at,notify_state FROM messages ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<f64>>(2)?,
+                row.get::<_, Option<f64>>(3)?,
+                row.get::<_, Option<f64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+    };
+    let initial = snapshot();
+    let dispatcher = services.dispatcher(handlers());
+    let worker = request("w1:p1");
+    let legacy_args = json!({"mailbox":"w1:p1","unread_only":false,"limit":5});
+    let legacy = dispatcher
+        .dispatch("inbox_list", &legacy_args, &worker)
+        .unwrap();
+    let explicit = dispatcher
+        .dispatch(
+            "inbox_list",
+            &json!({"mailbox":"w1:p1","unread_only":false,"limit":5,"newest_first":false}),
+            &worker,
+        )
+        .unwrap();
+    let without_clock = |mut value: serde_json::Value| {
+        for row in value["messages"].as_array_mut().unwrap() {
+            row.as_object_mut().unwrap().remove("waiting_s");
+        }
+        value
+    };
+    assert_eq!(without_clock(legacy.clone()), without_clock(explicit));
+    assert_eq!(legacy["messages"][0]["message_id"], ids[0]);
+    assert!(legacy.get("next_before").is_none());
+    assert!(legacy.get("order").is_none());
+    assert!(legacy["messages"][0].get("audience").is_none());
+    let mut seen = Vec::new();
+    let mut before = None;
+    loop {
+        let result=dispatcher.dispatch("inbox_list",&json!({"mailbox":"w1:p1","unread_only":false,"limit":2,"newest_first":true,"before":before}),&worker).unwrap();
+        assert_eq!(result["order"], "newest_first");
+        for row in result["messages"].as_array().unwrap() {
+            assert!(row.get("body").is_none());
+            seen.push(row["message_id"].as_str().unwrap().to_string());
+            if row["message_id"] == ids[4] {
+                assert_eq!(row["audience"], "agent");
+            } else {
+                assert!(row["audience"].is_null());
+            }
+        }
+        before = result["next_before"].as_str().map(str::to_owned);
+        if before.is_none() {
+            break;
+        }
+    }
+    assert_eq!(seen, ids.iter().rev().cloned().collect::<Vec<_>>());
+    assert_eq!(snapshot(), initial);
+    assert!(dispatcher
+        .dispatch(
+            "inbox_list",
+            &json!({"mailbox":"w2:p2","newest_first":true}),
+            &worker
+        )
+        .is_err());
+    assert!(dispatcher
+        .dispatch(
+            "inbox_list",
+            &json!({"mailbox":"w1:p1","newest_first":true,"literal_mailbox":true}),
+            &worker
+        )
+        .is_err());
+    for extra in [
+        json!({"limit":0}),
+        json!({"limit":501}),
+        json!({"before":1}),
+        json!({"before":"missing"}),
+    ] {
+        let mut args = json!({"mailbox":"w1:p1","newest_first":true});
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert!(dispatcher.dispatch("inbox_list", &args, &worker).is_err());
+    }
+    assert_eq!(snapshot(), initial);
+    dispatcher.close();
+}
+
+#[test]
+fn mailbox_summary_literal_keys_do_not_resolve_live_lanes() {
+    let (_dir, services) = make_services("literal-summary", factory(None), None);
+    let store = services.flock().stores().inbox.unwrap();
+    let id = store
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: "self",
+            body: Some("private"),
+            ..Default::default()
+        })
+        .unwrap();
+    let dispatcher = services.dispatcher(handlers());
+    let owner = request("w2:p2");
+    let response = dispatcher
+        .dispatch(
+            "inbox_list",
+            &json!({"mailbox":"self","newest_first":true,"literal_mailbox":true}),
+            &owner,
+        )
+        .unwrap();
+    assert_eq!(response["mailbox"], "self");
+    assert_eq!(response["messages"][0]["message_id"], id);
+    assert!(response["messages"][0].get("body").is_none());
+    assert!(store.get_message(&id).unwrap().read_at.is_none());
+    let empty=dispatcher.dispatch("inbox_list",&json!({"mailbox":"no such literal mailbox","newest_first":true,"literal_mailbox":true}),&owner).unwrap();
+    assert_eq!(empty["messages"], json!([]));
+    for role in ["worker", "reviewer", "planner"] {
+        services
+            .flock()
+            .with_roles(|roles, _| {
+                roles.register("w1:p1", role, None, None, Some("codex"), None, None, None)
+            })
+            .unwrap();
+        assert!(
+            dispatcher
+                .dispatch(
+                    "inbox_list",
+                    &json!({"mailbox":"self","newest_first":true,"literal_mailbox":true}),
+                    &request("w1:p1")
+                )
+                .is_err(),
+            "{role}"
+        );
+    }
+    dispatcher.close();
+}

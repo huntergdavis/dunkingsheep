@@ -71,6 +71,13 @@ fn every_input_schema_equals_the_pythons() {
                     want["properties"]["action"]["description"].clone();
             }
         }
+        if name == "inbox_list" {
+            // t4684 summary paging is opt-in and Rust-only; preserve the frozen legacy schema.
+            let properties = got["properties"].as_object_mut().unwrap();
+            for key in ["newest_first", "before", "literal_mailbox"] {
+                assert!(properties.remove(key).is_some());
+            }
+        }
         if name == "roster" {
             assert!(got["properties"]
                 .as_object_mut()

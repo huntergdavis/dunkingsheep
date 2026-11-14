@@ -39,3 +39,37 @@ of mailbox statistics returns 502 instead of an empty directory.
 This slice supplies the directory endpoint. Mailbox message summaries, complete history paging,
 reading already-consumed lane mail, the mailbox-browser UI, and Inbox compose are subsequent
 slices. The endpoint alone does not claim those experiences are available.
+
+## Mailbox summary history: S-C
+
+`inbox_list` retains its existing oldest-first output for CLI/MCP/TUI callers. Explicit
+`newest_first=true` opts into a summary page with `next_before` (an exclusive message-ID cursor),
+`order=newest_first`, and `audience="agent"` for agent-only mail (`null` for unmarked mail).
+It defaults to unread-only, as before; use `unread_only=false` for history. Paged limits are
+1..500. The query selects summary columns directly: bodies are not loaded or returned. Subjects
+are included. This opt-in shape has `attachment_count`, not full attachment records.
+
+`before` requires newest-first paging. Rows sort by creation time descending with message ID
+as a deterministic descending tie-breaker, so timestamp ties neither skip nor repeat messages.
+A cursor must still exist in the same mailbox; a removed/purged cursor refuses the page and
+requires a refresh from the beginning. Cancelled messages remain excluded as in the existing list.
+
+For browser mailbox keys, `literal_mailbox=true` additionally requires the daemon's owner, web
+or system role. It validates and treats the key as data, never resolving a live pane/label or
+reserved name. Other lanes cannot opt into this flag; their own-mailbox guard is unchanged.
+Unmatched literal names return an empty page. This uses the existing mailbox normalization
+for legacy spellings. No schema change or read/ack/recover/notification operation is involved.
+
+`GET /api/mailbox-messages?mailbox=<encoded key>&limit=50&before=<encoded message ID>` requires
+an owner session and same-origin checks, just like the directory. It always requests literal
+newest-first history with `unread_only=false`; desk pages are 1..100 summaries. The response is
+a typed field allowlist: no bodies or future daemon fields are forwarded, and malformed daemon
+summaries return 502. Missing/expired cursors or RPC failure return 502 with refresh guidance.
+An empty mailbox returns a successful empty page. API identities are refused before RPC.
+The endpoint does not mark mail read or send notices. Reading bodies remains S-D, with its
+separate security review; this slice alone does not add the mailbox-browser UI.
+
+Rollout: deploy the daemon's opt-in paging support before the desk route. An older daemon's
+legacy summary response lacks the required order/page fields and is refused as 502; the desk
+will not silently browse a differently resolved mailbox. Existing desk routes and non-opting
+CLI/MCP/TUI clients continue to work while the two components are rolled out separately.
