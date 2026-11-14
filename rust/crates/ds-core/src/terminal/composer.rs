@@ -247,6 +247,59 @@ pub fn native_prefix_accounted(screen: &str, native_text: &str) -> bool {
     true
 }
 
+/// t4779: the text of the TRAILING composer block of a borderless (Codex) pane: the last prompt
+/// row and the non-blank rows directly under it, when nothing but blank rows separates that
+/// block from the status footer. `None` when the tail of the screen is not that shape (no
+/// prompt row, a bordered composer, other content between the block and the footer, or no
+/// footer), so a caller can never mistake transcript for the composer.
+///
+/// Codex wraps a long draft over several rows and leaves blank rows above its footer; the
+/// one-row reader (`box_text`) calls that layout ambiguous, because a prompt row far from the
+/// footer may also be transcript. This reader does not decide whose text it is: compare it with
+/// [`composer_block_is`].
+pub fn trailing_composer_block(screen: &str) -> Option<String> {
+    let raw = splitlines(screen);
+    let prompt = (0..raw.len())
+        .rev()
+        .find(|&i| prompt_body(raw[i]).is_some() && !native_banner(raw[i]))?;
+    let mut parts = vec![prompt_body(raw[prompt])?];
+    let mut index = prompt + 1;
+    while index < raw.len() && !blank(raw[index]) {
+        let plain = strip_ansi(raw[index]);
+        if plain.contains(MID) || super::screen::is_border_line(raw[index]) {
+            // A footer or a border directly under the prompt row: not a wrapped draft.
+            break;
+        }
+        parts.push(plain_trim(raw[index]));
+        index += 1;
+    }
+    if raw[prompt..index]
+        .iter()
+        .any(|row| super::screen::is_border_line(row))
+    {
+        return None;
+    }
+    // Only blank rows may lie between the block and the footer.
+    while index < raw.len() && blank(raw[index]) {
+        index += 1;
+    }
+    let footer = raw.get(index)?;
+    if !strip_ansi(footer).contains(MID) || prompt_body(footer).is_some() {
+        return None;
+    }
+    Some(parts.join("\n"))
+}
+
+/// t4779: whether the trailing composer block holds exactly `text` and nothing else. Wrapping
+/// may break a row anywhere, so the comparison ignores whitespace and nothing else: one extra
+/// or missing visible character is a different text.
+pub fn composer_block_is(screen: &str, text: &str) -> bool {
+    let squeeze = |value: &str| value.split_whitespace().collect::<String>();
+    let wanted = squeeze(text);
+    !wanted.is_empty()
+        && trailing_composer_block(screen).is_some_and(|block| squeeze(&block) == wanted)
+}
+
 /// `_composer_region_text`: the live composer's visible content, or `""` when it cannot be
 /// delimited (FAIL CLOSED).
 pub fn composer_region_text(screen: &str) -> String {

@@ -35,9 +35,12 @@ fn mentions_collapsed_paste(shown: &str) -> bool {
 
 /// t4779: an EMPTY box right after typing a long text into a Codex pane is not yet proof that
 /// it was submitted. Read the box again for a bounded time. `None` keeps the caller's verdict
-/// ("sent"): the box stayed empty, a turn started, the pane could not be read, or this send is
-/// not a long text to a Codex pane. `Some` replaces it:
+/// ("sent"): a turn started, the pane could not be read, somebody else's text appeared, or
+/// this send is not a long text to a Codex pane. `Some` replaces it:
 ///
+/// * the box stayed conclusively empty for every read and no turn started: the send is
+///   reported unconfirmed (failed), with no key and no retry. The text may still surface
+///   late, and a send queued behind a busy turn reads the same way; that cost is accepted.
 /// * the box holds OUR send and nothing else, either as a collapsed paste whose character
 ///   count is ours (the text's length, or one more for our own Enter kept as a newline) or
 ///   as our expanded text: press the submit key ONCE more, and report sent only if the box
@@ -45,6 +48,12 @@ fn mentions_collapsed_paste(shown: &str) -> bool {
 /// * the box holds a collapsed paste that is not provably ours (another count), or a
 ///   collapsed paste with anything else beside it: nothing is pressed and the send is
 ///   reported failed. A person's text is never submitted for them.
+///
+/// * the box cannot be recognised (the reader calls the composer ambiguous: Codex wraps a long
+///   draft over several rows and leaves blank rows above its footer). If the trailing composer
+///   block is exactly this send and nothing else, it is ours alone and gets the same single
+///   Enter. Otherwise nothing is pressed, and if the box is still unrecognised when the reads
+///   run out the send is reported failed: an unrecognised box is never "sent".
 ///
 /// Other text that appears with no placeholder is left alone and does not change the
 /// verdict: it is not ours to submit, and it is not evidence that our send failed.
@@ -59,42 +68,62 @@ pub(crate) fn settle_collapsed_paste(
     if chars < BURST_SETTLE_MIN_CHARS || env.pane_harness(pane_id).as_deref() != Some("codex") {
         return None;
     }
+    // Whether the newest read left the box unrecognised (neither empty nor readable).
+    let mut unrecognised = false;
+    // Whether every read so far found the box conclusively empty.
+    let mut always_empty = true;
     for _ in 0..BURST_SETTLE_READS {
         if turn_started(env, pane_id, pre_status) {
             return None;
         }
         env.sleep_s(BURST_SETTLE_GAP_S);
-        let (screen, shown, _detail) = read_box(env, pane_id);
-        screen.as_ref()?;
+        let (screen, shown, detail) = read_box(env, pane_id);
+        let screen = screen?;
         if shown.trim().is_empty() {
-            continue;
+            if !detail.starts_with(crate::terminal::screen::AMBIGUOUS_COMPOSER) {
+                unrecognised = false;
+                continue;
+            }
+            always_empty = false;
+            if !crate::terminal::composer::composer_block_is(&screen, text) {
+                unrecognised = true;
+                continue;
+            }
         }
-        let what = match collapsed_paste_alone(&shown) {
-            Some(count) if count == chars || count == chars + 1 => "a collapsed paste",
-            Some(count) => {
-                eprintln!(
+        always_empty = false;
+        unrecognised = false;
+        let what = if shown.trim().is_empty() {
+            "wrapped plain text"
+        } else {
+            match collapsed_paste_alone(&shown) {
+                Some(count) if count == chars || count == chars + 1 => "a collapsed paste",
+                Some(count) => {
+                    eprintln!(
                     "{pane_id}: a collapsed paste of {count} characters is in the input box after a {chars}-character send; it is not provably this send, so nothing is pressed"
                 );
-                return Some((
+                    return Some((
                     false,
                     format!(
                         "submission unconfirmed: the pane's input box holds a collapsed paste of {count} characters that does not match this {chars}-character send; nothing was pressed"
                     ),
                 ));
-            }
-            None if mentions_collapsed_paste(&shown) => {
-                eprintln!(
+                }
+                None if mentions_collapsed_paste(&shown) => {
+                    eprintln!(
                     "{pane_id}: the input box holds a collapsed paste with other text beside it after a {chars}-character send; nothing is pressed"
                 );
-                return Some((
+                    return Some((
                     false,
                     "submission unconfirmed: the pane's input box holds a collapsed paste with other text beside it; nothing was pressed".into(),
                 ));
+                }
+                // Our own text, expanded: the burst surfaced as plain text and is still waiting.
+                None if crate::terminal::screen::is_our_send(&shown, Some(text), false) => {
+                    "plain text"
+                }
+                // Somebody else's text: not ours to submit, and no evidence about our send.
+                None => continue,
             }
-            // Our own text, expanded: the burst surfaced as plain text and is still waiting.
-            None if crate::terminal::screen::is_our_send(&shown, Some(text), false) => "plain text",
-            // Somebody else's text: not ours to submit, and no evidence about our send.
-            None => continue,
         };
         eprintln!(
             "{pane_id}: this {chars}-character send is still in the input box as {what}; pressing the submit key once more"
@@ -115,6 +144,26 @@ pub(crate) fn settle_collapsed_paste(
         return Some((
             false,
             format!("text did not submit; it is still in the pane's input box as {what}"),
+        ));
+    }
+    if unrecognised {
+        eprintln!(
+            "{pane_id}: the input box could not be recognised after this {chars}-character send; nothing is pressed and the send is not reported as sent"
+        );
+        return Some((
+            false,
+            "submission unconfirmed: the pane's input box could not be recognised after this send (it may still hold the text); nothing was pressed".into(),
+        ));
+    }
+    // An empty box for the whole window proves nothing for a long burst: Codex may surface the
+    // text later. Only a started turn confirms it. Nothing is pressed and nothing is retried.
+    if always_empty && !turn_started(env, pane_id, pre_status) {
+        eprintln!(
+            "{pane_id}: this {chars}-character send left an empty input box and no turn started within the settle window; reported unconfirmed, nothing pressed"
+        );
+        return Some((
+            false,
+            "submission unconfirmed: the pane's input box stayed empty but no turn started after this long send (the text may surface later); nothing was pressed".into(),
         ));
     }
     None
@@ -601,14 +650,19 @@ mod tests {
     }
 
     #[test]
-    fn a_long_send_whose_box_stays_empty_is_sent_after_the_bounded_settle_reads() {
+    fn a_long_send_whose_box_stays_empty_with_no_turn_is_unconfirmed_never_sent() {
         let text = long_text();
         let mut p = codex_pane();
         script(&p, std::iter::repeat_with(codex_hint).take(12));
         let (ok, detail) = run_text(&mut p, &text);
-        assert!(ok, "{detail}");
-        assert_eq!("sent", detail);
-        assert!(p.keys.is_empty());
+        assert!(!ok, "{detail}");
+        assert!(
+            detail.starts_with(
+                "submission unconfirmed: the pane's input box stayed empty but no turn started"
+            ),
+            "{detail}"
+        );
+        assert!(p.keys.is_empty(), "no extra Enter and no retry");
         // The ladder's own three reads, then exactly the bounded settle reads.
         assert_eq!(
             vec![0.1, 0.2, 0.4, 1.0, 1.0, 1.0, 1.0],
@@ -632,5 +686,163 @@ mod tests {
         let (ok, detail) = run_text(&mut p, &long_text());
         assert!(ok && detail == "sent", "{detail}");
         assert_eq!(vec![0.1, 0.2, 0.4], p.sleeps);
+    }
+
+    // ---- t4779 reopened: the long text surfaces EXPANDED and wrapped over several rows ----
+
+    /// A synthetic screen in the shape that was reported sent on 2026-11-13: a long text
+    /// wrapped over eight composer rows, two blank rows, then the Codex footer, with an earlier
+    /// prompt row in the transcript above. Not a capture of any real pane.
+    const WRAPPED: &str = include_str!("../../tests/fixtures/screen/codex-wrapped-composer.txt");
+    const WRAPPED_SEND: &str =
+        include_str!("../../tests/fixtures/screen/codex-wrapped-composer.send.txt");
+    fn wrapped() -> Option<String> {
+        Some(WRAPPED.to_string())
+    }
+    /// The same screen with a person's words typed after our text.
+    fn wrapped_with_a_note() -> Option<String> {
+        let edited = WRAPPED.replace("repeated test runs.", "repeated test runs. also my note");
+        assert_ne!(edited, WRAPPED);
+        Some(edited)
+    }
+
+    #[test]
+    fn a_long_send_whose_box_stays_empty_is_sent_when_a_turn_started() {
+        let text = long_text();
+        let mut p = Pane {
+            status: Some("working".into()),
+            ..codex_pane()
+        };
+        script(&p, std::iter::repeat_with(codex_hint).take(12));
+        let (ok, detail) = confirm_guarded_submission(
+            &mut p,
+            P,
+            &text,
+            "Enter",
+            false,
+            StatusBaseline::Captured(Some("idle".into())),
+        );
+        assert!(ok, "{detail}");
+        assert_eq!("sent", detail);
+        assert!(p.keys.is_empty());
+    }
+
+    #[test]
+    fn the_wrapped_composer_is_ambiguous_to_the_box_reader_but_is_exactly_our_send() {
+        use crate::terminal::composer::{composer_block_is, trailing_composer_block};
+        let (text, detail) = crate::terminal::screen::box_text(WRAPPED);
+        assert!(text.is_empty(), "{text}");
+        assert!(
+            detail.starts_with(crate::terminal::screen::AMBIGUOUS_COMPOSER),
+            "{detail}"
+        );
+        let block = trailing_composer_block(WRAPPED).expect("a trailing composer block");
+        assert!(block.starts_with("FIXTURE COORDINATOR CHECK"), "{block}");
+        assert_eq!(8, block.lines().count());
+        assert!(composer_block_is(WRAPPED, WRAPPED_SEND));
+        // One character more, one less, or another text is not this send.
+        assert!(!composer_block_is(WRAPPED, &format!("{WRAPPED_SEND}x")));
+        assert!(!composer_block_is(
+            WRAPPED,
+            &WRAPPED_SEND[..WRAPPED_SEND.len() - 1]
+        ));
+        assert!(!composer_block_is(WRAPPED, ""));
+        assert!(!composer_block_is(
+            &wrapped_with_a_note().unwrap(),
+            WRAPPED_SEND
+        ));
+        // The idle hint and a collapsed paste are not a wrapped block of this send.
+        assert!(!composer_block_is(&codex_hint().unwrap(), WRAPPED_SEND));
+        assert!(!composer_block_is(
+            &codex_paste(WRAPPED_SEND.chars().count()).unwrap(),
+            WRAPPED_SEND
+        ));
+    }
+
+    #[test]
+    fn our_wrapped_text_alone_gets_one_more_enter_and_is_then_confirmed() {
+        let mut p = codex_pane();
+        script(
+            &p,
+            std::iter::repeat_with(codex_hint)
+                .take(4)
+                .chain([wrapped(), wrapped()])
+                .chain(std::iter::repeat_with(codex_hint).take(8)),
+        );
+        let (ok, detail) = run_text(&mut p, WRAPPED_SEND);
+        assert!(ok, "{detail}");
+        assert_eq!("sent (wrapped plain text needed one more Enter)", detail);
+        assert_eq!(vec!["Enter".to_string()], p.keys, "exactly one more Enter");
+    }
+
+    #[test]
+    fn our_wrapped_text_that_stays_is_reported_failed_after_one_enter_never_sent() {
+        // The live defect: the box read empty at first, then held the wrapped text for good.
+        let mut p = codex_pane();
+        script(
+            &p,
+            std::iter::repeat_with(codex_hint)
+                .take(4)
+                .chain(std::iter::repeat_with(wrapped).take(16)),
+        );
+        let (ok, detail) = run_text(&mut p, WRAPPED_SEND);
+        assert!(!ok, "{detail}");
+        assert_eq!(
+            "text did not submit; it is still in the pane's input box as wrapped plain text",
+            detail
+        );
+        assert_eq!(
+            vec!["Enter".to_string()],
+            p.keys,
+            "one Enter, not a retry loop"
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_composer_is_never_sent_and_nothing_is_pressed() {
+        // The composer holds our text AND a person's words: not ours alone.
+        let mut p = codex_pane();
+        script(
+            &p,
+            std::iter::repeat_with(codex_hint)
+                .take(4)
+                .chain(std::iter::repeat_with(wrapped_with_a_note).take(16)),
+        );
+        let (ok, detail) = run_text(&mut p, WRAPPED_SEND);
+        assert!(!ok, "{detail}");
+        assert!(
+            detail.starts_with(
+                "submission unconfirmed: the pane's input box could not be recognised"
+            ),
+            "{detail}"
+        );
+        assert!(p.keys.is_empty(), "nothing pressed: {:?}", p.keys);
+        // The same for a wrapped composer that holds some other text entirely.
+        let mut p = codex_pane();
+        script(
+            &p,
+            std::iter::repeat_with(codex_hint)
+                .take(4)
+                .chain(std::iter::repeat_with(wrapped).take(16)),
+        );
+        let (ok, detail) = run_text(&mut p, &long_text());
+        assert!(!ok, "{detail}");
+        assert!(detail.contains("could not be recognised"), "{detail}");
+        assert!(p.keys.is_empty());
+    }
+
+    #[test]
+    fn a_composer_unrecognised_once_and_then_empty_is_sent_without_a_key() {
+        let mut p = codex_pane();
+        script(
+            &p,
+            std::iter::repeat_with(codex_hint)
+                .take(4)
+                .chain([wrapped_with_a_note()])
+                .chain(std::iter::repeat_with(codex_hint).take(8)),
+        );
+        let (ok, detail) = run_text(&mut p, WRAPPED_SEND);
+        assert!(ok && detail == "sent", "{detail}");
+        assert!(p.keys.is_empty());
     }
 }
