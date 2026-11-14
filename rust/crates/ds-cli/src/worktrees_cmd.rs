@@ -19,6 +19,11 @@ use crate::usage_cmd::{sorted_json, Outcome};
 /// these is reported as having none, which keeps its cache.
 const PR_LIMIT: &str = "3000";
 
+/// Branch name to its newest pull request: `(number, state)`.
+pub type BranchPrs = HashMap<String, (i64, String)>;
+/// The pull requests of one repository, or why they could not be read.
+pub type PrLookup = Result<BranchPrs, String>;
+
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
@@ -67,8 +72,8 @@ pub fn github_repo(url: &str) -> Option<String> {
 /// Branch name to the newest pull request from that branch of the same repository:
 /// `(number, state)` with the state in lower case. Pull requests from forks are left out: a
 /// fork's branch name says nothing about this checkout.
-pub fn prs_by_branch(listing: &Value) -> HashMap<String, (i64, String)> {
-    let mut found: HashMap<String, (i64, String)> = HashMap::new();
+pub fn prs_by_branch(listing: &Value) -> BranchPrs {
+    let mut found: BranchPrs = HashMap::new();
     for pr in listing.as_array().into_iter().flatten() {
         if pr["isCrossRepository"].as_bool() != Some(false) {
             continue;
@@ -88,7 +93,7 @@ pub fn prs_by_branch(listing: &Value) -> HashMap<String, (i64, String)> {
     found
 }
 
-fn list_prs(repo: &str) -> Result<HashMap<String, (i64, String)>, String> {
+fn list_prs(repo: &str) -> PrLookup {
     let output = Command::new("gh")
         .args([
             "pr", "list", "--repo", repo, "--state", "all", "--limit", PR_LIMIT,
@@ -113,7 +118,7 @@ fn list_prs(repo: &str) -> Result<HashMap<String, (i64, String)>, String> {
 pub fn link_for(
     branch: Option<String>,
     repo: Option<String>,
-    prs: &mut dyn FnMut(&str) -> Result<HashMap<String, (i64, String)>, String>,
+    prs: &mut dyn FnMut(&str) -> PrLookup,
 ) -> PrLink {
     let Some(branch) = branch else {
         return PrLink::unknown("not a git checkout, or no branch is checked out");
@@ -175,8 +180,7 @@ pub fn disk_command(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64();
-    let cache: RefCell<HashMap<String, Result<HashMap<String, (i64, String)>, String>>> =
-        RefCell::new(HashMap::new());
+    let cache: RefCell<HashMap<String, PrLookup>> = RefCell::new(HashMap::new());
     let link = |dir: &Path| {
         if !own_checkout(dir) {
             return PrLink::unknown("not the top of a git checkout");
