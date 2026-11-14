@@ -1484,3 +1484,49 @@ fn a_note_from_the_owner_service_records_that_actor() {
     let noted = crate::api::h_task_note(&context, args).unwrap();
     assert_eq!(noted["actor"], Value::Null);
 }
+
+#[test]
+fn the_owner_token_from_inside_a_non_owner_pane_is_refused_even_with_no_pane_on_the_request() {
+    // The negative that matters most: a process that runs INSIDE a worker lane's pane holds
+    // the owner token and sends a request with no pane id. Its process root is a listed
+    // non-owner pane, so it is not the owner's detached tooling and completes nothing.
+    let (_dir, runtime, flock, tasks, jobs, tokens) = completion_services("worker", true);
+    let task = foreign_task(&runtime, &tasks, "not yours");
+    let owner_listing = authenticate_owner_service(&flock);
+    let root = owner_listing[0]["pane_pid"].as_i64().unwrap();
+    let root_start = crate::proc::process_start(root).unwrap();
+    flock
+        .with_roles(|roles, _| {
+            roles.register(
+                "%worker",
+                "worker",
+                Some(root),
+                Some(&root_start),
+                None,
+                None,
+                None,
+                None,
+            )
+        })
+        .unwrap();
+    let mut env = completion_env(&jobs, tokens, Box::<NoNetworkTransport>::default());
+    // The live listing shows that root as the WORKER pane only.
+    env.authority = Some(vec![json!({"pane_id": "%worker", "pane_pid": root})]);
+
+    let result = invoke_task_complete(
+        &flock,
+        &runtime,
+        &env,
+        &paneless_request(),
+        &task.id,
+        None,
+        None,
+        true,
+    );
+
+    assert!(result.is_err(), "{result:?}");
+    let after = runtime.block_on(tasks.get(&task.id)).unwrap();
+    assert_eq!("open", after.status);
+    assert_eq!(None, after.completed_by);
+    assert_eq!(None, completed_event_actor(&tasks, &task.id));
+}
