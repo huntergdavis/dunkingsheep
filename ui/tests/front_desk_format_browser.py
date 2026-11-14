@@ -68,9 +68,10 @@ try:
             page.goto(base + '/dash/cos', wait_until='domcontentloaded')
             messages = page.locator('.front-desk-markdown')
             messages.first.wait_for()
-            assert messages.count() == 2
+            assert messages.count() == 1
             for index in range(2):
-                message = messages.nth(index)
+                page.locator('.owner-inbox-row').nth(index).click()
+                message = messages.first
                 assert message.locator('table tbody tr').count() == 1
                 assert 'Alpha' in message.locator('table').inner_text()
                 assert 'if (x < 2)' in message.locator('pre code').inner_text()
@@ -84,6 +85,12 @@ try:
             assert page.evaluate('window.__formatAttack || 0') == 0
             raw = page.evaluate("async () => (await (await fetch('/api/owner-thread?limit=50')).json()).items.map(x => x.body)")
             assert raw == [RAW, RAW]
+            assert page.locator('.owner-inbox-row').count() == 2
+            page.get_by_role('link', name='Open conversation / send a message').click()
+            page.locator('.conversation .front-desk-markdown').first.wait_for()
+            assert page.locator('.conversation .front-desk-markdown').count() == 2
+            page.get_by_role('link', name='Back to Inbox', exact=True).click()
+            page.locator('.owner-inbox-reader').wait_for()
             page.close()
         browser.close()
 finally:

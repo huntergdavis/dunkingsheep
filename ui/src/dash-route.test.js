@@ -1,4 +1,4 @@
-// t4642: Projects is the landing view and the DS brand opens it; Front Desk stays at /dash/cos.
+// t4642: Projects is the landing view and the DS brand opens it; Inbox stays at /dash/cos.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -14,13 +14,13 @@ test('the bare desk, /dash and /dash/ open Projects', () => {
   assert.equal(DASH_HOME, '/dash/projects');
 });
 
-test('every dashboard keeps its own route, Front Desk included, and Projects is first in the nav', () => {
+test('every dashboard keeps its own route, Inbox included, and Projects is first in the nav', () => {
   assert.deepEqual(Object.keys(DASH_ROUTES), ['projects', 'cos', 'fleet', 'operations', 'play']);
   for (const key of Object.keys(DASH_ROUTES)) {
     assert.deepEqual(viewForPath(`/dash/${key}`), { view: key, known: true });
     assert.deepEqual(resolveDashRoute(`/dash/${key}/`), { standalone: true, view: key, known: true });
   }
-  assert.equal(DASH_ROUTES.cos.title, 'Front Desk');
+  assert.equal(DASH_ROUTES.cos.title, 'Inbox');
 });
 
 test('an unregistered dashboard is reported unknown, not silently replaced', () => {

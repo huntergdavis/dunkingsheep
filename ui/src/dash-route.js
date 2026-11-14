@@ -1,9 +1,9 @@
 // The dashboards the desk serves and which one a path opens (t4642). Projects is the landing
-// view: '/', '/dash' and the DS brand link open it. Front Desk stays at /dash/cos. The order here
+// view: '/', '/dash' and the DS brand link open it. Inbox stays at /dash/cos. The order here
 // is the order of the navigation links.
 export const DASH_ROUTES = {
   projects: { eyebrow: 'PROJECTS', title: 'Projects', subtitle: 'Live lanes by explicit project membership' },
-  cos: { eyebrow: 'FRONT DESK', title: 'Front Desk', subtitle: 'Ask; decisions you owe are at the top' },
+  cos: { eyebrow: 'INBOX', title: 'Inbox', subtitle: 'Browse the owner conversation' },
   fleet: { eyebrow: 'TERMINALS', title: 'Terminals', subtitle: 'See active agents and send a message' },
   operations: { eyebrow: 'OPERATIONS', title: 'Operations board', subtitle: 'Tasks, progress, and service health' },
   play: { eyebrow: 'LIVE GAME', title: 'Play Pool of Radiance', subtitle: 'Private DOS run · save states' },
