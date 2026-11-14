@@ -7158,7 +7158,11 @@ fn api_t39_task_block_cancel_bind_raw_reasons_after_guards_and_return_dependents
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(meta, None, "status event adds no synthetic reason meta");
+    assert_eq!(
+        serde_json::from_str::<Value>(meta.as_deref().unwrap()).unwrap()["reason"],
+        "0",
+        "the audit reason preserves SQLite scalar affinity"
+    );
 
     let events_before = runtime.block_on(tasks.events(&task.id));
     for (reason, kind) in [
@@ -11206,5 +11210,89 @@ fn task_history_all_has_a_200_note_ceiling_and_scoped_continuation() {
             "w1:p1"
         )
         .is_err());
+    }
+}
+
+#[test]
+fn task_audit_dispatch_uses_bound_actor_ignores_spoof_and_renders_transition_reasons() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    let task = runtime
+        .block_on(tasks.add("global", "audited", ""))
+        .unwrap();
+    for (verb, extra, reason) in [
+        (
+            "task_assign",
+            json!({"assignees":["w1:p3"]}),
+            "lane handoff",
+        ),
+        ("task_block", json!({}), "waiting for evidence"),
+        ("task_unblock", json!({}), "evidence received"),
+        ("task_cancel", json!({}), "superseded"),
+    ] {
+        let mut input = extra;
+        input["id"] = json!(task.id);
+        input["reason"] = json!(reason);
+        input["actor"] = json!("%spoof");
+        input["by"] = json!("%spoof");
+        let wire = dispatch_task_mutation(
+            &dispatcher,
+            &flock,
+            &runtime,
+            verb,
+            input,
+            Some("w1:p2"),
+            None,
+        )
+        .unwrap();
+        let event = match verb {
+            "task_assign" => "assigned",
+            "task_block" => "blocked",
+            "task_unblock" => "unblocked",
+            _ => "cancelled",
+        };
+        let note = wire["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["event"] == event)
+            .unwrap();
+        assert_eq!("w1:p2", note["actor"]);
+        assert_eq!(reason, note["reason"]);
+    }
+}
+
+#[test]
+fn task_audit_authenticated_services_have_names_and_do_not_accept_an_actor_field() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    for (role, label, expected) in [
+        ("owner", "owner fixture", "owner-service"),
+        ("system", "scheduler", "service:scheduler"),
+        ("web", "desk", "service:desk"),
+    ] {
+        let token = flock
+            .with_roles(|roles, _| roles.issue_token(role, Some(label), None))
+            .unwrap();
+        let request = RequestCtx {
+            service_token: Some(token),
+            self_pane_id: (role == "system").then(|| "w1:p3".to_string()),
+            socket_peer: (role == "system").then_some(true),
+            identity_bound: (role == "system").then_some(false),
+            ..RequestCtx::default()
+        };
+        let task = runtime
+            .block_on(tasks.add("global", "service audited", ""))
+            .unwrap();
+        let wire = dispatch_task_mutation_request(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_block",
+            json!({"id":task.id,"reason":"service request","actor":"spoof"}),
+            &request,
+        )
+        .unwrap();
+        let note = wire["notes"].as_array().unwrap().last().unwrap();
+        assert_eq!(expected, note["actor"]);
+        assert_eq!("service request", note["reason"]);
     }
 }

@@ -4914,6 +4914,15 @@ async fn moved_head_cancels_abbreviated_review_with_a_reason_and_files_the_full_
         task.block_reason.as_deref()
     );
     assert_eq!(json!([stale.id]), report["cancelled"]);
+    let actor: String = rusqlite::Connection::open(sync.flock.path())
+        .unwrap()
+        .query_row(
+            "SELECT actor FROM task_events WHERE task_id=?1 AND event='cancelled'",
+            [&stale.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!("review-sync", actor);
     assert_eq!(head, report["filed"][0]["head"]);
 }
 

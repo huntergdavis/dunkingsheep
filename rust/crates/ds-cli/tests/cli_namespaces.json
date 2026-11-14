@@ -6406,6 +6406,7 @@
    "json": false,
    "mode": "add",
    "no_start_daemon": false,
+   "reason": null,
    "self_pane": null,
    "socket": null,
    "task_command": "assign"
@@ -6428,6 +6429,7 @@
    "json": true,
    "mode": "add",
    "no_start_daemon": false,
+   "reason": null,
    "self_pane": null,
    "socket": null,
    "task_command": "assign"
@@ -6450,6 +6452,7 @@
    "json": true,
    "mode": "add",
    "no_start_daemon": false,
+   "reason": null,
    "self_pane": null,
    "socket": null,
    "task_command": "assign"
@@ -6473,6 +6476,31 @@
    "json": false,
    "mode": "add",
    "no_start_daemon": false,
+   "reason": null,
+   "self_pane": null,
+   "socket": null,
+   "task_command": "assign"
+  }
+ },
+ {
+  "argv": [
+   "task",
+   "assign",
+   "x",
+   "x",
+   "--reason",
+   "x"
+  ],
+  "namespace": {
+   "assignees": [
+    "x"
+   ],
+   "command": "task",
+   "id": "x",
+   "json": false,
+   "mode": "add",
+   "no_start_daemon": false,
+   "reason": "x",
    "self_pane": null,
    "socket": null,
    "task_command": "assign"
@@ -6763,6 +6791,7 @@
    "id": "x",
    "json": false,
    "no_start_daemon": false,
+   "reason": null,
    "self_pane": null,
    "socket": null,
    "task_command": "unblock"
@@ -6780,6 +6809,7 @@
    "id": "x",
    "json": true,
    "no_start_daemon": false,
+   "reason": null,
    "self_pane": null,
    "socket": null,
    "task_command": "unblock"
@@ -6797,6 +6827,26 @@
    "id": "x",
    "json": true,
    "no_start_daemon": false,
+   "reason": null,
+   "self_pane": null,
+   "socket": null,
+   "task_command": "unblock"
+  }
+ },
+ {
+  "argv": [
+   "task",
+   "unblock",
+   "x",
+   "--reason",
+   "x"
+  ],
+  "namespace": {
+   "command": "task",
+   "id": "x",
+   "json": false,
+   "no_start_daemon": false,
+   "reason": "x",
    "self_pane": null,
    "socket": null,
    "task_command": "unblock"

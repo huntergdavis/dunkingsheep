@@ -797,6 +797,64 @@
      }
     ]
    ]
+  },
+  "task_assign": {
+   "params": [
+    [
+     "id",
+     {
+      "type": "string",
+      "description": "Task id, e.g. t12."
+     }
+    ],
+    [
+     "assignees",
+     {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Pane ids or agent names. 'self' means the caller's pane."
+     }
+    ],
+    [
+     "mode",
+     {
+      "type": "string",
+      "enum": [
+       "add",
+       "remove",
+       "set"
+      ],
+      "description": "How to apply the assignees (default add)."
+     }
+    ],
+    [
+     "reason",
+     {
+      "type": "string",
+      "description": "Why this task transition is requested; recorded in the audit event."
+     }
+    ]
+   ]
+  },
+  "task_unblock": {
+   "params": [
+    [
+     "id",
+     {
+      "type": "string",
+      "description": "Task id, e.g. t12."
+     }
+    ],
+    [
+     "reason",
+     {
+      "type": "string",
+      "description": "Why this task transition is requested; recorded in the audit event."
+     }
+    ]
+   ]
   }
  },
  "groups": {

@@ -126,7 +126,7 @@ impl Tasks {
             if status != "open" || leased { return Err(DunkError::Refused("handoff task active or terminal; owner review required".into())); }
             let now = crate::clock::now_s();
             tx.execute("UPDATE tasks SET status = 'cancelled', cancelled_at = ?, updated_at = ? WHERE id = ?", params![now, now, id]).map_err(db::map_sqlite)?;
-            tx.execute("INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_from, status_to) VALUES (?, 'cancelled', ?, 'owner-handoff-recovery', 'global', 'high', 'open', 'cancelled')", params![id, now]).map_err(db::map_sqlite)?;
+            tx.execute("INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_from, status_to, meta) VALUES (?, 'cancelled', ?, 'rule:owner-handoff-recovery', 'global', 'high', 'open', 'cancelled', ?)", params![id, now,json!({"reason":"owner handoff reconciled","question_id":question_id}).to_string()]).map_err(db::map_sqlite)?;
             tx.execute("INSERT OR IGNORE INTO owner_handoff_reconciled (question_id, reconciled_at) VALUES (?, ?)", params![question_id, now]).map_err(db::map_sqlite)?;
             tx.commit().map_err(db::map_sqlite)?;
             Ok(Some(id))

@@ -36,6 +36,7 @@ use crate::error::DunkError;
 mod accounting_retry;
 pub mod advance;
 pub mod allocator;
+pub(crate) mod audit;
 pub mod backlog;
 pub mod block_kind;
 mod claim;
@@ -770,16 +771,18 @@ impl Tasks {
         let actor = actor.map(|a| a.to_string());
         let now = crate::clock::now_s();
         self.writer
-            .call(move |conn| {
+            .call(move |db| {
+                let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db::map_sqlite)?;
+                let conn = &tx;
                 // t1018 finding 1 (a t854 regression): a terminal status is FINAL, and
                 // the guard must be the WHERE clause, not a read-then-write check - the
                 // Python's update() refuses with this sentence and backs it with
                 // `WHERE id = ? AND status = ?` so a concurrent cancel still wins.
-                let (current, scope, priority): (String, String, String) = conn
+                let (current, scope, priority, previous_reason): (String, String, String, Option<String>) = conn
                     .query_row(
-                        "SELECT status, scope, priority FROM tasks WHERE id = ?",
+                        "SELECT status, scope, priority, block_reason FROM tasks WHERE id = ?",
                         params![id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                     )
                     .optional()
                     .map_err(db::map_sqlite)?
@@ -795,7 +798,7 @@ impl Tasks {
                 // SQLite's attempted binding happens only after visibility and terminal-state
                 // checks, as in Python. The rejected composite value therefore cannot hide a
                 // refusal or partially change status, leases, or events.
-                let (reason_binding, reason_meta) = match &reason {
+                let (reason_binding, original_reason_meta) = match &reason {
                     StatusReason::Text(value) => (
                         value.clone().map(SqlValue::Text),
                         value.clone().map(|value| json!({"reason": value}).to_string()),
@@ -849,6 +852,14 @@ impl Tasks {
                     other if current == "blocked" && other == "open" => "unblocked",
                     _ => "status",
                 };
+                let audit_actor = audit::transition_actor(event, actor.as_deref());
+                let reason_meta = if matches!(event, "blocked"|"cancelled") {
+                    let stored_reason: Option<String> = conn.query_row("SELECT block_reason FROM tasks WHERE id=?", params![id], |r|r.get(0)).map_err(db::map_sqlite)?;
+                    audit::status_meta(event,stored_reason.as_deref(),previous_reason.as_deref())
+                } else if event == "unblocked" {
+                    let supplied = match &reason { StatusReason::Text(value)=>value.as_deref(), _=>None };
+                    audit::status_meta(event,supplied,previous_reason.as_deref())
+                } else { original_reason_meta };
                 let duration_ms = if status == "done" {
                     let created: f64 = conn
                         .query_row("SELECT created_at FROM tasks WHERE id = ?", params![id],
@@ -861,7 +872,7 @@ impl Tasks {
                 conn.execute(
                     "INSERT INTO task_events (task_id, event, at, actor, scope, priority, \
                      status_from, status_to, duration_ms, meta) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    params![id, event, now, actor, scope, priority, current, status, duration_ms,
+                    params![id, event, now, audit_actor, scope, priority, current, status, duration_ms,
                             reason_meta],
                 )
                 .map_err(db::map_sqlite)?;
@@ -878,7 +889,7 @@ impl Tasks {
                 if status == "done" && current != "done" {
                     auto_unblock(conn, now, Some(&id))?;
                 }
-                Ok(())
+                tx.commit().map_err(db::map_sqlite)
             })
             .await?;
         self.get(&wanted).await
@@ -893,6 +904,16 @@ impl Tasks {
     /// the dependency recorded, so completing `tN` unblocks it (event path A). A free-text
     /// `block` stays manual.
     pub async fn block_by(&self, id: &str, by: &str) -> Result<Task, DunkError> {
+        self.block_by_actor(id, by, "service:tasks").await
+    }
+
+    pub(crate) async fn block_by_actor(
+        &self,
+        id: &str,
+        by: &str,
+        actor: &str,
+    ) -> Result<Task, DunkError> {
+        let actor = audit::actor(Some(actor), "service:tasks");
         let (id, by) = (id.trim().to_string(), by.trim().to_string());
         if id == by {
             return Err(DunkError::Refused("a task cannot depend on itself".into()));
@@ -900,7 +921,9 @@ impl Tasks {
         let wanted = id.clone();
         let now = crate::clock::now_s();
         self.writer
-            .call(move |conn| {
+            .call(move |db| {
+                let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db::map_sqlite)?;
+                let conn = &tx;
                 type TaskRow = (String, Option<String>, Option<String>, Option<String>);
                 let exists = |t: &str| -> Result<Option<TaskRow>, DunkError> {
                     conn.query_row(
@@ -935,15 +958,15 @@ impl Tasks {
                 // The `blocked` event carries scope and priority like every other writer
                 // (Python `_record`): a scoped metrics query keys on scope and drops a NULL one.
                 conn.execute(
-                    "INSERT INTO task_events (task_id, event, at, scope, priority, status_from, status_to, meta) VALUES (?,?,?,?,?,?,?,?)",
-                    params![id, "blocked", now, scope, priority, current, "blocked",
+                    "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_from, status_to, meta) VALUES (?,?,?,?,?,?,?,?,?)",
+                    params![id, "blocked", now, actor, scope, priority, current, "blocked",
                             json!({"reason": reason}).to_string()],
                 )
                 .map_err(db::map_sqlite)?;
                 // Same rule as `set_status`: a block ends the claim.
                 conn.execute("DELETE FROM task_leases WHERE task_id = ?", params![id])
                     .map_err(db::map_sqlite)?;
-                Ok(())
+                tx.commit().map_err(db::map_sqlite)
             })
             .await?;
         self.get(&wanted).await
@@ -955,7 +978,7 @@ impl Tasks {
         self.writer
             .call(move |conn| {
                 let mut stmt = conn
-                    .prepare("SELECT task_id, meta FROM task_events WHERE event = 'unblocked' AND actor = 'system' ORDER BY id DESC LIMIT 200")
+                    .prepare("SELECT task_id, meta FROM task_events WHERE event = 'unblocked' AND actor = 'rule:auto-unblock' ORDER BY id DESC LIMIT 200")
                     .map_err(db::map_sqlite)?;
                 let rows = stmt
                     .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))
@@ -977,7 +1000,7 @@ impl Tasks {
 
     /// t1221 (t1218 C): the idempotent backstop the daemon tick runs. Opens every blocked
     /// task whose block is a dependency block (empty or `blocked-by:*`) and whose
-    /// dependencies are all done AND landed, logs one `unblocked` event (actor `system`,
+    /// dependencies are all done AND landed, logs one `unblocked` event (actor `rule:auto-unblock`,
     /// reason `auto: dependencies satisfied (sweep)`) and fires the unblocked observer for
     /// each. A second sweep finds nothing. `needs-owner:`, `DEFERRED`, headroom and other
     /// free-text reasons, and tasks with a cancelled dependency, are never touched. Pure
@@ -994,7 +1017,7 @@ impl Tasks {
 
     fn fire_unblocked(&self, ids: &[String]) {
         for id in ids {
-            self.fire(id, "unblocked", Some("system"), None);
+            self.fire(id, "unblocked", Some("rule:auto-unblock"), None);
         }
     }
 
@@ -1275,6 +1298,34 @@ impl Tasks {
         planner_author_guard: bool,
         planner: Option<planner_scope::PlannerIdentity>,
     ) -> Result<Task, DunkError> {
+        self.assign_with_audit(
+            id,
+            assignees,
+            mode,
+            planner_author_guard,
+            planner,
+            "service:tasks",
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn assign_with_audit(
+        &self,
+        id: &str,
+        assignees: &[&str],
+        mode: &str,
+        planner_author_guard: bool,
+        planner: Option<planner_scope::PlannerIdentity>,
+        actor: &str,
+        reason: Option<&str>,
+    ) -> Result<Task, DunkError> {
+        let actor = audit::actor(Some(actor), "service:tasks");
+        let reason = reason
+            .filter(|r| !r.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("assignees {} (no reason supplied)", mode.trim()));
         let incoming: Vec<String> = assignees
             .iter()
             .map(|item| item.trim().to_string())
@@ -1376,9 +1427,9 @@ impl Tasks {
                 )
                 .map_err(db::map_sqlite)?;
                 tx.execute(
-                    "INSERT INTO task_events (task_id, event, at, scope, priority, meta) VALUES (?,?,?,?,?,?)",
-                    params![id, "assigned", now, scope, priority,
-                            json!({ "assignees": merged }).to_string()],
+                    "INSERT INTO task_events (task_id, event, at, actor, scope, priority, meta) VALUES (?,?,?,?,?,?,?)",
+                    params![id, "assigned", now, actor, scope, priority,
+                            json!({ "assignees": merged, "reason":reason, "mode":mode }).to_string()],
                 )
                 .map_err(db::map_sqlite)?;
                 tx.commit().map_err(db::map_sqlite)
@@ -1502,6 +1553,8 @@ impl Tasks {
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(db::map_sqlite)?;
                 let id = wanted.clone();
+                let mut status_audit = None;
+                let previous_reason: Option<String> = tx.query_row("SELECT block_reason FROM tasks WHERE id=?",params![id],|r|r.get(0)).optional().map_err(db::map_sqlite)?.flatten();
                 if edit_for_call.depends_on.is_some() {
                     if let Some(editor) = &dependency_editor {
                         if !planner_scope::dependency_edit_allowed(&tx, &id, editor).map_err(db::map_sqlite)? {
@@ -1663,7 +1716,7 @@ impl Tasks {
                         )));
                     }
                     changed = true;
-                    if status != &old_status {
+                    if status != &old_status || matches!(status.as_str(), "blocked"|"cancelled") {
                         if ends_claim(status) {
                             let removed = tx
                                 .execute("DELETE FROM task_leases WHERE task_id = ?", params![id])
@@ -1691,12 +1744,14 @@ impl Tasks {
                         tx.execute(
                             "INSERT INTO task_events (task_id, event, at, actor, scope, priority, \
                              status_from, status_to, duration_ms) VALUES (?,?,?,?,?,?,?,?,?)",
-                            params![id, event, now, actor, scope,
+                            params![id, event, now, audit::transition_actor(event,actor.as_deref()), scope,
                                     priority.as_deref().unwrap_or(&old_priority), old_status,
                                     status, duration_ms],
                         ).map_err(db::map_sqlite)?;
+                        if matches!(event,"blocked"|"unblocked"|"cancelled") { status_audit=Some((tx.last_insert_rowid(),event.to_string())); }
                     }
                 }
+                let has_reason_edit = raw_block_reason.is_some() || edit_for_call.block_reason.is_some();
                 if let Some(raw_reason) = raw_block_reason {
                     // Python builds one ordered SET mapping. Replacing block_reason after
                     // a status edit retains its position in that mapping.
@@ -1727,6 +1782,18 @@ impl Tasks {
                     tx.execute("UPDATE tasks SET block_reason = ? WHERE id = ?", params![reason, id]).map_err(db::map_sqlite)?;
                     changed = true;
                 }
+                let effective_status = status_after.as_deref().unwrap_or(&old_status);
+                if status_audit.is_none() && has_reason_edit && matches!(effective_status,"blocked"|"cancelled") {
+                    let event = effective_status;
+                    tx.execute("INSERT INTO task_events(task_id,event,at,actor,scope,priority,status_from,status_to) VALUES (?,?,?,?,?,?,?,?)",
+                        params![id,event,now,audit::transition_actor(event,actor.as_deref()),scope,priority.as_deref().unwrap_or(&old_priority),old_status,effective_status]).map_err(db::map_sqlite)?;
+                    status_audit=Some((tx.last_insert_rowid(),event.to_string()));
+                }
+                if let Some((event_id,event)) = status_audit {
+                    let stored_reason: Option<String> = tx.query_row("SELECT block_reason FROM tasks WHERE id=?",params![id],|r|r.get(0)).map_err(db::map_sqlite)?;
+                    let meta = audit::status_meta(&event,stored_reason.as_deref(),previous_reason.as_deref());
+                    tx.execute("UPDATE task_events SET meta=? WHERE id=?",params![meta,event_id]).map_err(db::map_sqlite)?;
+                }
                 if let Some(new) = priority_event {
                     tx.execute(
                         "INSERT INTO task_events (task_id, event, at, actor, scope, priority, meta) VALUES (?,?,?,?,?,?,?)",
@@ -1748,8 +1815,8 @@ impl Tasks {
                 if let Some(after) = assigned_event {
                     tx.execute(
                         "INSERT INTO task_events (task_id, event, at, actor, scope, priority, meta) VALUES (?,?,?,?,?,?,?)",
-                        params![id, "assigned", now, actor, scope, old_priority,
-                                json!({ "assignees": after }).to_string()],
+                        params![id, "assigned", now, audit::actor(actor.as_deref(),"service:tasks"), scope, old_priority,
+                                json!({ "assignees": after, "reason":"assignees updated (no reason supplied)" }).to_string()],
                     ).map_err(db::map_sqlite)?;
                 }
                 if changed {
@@ -2982,7 +3049,7 @@ fn auto_unblock(
         // query drops a NULL-scope event.
         conn.execute(
             "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_from, status_to, meta) VALUES (?,?,?,?,?,?,?,?,?)",
-            params![id, "unblocked", now, "system", scope, priority, "blocked", "open",
+            params![id, "unblocked", now, "rule:auto-unblock", scope, priority, "blocked", "open",
                     json!({"reason": why}).to_string()],
         )
         .map_err(db::map_sqlite)?;
@@ -3612,7 +3679,7 @@ mod tests {
         let events = unblocked_events(&store, &only_a.id).await;
         assert_eq!(1, events.len());
         assert!(
-            events[0].starts_with("system|")
+            events[0].starts_with("rule:auto-unblock|")
                 && events[0].contains(&format!("auto: {} completed", a.id))
         );
         store.complete(&c.id).await.unwrap();
@@ -3635,7 +3702,7 @@ mod tests {
         let b = blocked_on(&store, "b", &[&a], None).await;
         store.complete(&a.id).await.unwrap();
         assert_eq!(
-            vec![(b.id.clone(), Some("system".to_string()))],
+            vec![(b.id.clone(), Some("rule:auto-unblock".to_string()))],
             *seen.lock().unwrap()
         );
     }

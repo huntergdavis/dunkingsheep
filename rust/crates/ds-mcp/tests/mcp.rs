@@ -88,6 +88,9 @@ impl Caller for FakeDaemon {
                     None => refuse(&format!("no dunk with id '{id}'")),
                 }
             }
+            "task_assign" | "task_block" | "task_unblock" | "task_cancel" => {
+                Ok(json!({"id":args.get("id"),"ok":true}))
+            }
             "pr_wait" => Ok(json!({"registered":true})),
             "status" => Ok(json!({"dunkers": 0, "version": "x"})),
             "help" => {
@@ -654,4 +657,27 @@ fn test_rust_only_pr_wait_flat_name_forwards_to_daemon() {
         .borrow()
         .iter()
         .any(|(cmd, args)| cmd == "pr_wait" && args.get("target") == Some(&json!("o/r#7"))));
+}
+
+#[test]
+fn task_audit_mcp_routes_all_transition_reasons_without_exposing_an_actor_parameter() {
+    let mut h = harness();
+    for action in ["assign", "block", "unblock", "cancel"] {
+        let mut arguments = json!({"action":action,"id":"t7","reason":"reviewed evidence"});
+        if action == "assign" {
+            arguments["assignees"] = json!(["%2"]);
+        }
+        let out = h.call("task", arguments);
+        assert_eq!(false, out["result"]["isError"], "{action}: {out}");
+        let calls = h.calls.borrow();
+        let (_, args) = calls
+            .iter()
+            .rev()
+            .find(|(name, _)| name == &format!("task_{action}"))
+            .unwrap();
+        assert_eq!("reviewed evidence", args["reason"]);
+        assert!(!args.contains_key("actor"));
+        let command = registry::command(&format!("task_{action}")).unwrap();
+        assert!(command.params.iter().all(|p| p.name != "actor"));
+    }
 }

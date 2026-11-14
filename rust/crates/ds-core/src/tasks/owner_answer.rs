@@ -57,7 +57,7 @@ impl Tasks {
     ) -> Result<Value, DunkError> {
         let id = id.to_owned();
         let reply = reply.map(str::to_owned);
-        let actor = actor.map(str::to_owned);
+        let actor = super::audit::actor(actor, crate::tasks::advance::OWNER_SERVICE);
         let pane = pane.map(str::to_owned);
         self.writer.call(move |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(db::map_sqlite)?;
@@ -97,7 +97,7 @@ impl Tasks {
             let meta = json!({"version":version,"option_number":option,"option_label":answer,"reply":reply,"reason":display}).to_string();
             tx.execute("INSERT INTO task_events (task_id,event,at,actor,scope,priority,status_from,status_to,meta) VALUES (?,'owner_answer',?,?,?,?, 'blocked','open',?)", params![id,now,actor,scope,priority,meta]).map_err(db::map_sqlite)?;
             tx.execute("UPDATE tasks SET status='open', block_reason=NULL, updated_at=? WHERE id=? AND status='blocked'", params![now,id]).map_err(db::map_sqlite)?;
-            tx.execute("INSERT INTO task_events (task_id,event,at,actor,scope,priority,status_from,status_to) VALUES (?,'unblocked',?,?,?,?, 'blocked','open')", params![id,now,actor,scope,priority]).map_err(db::map_sqlite)?;
+            tx.execute("INSERT INTO task_events (task_id,event,at,actor,scope,priority,status_from,status_to,meta) VALUES (?,'unblocked',?,?,?,?, 'blocked','open',?)", params![id,now,actor,scope,priority,json!({"reason":format!("owner answered: {display}"),"previous_block_reason":reason}).to_string()]).map_err(db::map_sqlite)?;
             let task = super::wire::full_conn(&tx, &id, pane.as_deref(), now)?.wire;
             tx.commit().map_err(db::map_sqlite)?;
             Ok(json!({"task_id":id,"version":version.to_string(),"changed":true,"unblocked":true,"task":task,"answer":answer}))

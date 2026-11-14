@@ -3756,6 +3756,7 @@ pub fn h_task_assign(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         pane,
         role == "planner",
         planner,
+        task_string_arg(&args, "reason", "task_assign")?.as_deref(),
     ))??;
     Ok(task.wire)
 }
@@ -3821,7 +3822,7 @@ pub fn h_task_owner_answer(context: &HandlerContext<'_>, args: Args) -> Result<V
         version,
         option,
         reply,
-        context.self_pane_id(),
+        Some(&context.flock.task_audit_actor(context.self_pane_id())?),
         context.self_pane_id(),
     ))?
 }
@@ -3901,7 +3902,11 @@ fn with_block_kind(mut wire: Value) -> Value {
 /// `dunk_api.h_task_unblock`.
 pub fn h_task_unblock(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let id = args.get("id").map(python_value_string).unwrap_or_default();
-    let task = context.block_on(context.flock.task_unblock_wire(&id, context.self_pane_id()))??;
+    let task = context.block_on(context.flock.task_unblock_wire_with_reason(
+        &id,
+        task_string_arg(&args, "reason", "task_unblock")?.as_deref(),
+        context.self_pane_id(),
+    ))??;
     Ok(task.wire)
 }
 

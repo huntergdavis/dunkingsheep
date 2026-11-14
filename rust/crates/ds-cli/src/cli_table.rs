@@ -1063,6 +1063,7 @@ pub static ROOT: Cmd = Cmd {
                         Arg { id: "id", dest: "id", tri: false, default_int: false, flags: &[], positional: true, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: true, help: None, hidden: false, metavar: None, version: None },
                         Arg { id: "assignees", dest: "assignees", tri: false, default_int: false, flags: &[], positional: true, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::Plus, choices: &[], default: None, required: true, help: None, hidden: false, metavar: None, version: None },
                         Arg { id: "mode", dest: "mode", tri: false, default_int: false, flags: &["--mode"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &["add", "remove", "set"], default: Some("add"), required: false, help: None, hidden: false, metavar: None, version: None },
+                        Arg { id: "reason", dest: "reason", tri: false, default_int: false, flags: &["--reason"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("why this transition is requested (stored in task history)"), hidden: false, metavar: None, version: None },
                     ],
                     groups: &[],
                     sub_dest: None, sub_metavar: None, sub_required: false,
@@ -1118,6 +1119,7 @@ pub static ROOT: Cmd = Cmd {
                     args: &[
                         Arg { id: "json", dest: "json", tri: false, default_int: false, flags: &["--json"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: None, hidden: true, metavar: None, version: None },
                         Arg { id: "id", dest: "id", tri: false, default_int: false, flags: &[], positional: true, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: true, help: None, hidden: false, metavar: None, version: None },
+                        Arg { id: "reason", dest: "reason", tri: false, default_int: false, flags: &["--reason"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("why this transition is requested (stored in task history)"), hidden: false, metavar: None, version: None },
                     ],
                     groups: &[],
                     sub_dest: None, sub_metavar: None, sub_required: false,

@@ -77,6 +77,34 @@ pub struct TaskUpdateArgs<'a> {
 }
 
 impl Flock {
+    /// Audit identity from the already-bound pane or the authenticated service token.
+    /// No RPC actor/by parameter participates; this value grants no permissions.
+    pub(crate) fn task_audit_actor(&self, pane: Option<&str>) -> Result<String, DunkError> {
+        let bound_or_trusted = self.with_caller(|state| {
+            state.socket_peer_ok.is_none()
+                || (state.socket_peer_ok == Some(true) && state.identity_bound == Some(true))
+        });
+        if let Some(pane) = pane.filter(|p| !p.is_empty() && bound_or_trusted) {
+            return Ok(pane.to_owned());
+        }
+        let token = self.with_caller(|state| state.service_token.clone());
+        if let Some(token) = token {
+            let service = self.with_roles(|roles, _| {
+                Ok((roles.token_role(&token)?, roles.token_label(&token)?))
+            })?;
+            if service.0.as_deref() == Some("owner") {
+                return Ok(crate::tasks::advance::OWNER_SERVICE.into());
+            }
+            if let Some(role) = service.0 {
+                return Ok(format!(
+                    "service:{}",
+                    service.1.filter(|s| !s.is_empty()).unwrap_or(role)
+                ));
+            }
+        }
+        Ok("service:task-api".into())
+    }
+
     /// `_task_scope`: resolve a caller's scope and enforce per-pane privacy. Global is
     /// fleet-wide; a pane id is private to that pane, and an agent may only name its own
     /// pane (or `self`). A caller with no pane may name any pane for inspection.
@@ -848,7 +876,7 @@ impl Flock {
                 task_id,
                 edit,
                 args.status,
-                self_pane_id,
+                Some(&self.task_audit_actor(self_pane_id)?),
                 raw_block_reason,
                 dependency_editor,
             )
@@ -866,7 +894,14 @@ impl Flock {
         self.visible_task(&tasks, task_id, self_pane_id).await?;
         // Python passes reason=None through, which stores NULL; `Tasks::block` takes a &str and
         // would write '' (t1314). `set_status` takes the Option, as `Tasks.update` does.
-        tasks.set_status(task_id, "blocked", reason, None).await
+        tasks
+            .set_status(
+                task_id,
+                "blocked",
+                reason,
+                Some(&self.task_audit_actor(self_pane_id)?),
+            )
+            .await
     }
 
     /// t4704: `task block <id> --waiting-on <what>`: a block whose reason says what the task
@@ -890,11 +925,18 @@ impl Flock {
                         "a block waiting on a task takes no reason: its reason is the task it waits for; add a note instead".into(),
                     ));
                 }
-                tasks.block_by(task_id, other).await
+                tasks
+                    .block_by_actor(task_id, other, &self.task_audit_actor(self_pane_id)?)
+                    .await
             }
             _ => {
                 tasks
-                    .set_status(task_id, "blocked", Some(&waiting.reason(reason)), None)
+                    .set_status(
+                        task_id,
+                        "blocked",
+                        Some(&waiting.reason(reason)),
+                        Some(&self.task_audit_actor(self_pane_id)?),
+                    )
                     .await
             }
         }
@@ -906,9 +948,26 @@ impl Flock {
         task_id: &str,
         self_pane_id: Option<&str>,
     ) -> Result<Task, DunkError> {
+        self.task_unblock_with_reason(task_id, None, self_pane_id)
+            .await
+    }
+
+    pub(crate) async fn task_unblock_with_reason(
+        &self,
+        task_id: &str,
+        reason: Option<&str>,
+        self_pane_id: Option<&str>,
+    ) -> Result<Task, DunkError> {
         let tasks = self.task_store()?;
         self.visible_task(&tasks, task_id, self_pane_id).await?;
-        tasks.unblock(task_id).await
+        tasks
+            .set_status(
+                task_id,
+                "open",
+                reason,
+                Some(&self.task_audit_actor(self_pane_id)?),
+            )
+            .await
     }
 
     /// `task_cancel`: the row WITH `blocked_dependents` (t878), the ids of the open, in-progress
@@ -923,7 +982,14 @@ impl Flock {
         let tasks = self.task_store()?;
         self.visible_task(&tasks, task_id, self_pane_id).await?;
         // As `task_block`: None stays NULL (t1314), not ''.
-        let task = tasks.set_status(task_id, "cancelled", reason, None).await?;
+        let task = tasks
+            .set_status(
+                task_id,
+                "cancelled",
+                reason,
+                Some(&self.task_audit_actor(self_pane_id)?),
+            )
+            .await?;
         let blocked_dependents = tasks.blocked_dependents(&task.id).await?;
         Ok(Cancelled {
             task,
@@ -957,10 +1023,12 @@ impl Flock {
             self_pane_id,
             false,
             None,
+            None,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn task_assign_with_mode_parser<F>(
         &self,
         task_id: &str,
@@ -969,6 +1037,7 @@ impl Flock {
         self_pane_id: Option<&str>,
         planner_author_guard: bool,
         planner: Option<crate::tasks::planner_scope::PlannerIdentity>,
+        reason: Option<&str>,
     ) -> Result<Task, DunkError>
     where
         F: FnOnce() -> Result<String, DunkError>,
@@ -983,7 +1052,15 @@ impl Flock {
         }
         let mode = parse_mode()?;
         tasks
-            .assign_with_planner_scope(task_id, &refs, &mode, planner_author_guard, planner)
+            .assign_with_audit(
+                task_id,
+                &refs,
+                &mode,
+                planner_author_guard,
+                planner,
+                &self.task_audit_actor(self_pane_id)?,
+                reason,
+            )
             .await
     }
 

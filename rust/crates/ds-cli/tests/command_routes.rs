@@ -6396,3 +6396,21 @@ fn cli_task_history_flags_reach_the_daemon_and_render_the_explicit_view() {
     assert!(note.status.success());
     assert_eq!(String::from_utf8(note.stdout).unwrap(), "noted t9: note\n");
 }
+
+#[test]
+fn task_audit_cli_assign_and_unblock_send_optional_reasons_without_an_actor() {
+    let assigned = run_daemon_cli(
+        &["task", "assign", "t7", "%2", "--reason", "review handoff"],
+        "task_assign",
+        json!({"id":"t7","assignees":["%2"],"mode":"add","reason":"review handoff"}),
+        json!({"id":"t7","title":"work","scope":"global","status":"open","priority":"medium"}),
+    );
+    assert_eq!(Some(0), assigned.status.code());
+    let unblocked = run_daemon_cli(
+        &["task", "unblock", "t7", "--reason", "evidence received"],
+        "task_unblock",
+        json!({"id":"t7","reason":"evidence received"}),
+        json!({"id":"t7","title":"work","scope":"global","status":"open","priority":"medium"}),
+    );
+    assert_eq!(Some(0), unblocked.status.code());
+}

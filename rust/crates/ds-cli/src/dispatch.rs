@@ -4627,6 +4627,9 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                         .cloned()
                         .unwrap_or(Value::String("add".into())),
                 );
+                if let Some(reason) = ns.get("reason").filter(|v| !v.is_null()) {
+                    args.insert("reason".into(), reason.clone());
+                }
                 crate::daemon_cmd::run_command(ns, "task_assign", args, |task| {
                     crate::render_print::render_task(task, &task_stamp)
                 })
@@ -4808,6 +4811,9 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             "unblock" => {
                 let mut args = Map::new();
                 args.insert("id".into(), ns.get("id").cloned().unwrap_or(Value::Null));
+                if let Some(reason) = ns.get("reason").filter(|v| !v.is_null()) {
+                    args.insert("reason".into(), reason.clone());
+                }
                 crate::daemon_cmd::run_command(ns, "task_unblock", args, |task| {
                     crate::render_print::render_task(task, &task_stamp)
                 })
