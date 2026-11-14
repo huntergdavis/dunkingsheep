@@ -3996,35 +3996,29 @@ fn h_roster_matches_python() {
     assert_eq!(named["lanes"], json!([]));
 }
 
-/// t4473 slice C: a lane records its own model change; the record is tied to the pane's
-/// process and nothing else about the lane changes.
+/// t4473 slice C: a lane records its own model change; only the owner role may record another
+/// lane's. The record is tied to the pane's process and nothing else about the lane changes.
+/// Real roles: w1:p1 is the owner, w2:p2 a worker.
 #[test]
 fn lanes_model_records_a_declaration_for_the_callers_own_pane_only() {
-    let (_dir, flock) = flock();
+    let (_dir, flock) = staffed_flock("api-lanes-model");
     let me = i64::from(std::process::id());
     let env = ParityEnv::new(Some(me));
-    let request = RequestCtx {
-        self_pane_id: Some("w1:p1".into()),
-        ..RequestCtx::default()
-    };
     let mut dispatcher = Dispatcher::new();
     dispatcher.register_lanes();
-    let call = |value: Value| {
-        dispatch_with_env(
-            &dispatcher,
-            &flock,
-            &FixedRole("worker", false),
-            "lanes",
-            args(value),
-            &request,
-            &env,
-        )
+    let call = |caller: Option<&str>, value: Value| {
+        dispatch_as_flock_role(&dispatcher, &flock, &env, caller, "lanes", args(value))
     };
-    flock.record_launch("w1:p1", &[("argv", json!(["pi", "--model", "sol"]))]);
-    let launched_at = flock.launch("w1:p1").unwrap()["recorded_at"].clone();
+    let worker = Some("w2:p2");
+    flock.record_launch("w2:p2", &[("argv", json!(["pi", "--model", "sol"]))]);
+    let launched_at = flock.launch("w2:p2").unwrap()["recorded_at"].clone();
 
-    let result = call(json!({"action": "model", "pane": "self", "model": " luna ", "effort": "low", "provider": "PI"})).unwrap();
-    assert_eq!(result["pane_id"], "w1:p1");
+    let result = call(
+        worker,
+        json!({"action": "model", "pane": "self", "model": " luna ", "effort": "low", "provider": "PI"}),
+    )
+    .unwrap();
+    assert_eq!(result["pane_id"], "w2:p2");
     let declared = &result["declared"];
     assert_eq!(
         (
@@ -4034,74 +4028,118 @@ fn lanes_model_records_a_declaration_for_the_callers_own_pane_only() {
         ),
         (&json!("luna"), &json!("low"), &json!("pi"))
     );
-    assert_eq!(declared["by"], "w1:p1");
-    assert_eq!(declared["by_kind"], "lane", "its own pane: the lane itself");
+    assert_eq!(
+        (&declared["by"], &declared["by_kind"]),
+        (&json!("w2:p2"), &json!("lane"))
+    );
     assert_eq!(declared["process_pid"], json!(me));
     assert_eq!(
         declared["process_start"],
         json!(crate::proc::process_start(me).unwrap())
     );
     assert_eq!(declared["at"], json!(env.now_s));
-    let entry = flock.launch("w1:p1").unwrap();
+    let entry = flock.launch("w2:p2").unwrap();
     assert_eq!(entry["model_declared"], *declared);
     assert_eq!(entry["recorded_at"], launched_at, "the launch is unchanged");
     assert_eq!(entry["argv"], json!(["pi", "--model", "sol"]));
-
     // The same call by pane id is still the caller's own pane.
-    assert!(call(json!({"action": "model", "pane": "w1:p1", "model": "luna"})).is_ok());
-
-    let refused = |value: Value| call(value).unwrap_err().to_string();
-    assert!(
-        // The owner gate refuses: with no owner registered (this fixture) it says so, otherwise
-        // it names the action; either way the refusal is about the owner role.
-        refused(json!({"action": "model", "pane": "w1:p9", "model": "luna"})).contains("owner"),
-        "another lane needs the owner role"
-    );
-    assert!(refused(json!({"action": "model", "pane": "self"})).contains("needs the model"));
-    assert!(
-        refused(json!({"action": "model", "pane": "self", "model": "   "}))
-            .contains("needs the model")
-    );
-    assert!(refused(json!({"action": "model", "model": "luna"})).contains("needs a pane id"));
-    assert!(
-        refused(json!({"action": "model", "pane": "self", "model": 7}))
-            .contains("model must be a string")
-    );
-    assert!(refused(
-        json!({"action": "model", "pane": "self", "model": "luna", "provider": "bash"})
+    assert!(call(
+        worker,
+        json!({"action": "model", "pane": "w2:p2", "model": "luna"})
     )
-    .contains("provider must be one of"));
+    .is_ok());
+
+    // A worker may not declare another lane's model: the owner gate refuses, by name.
+    let other = call(
+        worker,
+        json!({"action": "model", "pane": "w1:p1", "model": "luna"}),
+    )
+    .unwrap_err()
+    .to_string();
     assert!(
-        refused(json!({"action": "model", "pane": "self", "model": "x".repeat(129)}))
-            .contains("at most 128 characters")
+        other.contains("lane model requires a superuser (the owner role); w2:p2 is worker"),
+        "refused with: {other}"
     );
     assert!(
-        refused(json!({"action": "model", "pane": "self", "model": "a\u{7}b"}))
-            .contains("plain text")
+        flock.launch("w1:p1").is_none(),
+        "the refusal recorded nothing"
+    );
+
+    // The owner role may, and the record names that caller, not "owner".
+    let by_owner = call(
+        Some("w1:p1"),
+        json!({"action": "model", "pane": "w2:p2", "model": "nova"}),
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            &by_owner["declared"]["by"],
+            &by_owner["declared"]["by_kind"]
+        ),
+        (&json!("w1:p1"), &json!("owner-role"))
     );
     assert_eq!(
-        flock.launch("w1:p1").unwrap()["model_declared"]["model"],
-        "luna",
-        "refusals record nothing"
+        flock.launch("w2:p2").unwrap()["model_declared"]["model"],
+        "nova"
     );
-    assert!(flock.launch("w1:p9").is_none());
+
+    let refused = |value: Value| {
+        let error = call(worker, value).unwrap_err().to_string();
+        assert_eq!(
+            flock.launch("w2:p2").unwrap()["model_declared"]["model"],
+            "nova",
+            "a refusal records nothing ({error})"
+        );
+        error
+    };
+    for (value, expected) in [
+        (
+            json!({"action": "model", "pane": "self"}),
+            "needs the model",
+        ),
+        (
+            json!({"action": "model", "pane": "self", "model": "   "}),
+            "needs the model",
+        ),
+        (
+            json!({"action": "model", "model": "luna"}),
+            "needs a pane id",
+        ),
+        (
+            json!({"action": "model", "pane": "self", "model": 7}),
+            "model must be a string",
+        ),
+        (
+            json!({"action": "model", "pane": "self", "model": "luna", "provider": "bash"}),
+            "provider must be one of",
+        ),
+        (
+            json!({"action": "model", "pane": "self", "model": "x".repeat(129)}),
+            "at most 128 characters",
+        ),
+        (
+            json!({"action": "model", "pane": "self", "model": "a\u{7}b"}),
+            "plain text",
+        ),
+    ] {
+        let error = refused(value.clone());
+        assert!(error.contains(expected), "{value}: refused with: {error}");
+    }
 
     // Who a declaration is recorded as made by: the bound caller, never the role it holds.
-    // A caller with the owner role is the VP seat's pane or an owner token, not the owner.
     assert_eq!(super::declared_by(Some("w1:p7")), "w1:p7");
     assert_eq!(super::declared_by(None), "owner-service");
     assert_eq!(super::declared_by(Some("")), "owner-service");
 
     // A pane with no readable process cannot carry a declaration.
     let blind = ParityEnv::new(None);
-    let error = dispatch_with_env(
+    let error = dispatch_as_flock_role(
         &dispatcher,
         &flock,
-        &FixedRole("worker", false),
+        &blind,
+        worker,
         "lanes",
         args(json!({"action": "model", "pane": "self", "model": "luna"})),
-        &request,
-        &blind,
     )
     .unwrap_err();
     assert!(error.to_string().contains("pane is not live"), "{error}");
