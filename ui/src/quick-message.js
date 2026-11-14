@@ -20,6 +20,18 @@ export function quickMessageTargets(fleet) {
     .sort((a, b) => a.project.localeCompare(b.project) || a.label.localeCompare(b.label));
 }
 
+// What the dialog says about its recipient list: loading, failed (with the server's reason, and a
+// retry is offered), no lanes, or ready. `load` is { status: 'loading' | 'failed' | 'ready', error }.
+// A roster the server calls unavailable is a failure, not an empty list.
+export function quickMessageRoster(load, fleet) {
+  if (load?.status === 'failed') return { kind: 'failed', text: `Recipients could not be loaded: ${load.error || 'unknown reason'}`, retry: true };
+  if (load?.status !== 'ready') return { kind: 'loading', text: 'Loading recipients…', retry: false };
+  if (fleet?.state === 'unavailable') return { kind: 'failed', text: `Recipients could not be loaded: ${fleet.error || 'unknown reason'}`, retry: true };
+  const count = quickMessageTargets(fleet).length;
+  if (!count) return { kind: 'empty', text: 'No live lanes are listed right now.', retry: true };
+  return { kind: 'ready', text: `${count} recipient${count === 1 ? '' : 's'}`, retry: false };
+}
+
 // Why Send is unavailable, or null when the message can be sent.
 export function quickMessageBlock(targets, pane, draft, busy) {
   if (busy) return 'Sending…';

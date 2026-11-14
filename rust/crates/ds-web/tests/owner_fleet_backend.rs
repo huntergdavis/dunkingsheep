@@ -214,8 +214,12 @@ fn handle_request(mut stream: UnixStream, state: &DaemonState) {
         "list_panes" => {
             let lane = json!({"pane_id":"%7","agent":"codex","agent_status":"working","label":"cos","tab_label":"desk","cwd":"/work/poolrad"});
             let shell = json!({"pane_id":"%8","label":"shell","cwd":"/work/shell"});
+            // The shape the real daemon lists for a Claude lane: `agent` is the empty string and
+            // `label` is absent; only the roster says it is a lane.
+            let member = json!({"pane_id":"%12","agent":"","agent_status":null,"tab_label":"ds-writer","cwd":"/work/dunkingsheep"});
             match script.panes {
                 "none" => json!({"panes":[]}),
+                "lane+member+shell" => json!({"panes":[lane, member, shell]}),
                 "lane+shell" => json!({"panes":[lane, shell]}),
                 _ => json!({"panes":[lane]}),
             }
@@ -239,6 +243,9 @@ fn handle_request(mut stream: UnixStream, state: &DaemonState) {
         "state_latest" => {
             json!({"rows":[{"pane_id":"%7","at":1793400000,"session_id":"session-abc"}]})
         }
+        "roster" if script.panes == "lane+member+shell" => json!({"lanes":[
+            {"name":"cos","pane_id":"%7","harness":"codex","inbox":{"unread":2}},
+            {"name":"ds-writer","pane_id":"%12","harness":null,"membership":{"scope":"global","project":null},"inbox":{"unread":1}}]}),
         "roster" => json!({"lanes":[{"name":"cos","pane_id":"%7","inbox":{"unread":2}}]}),
         "send_text" => match script.outcome {
             "refused" => {
@@ -566,6 +573,43 @@ async fn fleet_keeps_partial_sources_unknown_and_inventory_private() {
     stop.store(true, Ordering::Relaxed);
     server.join().unwrap();
     fs::remove_file(socket).unwrap();
+}
+
+/// t4644: most Claude lanes have an empty `agent` in the daemon's pane listing and are lanes only
+/// because the roster lists them. They must be fleet rows (the quick-message recipients), named by
+/// the roster; a plain shell pane the roster does not list stays out.
+#[tokio::test]
+async fn fleet_lists_roster_lanes_without_a_detected_agent_and_still_skips_shells() {
+    let dir = fixture_dir();
+    init_desk_db(&dir.path().join("messages.sqlite3"));
+    let socket = fixture_socket();
+    let daemon = start_scripted(
+        &socket,
+        Script {
+            panes: "lane+member+shell",
+            ..Script::guarded("ok")
+        },
+    );
+    let rpc = rpc_backend(dir.path(), &socket);
+    let backend = make_backend(dir.path(), rpc.clone(), dir.path().join("ops.sqlite3"));
+    let app = router(backend, rpc);
+    let (status, fleet) = get_json(&app, "/api/fleet").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fleet["state"], "ok");
+    let rows = fleet["rows"].as_array().unwrap();
+    let ids: Vec<&str> = rows
+        .iter()
+        .map(|r| r["pane_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["%12", "%7"], "{fleet}");
+    assert_eq!(fleet["count"], 2);
+    let member = &rows[0];
+    assert_eq!(member["name"], "ds-writer");
+    assert_eq!(member["agent"], "");
+    assert_eq!(member["project"], "dunkingsheep");
+    assert_eq!(member["unread"], 1);
+    assert_eq!(member["send"], "guarded");
+    daemon.finish();
 }
 
 #[tokio::test]
