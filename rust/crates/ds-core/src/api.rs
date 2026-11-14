@@ -3757,11 +3757,24 @@ pub fn h_task_note(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
         Some(reason) => json!({"reason": reason}),
         None => json!({}),
     };
-    context.block_on(
-        context
+    // t4781: a note from the owner's detached tooling (no pane, owner token) is recorded with
+    // the actor `owner-service` rather than no actor at all. Everything else is unchanged.
+    let pane = context.self_pane_id().filter(|pane| !pane.is_empty());
+    let actor = match pane {
+        Some(pane) => Some(pane),
+        None => context
             .flock
-            .task_note_wire(&id, &event, context.self_pane_id(), &meta),
-    )?
+            .caller_role(None, context.env)
+            .is_ok_and(|role| {
+                crate::flock::commands_task_complete::owner_service_request(
+                    false,
+                    &role,
+                    context.flock.socket_peer_ok(),
+                )
+            })
+            .then_some(crate::tasks::advance::OWNER_SERVICE),
+    };
+    context.block_on(context.flock.task_note_wire(&id, &event, actor, &meta))?
 }
 
 /// `dunk_api.h_task_block`.

@@ -63,6 +63,34 @@ pub struct OperatorProof {
     pub allowlist: Arc<dyn Allowlist>,
 }
 
+/// t4781: the actor recorded when the owner's own tooling completes or notes a task without a
+/// pane (a detached process authenticated by the owner service token). It is not a pane id
+/// (those are `%N` / `wN:pN`) and no pane may use it.
+pub const OWNER_SERVICE: &str = "owner-service";
+
+/// The operator proof for [`OWNER_SERVICE`]. It answers yes for that actor and for nothing
+/// else, and it does not re-read anything under the lock: a pane operator is re-checked
+/// against the allowlist file at commit because that file changes often, but the owner token's
+/// role is verified once, against the current token file, when the request is authenticated
+/// (never cached across requests). The window is that one request; a token revoked afterwards
+/// is refused on the next request, when its role no longer resolves to `owner`.
+pub fn owner_service_proof() -> OperatorProof {
+    struct OwnerService;
+    impl Allowlist for OwnerService {
+        fn with_locked(
+            &self,
+            body: &mut dyn for<'a> FnMut(&'a AllowlistPredicate<'a>) -> Result<(), DunkError>,
+        ) -> Result<(), DunkError> {
+            body(&|actor: &str, _info: Option<&Value>| actor == OWNER_SERVICE)
+        }
+    }
+    OperatorProof {
+        pane_id: OWNER_SERVICE.to_string(),
+        pane_info: None,
+        allowlist: Arc::new(OwnerService),
+    }
+}
+
 /// `advance_next_job`'s keyword arguments.
 #[derive(Default, Clone)]
 pub struct AdvanceOptions {
