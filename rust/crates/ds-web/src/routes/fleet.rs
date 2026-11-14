@@ -1586,6 +1586,93 @@ mod tests {
     }
 
     #[test]
+    fn mailbox_summary_audience_filter_is_confirmed_before_forwarding() {
+        let f = Fake::setup();
+        let page = |include: Option<bool>, audience: Option<&str>| {
+            let mut page = json!({"mailbox":"owner","order":"newest_first","next_before":null,"messages":[{
+                "message_id":"i8","mailbox":"owner","destination":"owner","sender":null,"subject":null,"state":"read","created_at":100,
+                "body_bytes":0,"attachment_count":0,"audience":audience
+            }]});
+            if let Some(include) = include {
+                page["include_agent"] = json!(include);
+            }
+            page
+        };
+        for include in [false, true] {
+            f.reply(
+                "inbox_list",
+                page(Some(include), if include { Some("agent") } else { None }),
+            );
+            let path = format!("/api/mailbox-messages?mailbox=owner&include_agent={include}");
+            let (status, value) = http(owner_app(f.clone()), &path, None);
+            assert_eq!(status, 200);
+            assert_eq!(value["include_agent"], include);
+            assert_eq!(
+                f.calls.lock().unwrap().last().unwrap().1["include_agent"],
+                include
+            );
+        }
+        for unsafe_page in [
+            page(None, None),
+            page(Some(true), None),
+            page(Some(false), Some("agent")),
+            page(Some(false), Some("unknown")),
+        ] {
+            f.reply("inbox_list", unsafe_page);
+            assert_eq!(
+                http(
+                    owner_app(f.clone()),
+                    "/api/mailbox-messages?mailbox=owner&include_agent=false",
+                    None
+                )
+                .0,
+                502
+            );
+        }
+        let before = f.calls().len();
+        assert_eq!(
+            http(
+                owner_app(f.clone()),
+                "/api/mailbox-messages?mailbox=owner&include_agent=yes",
+                None
+            )
+            .0,
+            400
+        );
+        assert_eq!(f.calls().len(), before);
+    }
+
+    #[test]
+    fn mailbox_summary_accepts_pane_aliases_but_preserves_stored_keys() {
+        let f = Fake::setup();
+        for (requested, stored, status) in [
+            ("VP", "VP (%1)", 200),
+            ("VP", "VP (wR:p1)", 200),
+            ("VP (%1)", "VP", 200),
+            ("VP", "Other (%1)", 502),
+            ("VP", "VP (second shift)", 502),
+            ("VP", "VP (%x)", 502),
+        ] {
+            f.reply("inbox_list", json!({"mailbox":requested,"order":"newest_first","next_before":null,"include_agent":false,"messages":[{
+                "message_id":"i8","mailbox":stored,"destination":stored,"sender":null,"subject":null,"state":"read","created_at":100,
+                "body_bytes":0,"attachment_count":0,"audience":null
+            }]}));
+            let path = format!(
+                "/api/mailbox-messages?mailbox={}&include_agent=false",
+                requested.replace('%', "%25").replace(' ', "%20")
+            );
+            let (actual, page) = http(owner_app(f.clone()), &path, None);
+            assert_eq!(actual, status, "{requested}: {stored}");
+            if status == 200 {
+                assert_eq!(
+                    page["messages"][0]["mailbox"], stored,
+                    "body reads must use the persisted key"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn mailbox_summary_production_path_and_rpc_failure_do_not_fall_to_static() {
         let f = Fake::setup();
         let service = crate::web_server::decoded_path_routing(owner_app(f), false);

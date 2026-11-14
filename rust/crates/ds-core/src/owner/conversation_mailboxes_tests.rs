@@ -292,7 +292,10 @@ fn opening_an_older_inbox_keeps_unclassified_messages_visible() {
 
 #[test]
 fn inbox_source_filters_use_metadata_scope_and_opt_in_without_consuming() {
-    use crate::owner::ConversationFilter::{All, Human, OwnerLane};
+    use crate::owner::ConversationFilter::{All, AllSources, Human, OwnerLane};
+    let human = Human {
+        include_internal: false,
+    };
     let (dir, flock, store) = fixture("source-filters");
     flock
         .with_roles(|roles, _| {
@@ -391,7 +394,7 @@ fn inbox_source_filters_use_metadata_scope_and_opt_in_without_consuming() {
             .collect::<Vec<_>>()
     };
     assert_eq!(
-        ids(Human),
+        ids(human),
         vec![human_legacy.clone(), human_web.clone(), root_reply.clone()]
     );
     assert_eq!(
@@ -413,7 +416,7 @@ fn inbox_source_filters_use_metadata_scope_and_opt_in_without_consuming() {
             .unwrap()
     );
     let human_rows = service
-        .conversation_filtered_cursor(50, None, Some(OWNER), Human)
+        .conversation_filtered_cursor(50, None, Some(OWNER), human)
         .unwrap();
     assert_eq!(
         human_rows
@@ -423,6 +426,27 @@ fn inbox_source_filters_use_metadata_scope_and_opt_in_without_consuming() {
             .unwrap()["ambiguous_owner_reply"],
         true
     );
+    assert_eq!(
+        ids(Human {
+            include_internal: true
+        }),
+        vec![
+            human_legacy.clone(),
+            human_web.clone(),
+            root_reply.clone(),
+            root_agent.clone()
+        ]
+    );
+    let combined = ids(AllSources {
+        include_internal: false,
+    });
+    assert!(combined.contains(&human_legacy) && combined.contains(&lane_legacy));
+    assert!(!combined.contains(&root_agent) && !combined.contains(&lane_agent));
+    let combined = ids(AllSources {
+        include_internal: true,
+    });
+    assert!(combined.contains(&root_agent) && combined.contains(&lane_agent));
+    assert!(!combined.contains(&foreign));
     assert!(ids(All).contains(&root_agent)); // preserve the existing root-mailbox audience exception.
     assert!(!ids(All).contains(&foreign));
     let page = service
@@ -458,7 +482,7 @@ fn inbox_source_filters_use_metadata_scope_and_opt_in_without_consuming() {
         )
         .is_err());
     assert!(service
-        .conversation_filtered_cursor(1, Some(&lane_alias), Some(OWNER), Human)
+        .conversation_filtered_cursor(1, Some(&lane_alias), Some(OWNER), human)
         .is_err());
     assert!(service
         .conversation_filtered_cursor(
@@ -472,7 +496,7 @@ fn inbox_source_filters_use_metadata_scope_and_opt_in_without_consuming() {
         .is_err());
     for pane in [Some(WORKER), Some("w1:p4"), None] {
         assert!(service
-            .conversation_filtered_cursor(50, None, pane, Human)
+            .conversation_filtered_cursor(50, None, pane, human)
             .is_err());
         assert!(service
             .conversation_filtered_cursor(
@@ -486,7 +510,7 @@ fn inbox_source_filters_use_metadata_scope_and_opt_in_without_consuming() {
             .is_err());
     }
     assert!(service
-        .conversation_filtered_cursor(1, Some(&root_agent), Some(OWNER), Human)
+        .conversation_filtered_cursor(1, Some(&root_agent), Some(OWNER), human)
         .is_err());
     assert_eq!(before, snapshot());
 }

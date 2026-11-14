@@ -11,7 +11,7 @@ from playwright.sync_api import sync_playwright
 
 DIST = Path(__file__).resolve().parents[1] / 'dist'
 assert (DIST / 'index.html').is_file()
-LANE = 'lane-alpha & beta (%2)'
+LANE = 'lane-alpha & beta'
 RAW = '''AGENT-ONLY-SECRET
 
 | Name | Value |
@@ -35,8 +35,8 @@ def summary(mid, mailbox, subject, audience=None):
             'created_at': 100, 'state': 'read', 'audience': audience}
 OWNER = summary('i101', 'owner', 'Owner newest')
 OLDER = summary('i99', 'owner', 'Owner older')
-PLAIN = summary('i201', LANE, 'Lane plain')
-AGENT = summary('i202', LANE, 'Agent secret', 'agent')
+PLAIN = summary('i201', LANE + ' (%2)', 'Lane plain')
+AGENT = summary('i202', LANE + ' (wR:p1)', 'Agent secret', 'agent')
 ALL = {row['message_id']: row for row in [OWNER, OLDER, PLAIN, AGENT]}
 BODIES = {'i101': 'OWNER-BODY', 'i99': 'OLDER-BODY', 'i201': 'LANE-PLAIN-BODY', 'i202': RAW}
 
@@ -73,7 +73,10 @@ def mock(route):
             return fulfill(route, {'detail': 'Synthetic failure'}, 503)
         mailbox = query['mailbox'][0]
         rows = [OLDER] if mailbox == 'owner' and query.get('before') else [OWNER] if mailbox == 'owner' else [AGENT, PLAIN] if mailbox == LANE else []
-        return fulfill(route, {'messages': rows, 'next_before': 'i101' if rows == [OWNER] else None})
+        include = query.get('include_agent') == ['true']
+        assert query.get('include_agent') in (['true'], ['false'])
+        rows = [row for row in rows if include or row['audience'] != 'agent']
+        return fulfill(route, {'messages': rows, 'include_agent': include, 'next_before': 'i101' if rows == [OWNER] else None})
     if url.path == '/api/mailbox-message':
         if old_daemon:
             return fulfill(route, {'detail': 'Message unavailable'}, 502)
@@ -104,14 +107,14 @@ try:
             page.locator('.mailbox-folder').filter(has_text=LANE).click()
             reader.get_by_text('LANE-PLAIN-BODY', exact=True).wait_for()
             assert page.get_by_role('heading', name='Project: Arbitrary project').count() == 1
-            details = page.locator('.mailbox-summaries details')
-            assert details.get_attribute('open') is None
-            assert page.locator('.mailbox-message-row').filter(has_text='Agent secret').is_disabled()
+            assert page.locator('.mailbox-message-row').filter(has_text='Agent secret').count() == 0
             assert all(query.get('message_id') != ['i202'] for _, path, query in requests if path == '/api/mailbox-message')
             optin = page.get_by_role('checkbox', name='Include agent-only mail in this browser')
+            before_optin = len(requests)
             optin.check()
             page.locator('.mailbox-message-row').filter(has_text='Agent secret').click()
             reader.get_by_text('AGENT-ONLY-SECRET', exact=True).wait_for()
+            assert any(path == '/api/mailbox-messages' and query.get('include_agent') == ['true'] for _, path, query in requests[before_optin:])
             assert reader.locator('table').count() == 1
             assert reader.locator('.ascii-diagram').count() == 1
             assert reader.locator('script, img, iframe').count() == 0
@@ -159,7 +162,7 @@ try:
             page.get_by_role('link', name='Back to Inbox', exact=True).wait_for()
             assert urlsplit(page.url).query == 'panel=conversation'
             page.get_by_role('link', name='Back to Inbox', exact=True).click()
-            page.get_by_role('heading', name='Owner inbox', exact=True).wait_for()
+            page.get_by_role('heading', name='Inbox', exact=True).wait_for()
             page.get_by_role('link', name='Browse all mailboxes', exact=True).click()
             page.get_by_role('heading', name='Mailboxes', exact=True).wait_for()
             assert not page.get_by_role('checkbox').is_checked()

@@ -8,7 +8,7 @@ const PAGE_SIZE = 25;
 // This is the existing owner conversation projection, not a raw mailbox listing.
 // Fetching and selecting messages only performs GETs; no read/ack operation is sent.
 export default function OwnerInbox({ api }) {
-  const [sourceFilter, setSourceFilter] = useState('all');
+  const [sourceFilter, setSourceFilter] = useState('all_sources');
   const [includeInternal, setIncludeInternal] = useState(false);
   const filterSelect = useRef(null);
   const internalToggle = useRef(null);
@@ -19,11 +19,11 @@ export default function OwnerInbox({ api }) {
     restoreFocus.current = null;
   }, [sourceFilter, includeInternal]);
   const controls = <section className="owner-inbox-filters" aria-label="Inbox filters">
-    <label>View <select ref={filterSelect} aria-label="Inbox filter" value={sourceFilter} onChange={event => { restoreFocus.current = 'filter'; setSourceFilter(event.target.value); setIncludeInternal(false); }}>
-      <option value="all">All</option><option value="human">Human conversation</option><option value="owner_lane">Owner lane</option>
+    <label>View <select ref={filterSelect} aria-label="Inbox filter" value={sourceFilter} onChange={event => { restoreFocus.current = 'filter'; setSourceFilter(event.target.value); }}>
+      <option value="all_sources">All inboxes</option><option value="human">Your inbox</option><option value="owner_lane">VP</option>
     </select></label>
-    <p>Human: owner inbox without agent-only mail. Owner lane: registered owner-lane inboxes; agent-only mail needs opt-in. All keeps the existing view.</p>
-    {sourceFilter === 'owner_lane' && <label><input ref={internalToggle} type="checkbox" checked={includeInternal} onChange={event => { restoreFocus.current = 'internal'; setIncludeInternal(event.target.checked); }} /> Include internal agent-only mail</label>}
+    <p>Your inbox contains mail addressed to you. VP (VP of Agentry) contains mail addressed to the agent. Include agent-only mail adds explicitly tagged internal messages to the selected inboxes.</p>
+    <label><input ref={internalToggle} type="checkbox" checked={includeInternal} onChange={event => { restoreFocus.current = 'internal'; setIncludeInternal(event.target.checked); }} /> Include agent-only mail</label>
   </section>;
   // Remount the entire read state on a scope/opt-in change: old and late bodies cannot cross it.
   return <OwnerInboxThread key={`${sourceFilter}:${includeInternal}`} api={api} sourceFilter={sourceFilter} includeInternal={includeInternal} controls={controls} />;
@@ -42,32 +42,17 @@ function OwnerInboxThread({ api, sourceFilter, includeInternal, controls }) {
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   async function readWindow(before = null) {
-    let data;
-    try {
-      const scope = sourceFilter === 'all' ? '' : `&filter=${sourceFilter}${includeInternal ? '&include_internal=true' : ''}`;
-      data = await api(`/owner-thread?limit=200&paged=true${scope}${before ? `&before=${encodeURIComponent(before)}` : ''}`);
-    } catch (e) {
-      // Auth/origin failures stay failures; only the server's paging-unavailable response falls back.
-      if (e.status !== 502 || sourceFilter !== 'all') throw e;
-      if (before) {
-        const latest = await readWindow();
-        // An expired cursor is not a missing paging capability. Keep its error/reload guidance.
-        if (latest.pagingAvailable) throw e;
-        return latest;
-      }
+    const scope = `&filter=${sourceFilter}&include_internal=${includeInternal}`;
+    const data = await api(`/owner-thread?limit=200&paged=true${scope}${before ? `&before=${encodeURIComponent(before)}` : ''}`);
+    if (!data || !Object.hasOwn(data, 'next_before') || data.source_filter !== sourceFilter || data.include_internal !== includeInternal || !Array.isArray(data.items)) {
+      throw new Error('This Inbox filter is unavailable. A desk or daemon update may be needed.');
     }
-    if (sourceFilter !== 'all') {
-      if (!data || !Object.hasOwn(data, 'next_before') || data.source_filter !== sourceFilter || data.include_internal !== includeInternal || !Array.isArray(data.items)) {
-        throw new Error('This Inbox filter is unavailable. A desk or daemon update may be needed.');
-      }
-      if (data.items.some(item => item.conversation_source !== sourceFilter || !Object.hasOwn(item, 'audience') || (item.audience !== null && item.audience !== 'agent') || (item.audience === 'agent' && !includeInternal))) {
-        throw new Error('Inbox filter response was not safe to display.');
-      }
+    if (data.items.some(item => (sourceFilter === 'all_sources' ? !['human', 'owner_lane'].includes(item.conversation_source) : item.conversation_source !== sourceFilter) || !Object.hasOwn(item, 'audience') || (item.audience !== null && item.audience !== 'agent') || (item.audience === 'agent' && !includeInternal))) {
+      throw new Error('Inbox filter response was not safe to display.');
     }
-    if (data && Object.hasOwn(data, 'next_before')) return { ...data, pagingAvailable: true };
-    // An older desk can ignore paged=true and return the legacy shape. This endpoint is read-only too.
-    return { ...await api('/owner-thread?limit=200'), pagingAvailable: false };
+    return { ...data, pagingAvailable: true };
   }
+
   useEffect(() => {
     let live = true;
     async function load() {
@@ -117,7 +102,7 @@ function OwnerInboxThread({ api, sourceFilter, includeInternal, controls }) {
   const currentPage = Math.min(page, pages - 1);
   return <div className="owner-inbox">
     <header className="owner-inbox-heading">
-      <div><h1>Owner inbox</h1><p>Owner conversation, including owner lane mail. Load older messages to browse the full available history.</p></div>
+      <div><h1>{sourceFilter === 'human' ? 'Your inbox' : sourceFilter === 'owner_lane' ? 'VP' : 'Inbox'}</h1><p>Read Your inbox and VP history. Load older messages to browse the full available history.</p></div>
       <a href="/dash/cos?panel=mailboxes">Browse all mailboxes</a>
       <a href="/dash/cos?panel=conversation">Open conversation / send a message</a>
     </header>
@@ -131,7 +116,7 @@ function OwnerInboxThread({ api, sourceFilter, includeInternal, controls }) {
       {history.error && <p role="alert">Older messages unavailable. {history.error} <button onClick={loadOlder}>Retry older messages</button></p>}
     </div>}
     {items === null && !error && <p role="status">Loading inbox…</p>}
-    {items !== null && !rows.length && <p role="status">No messages in the owner conversation.</p>}
+    {items !== null && !rows.length && <p role="status">No messages match these Inbox filters.</p>}
     {rows.length > 0 && <div className="owner-inbox-columns">
       <section className="owner-inbox-list" aria-label="Owner messages">
         <nav className="owner-inbox-pages" aria-label="Message pages">
@@ -144,14 +129,14 @@ function OwnerInboxThread({ api, sourceFilter, includeInternal, controls }) {
             <strong>{item.sender || (item.role === 'owner' ? 'You' : 'Unknown sender')}</strong>
             <time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time>
             <span className="owner-inbox-preview">{item.body?.trim().split('\n').find(line => line.trim()) || '(Empty message)'}</span>
-            <small>{item.role || 'unknown'} · {item.transport || 'transport unknown'}{item.audience === 'agent' ? ' · agent-only internal' : ''}</small>
+            <small>{item.conversation_source === 'human' ? 'Your inbox' : 'VP'} · {item.role || 'unknown'} · {item.transport || 'transport unknown'}{item.audience === 'agent' ? ' · agent-only internal' : ''}</small>
           </button>
         </li>)}</ul>
       </section>
       {selected && <article className="owner-inbox-reader" aria-label="Selected message" key={selected.id}>
         <header><h2>{selected.sender || (selected.role === 'owner' ? 'You' : 'Unknown sender')}</h2>
           <p><time dateTime={selected.created_at}>{new Date(selected.created_at).toLocaleString()}</time> · {selected.message_id || selected.id}</p>
-          <p>{selected.role || 'unknown'} · {selected.transport || 'transport unknown'}{selected.reply_to ? ` · In reply to ${selected.reply_to}` : ''}{selected.audience === 'agent' ? ' · agent-only internal' : ''}</p>
+          <p>{selected.conversation_source === 'human' ? 'Your inbox' : 'VP'} · {selected.role || 'unknown'} · {selected.transport || 'transport unknown'}{selected.reply_to ? ` · In reply to ${selected.reply_to}` : ''}{selected.audience === 'agent' ? ' · agent-only internal' : ''}</p>
         </header>
         <MessageBody body={selected.body || ''} frontDesk />
       </article>}

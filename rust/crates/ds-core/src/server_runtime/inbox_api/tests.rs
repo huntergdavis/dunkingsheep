@@ -1307,6 +1307,35 @@ fn mailbox_summary_pages_preserve_state_audience_and_legacy_defaults() {
         }
     }
     assert_eq!(seen, ids.iter().rev().cloned().collect::<Vec<_>>());
+    for include in [false, true] {
+        let mut seen = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = dispatcher.dispatch("inbox_list", &json!({"mailbox":"w1:p1","unread_only":false,"limit":1,"newest_first":true,"before":cursor,"include_agent":include}), &worker).unwrap();
+            assert_eq!(page["include_agent"], include);
+            let rows = page["messages"].as_array().unwrap();
+            assert_eq!(rows.len(), 1, "hidden rows must not consume the page");
+            seen.push(rows[0]["message_id"].as_str().unwrap().to_owned());
+            assert!(include || rows[0]["audience"].is_null());
+            cursor = page["next_before"].as_str().map(str::to_owned);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        let expected = if include { &ids[..] } else { &ids[..4] };
+        assert_eq!(seen, expected.iter().rev().cloned().collect::<Vec<_>>());
+    }
+    for bad in [
+        json!({"include_agent":"true","newest_first":true}),
+        json!({"include_agent":true}),
+    ] {
+        let mut args = legacy_args.clone();
+        args.as_object_mut()
+            .unwrap()
+            .extend(bad.as_object().unwrap().clone());
+        assert!(dispatcher.dispatch("inbox_list", &args, &worker).is_err());
+    }
+
     assert_eq!(snapshot(), initial);
     assert!(dispatcher
         .dispatch(

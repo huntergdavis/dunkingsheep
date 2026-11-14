@@ -87,6 +87,15 @@ pub fn h_inbox_list(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
     let n = limit(&args, 50)?;
     let newest_first = python_bool_arg(&args, "newest_first", false);
     let literal_mailbox = python_bool_arg(&args, "literal_mailbox", false);
+    let include_agent = match args.get("include_agent") {
+        None => None,
+        Some(Value::Bool(include)) if newest_first => Some(*include),
+        _ => {
+            return Err(DunkError::Refused(
+                "include_agent requires newest_first and a boolean".into(),
+            ))
+        }
+    };
     if literal_mailbox {
         let role = c.flock.caller_role(c.self_pane_id(), c.env)?;
         if !newest_first || !matches!(role.as_str(), "owner" | "web" | "system") {
@@ -122,6 +131,7 @@ pub fn h_inbox_list(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
                 bound_limit(&n)?,
                 before,
                 env.now(),
+                include_agent,
             );
         }
         if args.get("before").is_some_and(|value| !value.is_null()) {

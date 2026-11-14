@@ -9525,7 +9525,7 @@ fn owner_history_filter_dispatch_checks_typed_scope_and_flags() {
     for value in [
         json!({"source_filter":"human","before":100}),
         json!({"before_id":null,"source_filter":"other"}),
-        json!({"before_id":null,"source_filter":"human","include_internal":true}),
+        json!({"before_id":null,"source_filter":"all","include_internal":true}),
         json!({"before_id":null,"source_filter":"owner_lane","include_internal":"true"}),
         json!({"before_id":null,"source_filter":{"body":"MUST_NOT_LOG"}}),
     ] {

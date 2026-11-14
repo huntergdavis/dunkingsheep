@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import MessageBody from './MessageBody';
 import InboxCompose from './InboxCompose';
+import { normaliseMailbox } from './mailboxKey';
 import './mailbox-browser.css';
 
 function stamp(seconds) {
@@ -27,7 +28,7 @@ export default function MailboxBrowser({ api }) {
   const [includeAgent, setIncludeAgent] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const [body, setBody] = useState({ state: 'idle' });
-  const pageKey = JSON.stringify([mailbox, before, refresh]);
+  const pageKey = JSON.stringify([mailbox, before, includeAgent, refresh]);
   useEffect(() => {
     let live = true;
     setIndex(previous => ({ ...previous, state: 'loading', error: '' }));
@@ -46,8 +47,12 @@ export default function MailboxBrowser({ api }) {
   useEffect(() => {
     let live = true;
     setSummary({ key: pageKey, state: 'loading' });
-    api(`/mailbox-messages?mailbox=${encodeURIComponent(mailbox)}&limit=50${before ? `&before=${encodeURIComponent(before)}` : ''}`)
-      .then(data => { if (live) setSummary({ key: pageKey, state: 'ready', rows: data.messages || [], next: data.next_before }); })
+    api(`/mailbox-messages?mailbox=${encodeURIComponent(mailbox)}&limit=50&include_agent=${includeAgent}${before ? `&before=${encodeURIComponent(before)}` : ''}`)
+      .then(data => {
+        if (!live) return;
+        if (data.include_agent !== includeAgent || !Array.isArray(data.messages) || data.messages.some(row => (typeof row.mailbox !== 'string' || normaliseMailbox(row.mailbox) !== normaliseMailbox(mailbox)) || !Object.hasOwn(row, 'audience') || (row.audience !== null && row.audience !== 'agent') || (!includeAgent && row.audience === 'agent'))) throw new Error('Mailbox filter response was not safe to display.');
+        setSummary({ key: pageKey, state: 'ready', rows: data.messages, next: data.next_before });
+      })
       .catch(e => { if (live) setSummary({ key: pageKey, state: e.status === 502 ? 'unavailable' : 'error', error: e.status === 502 ? 'Mailbox browsing is temporarily unavailable. A daemon upgrade may be needed; try Refresh or use Owner conversation.' : e.message }); });
     return () => { live = false; };
   }, [api, pageKey]);
@@ -87,10 +92,10 @@ export default function MailboxBrowser({ api }) {
   return <div className="mailbox-browser">
     <header className="mailbox-browser-heading"><div><h1>Mailboxes</h1><p>Browse history without marking messages read.</p></div><a href="/dash/cos?panel=conversation">Owner conversation</a><button onClick={reload}>Refresh</button></header>
     <InboxCompose api={api} onSent={reload} />
-    <label className="mailbox-agent-opt-in"><input type="checkbox" checked={includeAgent} onChange={event => setIncludeAgent(event.target.checked)} /> Include agent-only mail in this browser</label>
+    <label className="mailbox-agent-opt-in"><input type="checkbox" checked={includeAgent} onChange={event => { setIncludeAgent(event.target.checked); setBefore(null); setTrail([]); setSelectedId(null); }} /> Include agent-only mail in this browser</label>
     <div className="mailbox-browser-columns">
       <nav className="mailbox-directory" aria-label="Mailboxes">
-        <button className="mailbox-folder" aria-current={mailbox === 'owner' ? 'true' : undefined} onClick={() => chooseMailbox('owner')}>Owner inbox</button>
+        <button className="mailbox-folder" aria-current={mailbox === 'owner' ? 'true' : undefined} onClick={() => chooseMailbox('owner')}>Your inbox</button>
         {[...groups.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([group, folders]) => <section key={group}><h2>{group}</h2>{folders.map(row => <button className="mailbox-folder" key={row.mailbox} aria-current={mailbox === row.mailbox ? 'true' : undefined} onClick={() => chooseMailbox(row.mailbox)}>
           <strong>{row.mailbox}</strong><small>{row.lanes?.map(lane => lane.name).filter(Boolean).join(' / ') || row.destination || 'No current lane match'}</small><small>{row.unread ?? '—'} unread · {row.total ?? '—'} messages</small>
         </button>)}</section>)}
@@ -100,7 +105,7 @@ export default function MailboxBrowser({ api }) {
         {index.next && <button disabled={index.state === 'loading'} onClick={() => setIndexCursor(index.next)}>Load more mailboxes</button>}
       </nav>
       <section className="mailbox-summaries" aria-label="Message summaries">
-        <h2>{mailbox}</h2>
+        <h2>{mailbox === 'owner' ? 'Your inbox' : mailbox}</h2>
         <nav className="mailbox-page-controls" aria-label="Message pages"><button disabled={!trail.length} onClick={() => { setBefore(trail[trail.length - 1]); setTrail(trail.slice(0, -1)); setSelectedId(null); }}>Newer</button><span>Page {trail.length + 1}</span><button disabled={summary.key !== pageKey || summary.state !== 'ready' || !summary.next} onClick={() => { setTrail([...trail, before]); setBefore(summary.next); setSelectedId(null); }}>Older</button></nav>
         {(summary.key !== pageKey || summary.state === 'loading') && <p role="status">Loading messages…</p>}
         {summary.key === pageKey && summary.state === 'unavailable' && <p role="status">{summary.error}</p>}

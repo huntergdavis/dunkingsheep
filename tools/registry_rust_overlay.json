@@ -70,21 +70,28 @@
      "newest_first",
      {
       "type": "boolean",
-      "description": "Opt in to newest-first summary history with audience and next_before cursor; default false preserves the existing list."
+      "description": "Newest-first summaries with audience and next_before; default false."
      }
     ],
     [
      "before",
      {
       "type": "string",
-      "description": "Exclusive message-id cursor from next_before; requires newest_first."
+      "description": "Exclusive next_before message ID; requires newest_first."
      }
     ],
     [
      "literal_mailbox",
      {
       "type": "boolean",
-      "description": "Owner/web/system only: use the mailbox as data without live-label resolution; requires newest_first."
+      "description": "Owner/web/system: stored mailbox key, without label lookup; requires newest_first."
+     }
+    ],
+    [
+     "include_agent",
+     {
+      "type": "boolean",
+      "description": "With newest_first: include/exclude agent-only rows before paging. Omit for legacy."
      }
     ]
    ]
@@ -267,16 +274,17 @@
       "enum": [
        "all",
        "human",
-       "owner_lane"
+       "owner_lane",
+       "all_sources"
       ],
-      "description": "Metadata partition opts into stable history paging; before_id is optional. All preserves the current view."
+      "description": "Recorded mailbox partition: human (Your inbox), owner_lane (VP), all_sources (both). The all alias preserves the legacy view."
      }
     ],
     [
      "include_internal",
      {
       "type": "boolean",
-      "description": "Explicit owner/web opt-in to agent-only owner-lane mail; default false, owner_lane only."
+      "description": "Independent opt-in to recorded agent-only mail in human, owner_lane or all_sources; default false. Legacy all remains unchanged."
      }
     ]
    ]

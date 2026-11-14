@@ -296,10 +296,7 @@ impl Store {
             );
         }
         let root_partition = match visibility {
-            ConversationVisibility::Filter(crate::owner::ConversationFilter::Human) => Some(true),
-            ConversationVisibility::Filter(crate::owner::ConversationFilter::OwnerLane {
-                ..
-            }) => Some(false),
+            ConversationVisibility::Filter(filter) => filter.root_partition(),
             _ => None,
         };
         if let Some(root) = root_partition {
@@ -311,17 +308,13 @@ impl Store {
             values.extend(params.into_iter().map(SqlValue::Text));
         }
         match visibility {
-            ConversationVisibility::Filter(crate::owner::ConversationFilter::Human)
-            | ConversationVisibility::Filter(crate::owner::ConversationFilter::OwnerLane {
-                include_internal: false,
-            }) => {
-                // Explicit partitions use metadata only. Unknown future classifications fail closed.
-                sql.push_str(" AND NOT EXISTS (SELECT 1 FROM message_audiences WHERE message_id = messages.id)");
-            }
-            ConversationVisibility::Filter(crate::owner::ConversationFilter::OwnerLane {
-                include_internal: true,
-            }) => {
-                sql.push_str(" AND NOT EXISTS (SELECT 1 FROM message_audiences WHERE message_id = messages.id AND (audience IS NULL OR audience != 'agent'))");
+            ConversationVisibility::Filter(filter) => {
+                // Only recorded audience metadata classifies mail; filter before LIMIT/cursor.
+                if filter.include_internal() {
+                    sql.push_str(" AND NOT EXISTS (SELECT 1 FROM message_audiences WHERE message_id = messages.id AND (audience IS NULL OR audience != 'agent'))");
+                } else {
+                    sql.push_str(" AND NOT EXISTS (SELECT 1 FROM message_audiences WHERE message_id = messages.id)");
+                }
             }
             _ => {
                 // Only a durable sender-selected audience excludes a lane message. Literal subjects and

@@ -579,7 +579,10 @@ async fn owner_thread(
         for row in data["messages"].as_array().ok_or_else(invalid)? {
             let key = row["mailbox"].as_str().ok_or_else(invalid)?;
             let root = ds_core::inbox::normalise_mailbox(key) == "owner";
-            if root != (filter == ConversationFilter::Human) {
+            if filter
+                .root_partition()
+                .is_some_and(|expected| root != expected)
+            {
                 return Err(invalid());
             }
             match row.get("audience") {
@@ -624,7 +627,14 @@ async fn owner_thread(
                     if filter != ConversationFilter::All {
                         item["mailbox"] = row["mailbox"].clone();
                         item["audience"] = row["audience"].clone();
-                        item["conversation_source"] = json!(filter.name());
+                        item["conversation_source"] = json!(if ds_core::inbox::normalise_mailbox(
+                            row["mailbox"].as_str().unwrap_or_default()
+                        ) == "owner"
+                        {
+                            "human"
+                        } else {
+                            "owner_lane"
+                        });
                     }
                     item
                 })
@@ -1765,6 +1775,44 @@ mod tests {
     }
 
     #[test]
+    fn all_sources_and_human_audience_opt_in_are_independent() {
+        let backend = Arc::new(FakeOwner::new());
+        for source in ["human", "all_sources"] {
+            for internal in [false, true] {
+                let mut rows =
+                    vec![json!({"id":"i7","mailbox":"owner","audience":null,"body":"root"})];
+                if source == "all_sources" {
+                    rows.push(json!({"id":"i8","mailbox":"historical-agent-alias","audience":null,"body":"VP"}));
+                }
+                if internal {
+                    rows.push(
+                        json!({"id":"i9","mailbox":"owner","audience":"agent","body":"internal"}),
+                    );
+                }
+                backend.reply(
+                    "owner_conversation",
+                    json!({"source_filter":source,"include_internal":internal,"messages":rows}),
+                );
+                let uri = format!(
+                    "/api/owner-thread?paged=true&filter={source}&include_internal={internal}"
+                );
+                let response = block_on(
+                    app(authorized(), backend.clone()).oneshot(request("GET", &uri, None)),
+                )
+                .unwrap();
+                let (status, body, _) = response_json(response);
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(body["source_filter"], source);
+                assert_eq!(body["include_internal"], internal);
+                assert_eq!(body["items"][0]["conversation_source"], "human");
+                if source == "all_sources" {
+                    assert_eq!(body["items"][1]["conversation_source"], "owner_lane");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn owner_lane_filter_cannot_forward_agent_rows_without_opt_in_or_root_rows() {
         let backend = Arc::new(FakeOwner::new());
         for (internal, mailbox, audience) in [(false, "lane", Some("agent")), (true, "owner", None)]
@@ -1790,7 +1838,7 @@ mod tests {
         for path in [
             "/api/owner-thread?filter=human",
             "/api/owner-thread?paged=true&filter=other",
-            "/api/owner-thread?paged=true&filter=human&include_internal=true",
+            "/api/owner-thread?paged=true&filter=all&include_internal=true",
             "/api/owner-thread?paged=true&filter=owner_lane&include_internal=yes",
         ] {
             let response =
