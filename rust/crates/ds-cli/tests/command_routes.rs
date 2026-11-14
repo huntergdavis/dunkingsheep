@@ -5319,8 +5319,8 @@ fn cli_route_58_commands_map() {
     assert!(r.contains("head, project, no_project)"));
     // A required parameter is printed with a `*`.
     assert!(r.contains("task_block(id*, reason, waiting_on)"));
-    assert!(r.contains("task_read(id, summary, notes, note_kind)"));
-    assert!(r.contains("task_note(id, event, reason, note_kind)"));
+    assert!(r.contains("task_read(id*, summary, notes, note_kind, before_note)"));
+    assert!(r.contains("task_note(id*, event, reason, note_kind)"));
     assert!(r.contains("Task queues are omitted by default"));
     assert!(
         r.contains("owner_conversation(limit, before, before_id, source_filter, include_internal)")
@@ -5352,8 +5352,8 @@ fn cli_route_58_commands_map() {
                         "inbox_list(mailbox, unread_only, limit, newest_first, before, literal_mailbox)",
                         "inbox_list(mailbox, unread_only, limit)",
                     ).replace("owner_conversation(limit, before, before_id, source_filter, include_internal)", "owner_conversation(limit, before)")
-                    .replace("task_read(id, summary, notes, note_kind)", "task_read(id)")
-                    .replace("task_note(id, event, reason, note_kind)", "task_note(id, event, reason)"))
+                    .replace("task_read(id*, summary, notes, note_kind, before_note)", "task_read(id*)")
+                    .replace("task_note(id*, event, reason, note_kind)", "task_note(id*, event, reason)"))
                 }
             })
             .collect::<Vec<_>>()
@@ -5424,6 +5424,7 @@ fn cli_route_58_commands_map() {
             if name == "task_read" {
                 assert!(properties.remove("summary").is_some());
                 assert!(properties.remove("notes").is_some());
+                assert!(properties.remove("before_note").is_some());
             }
         }
         let task_add = r.iter_mut().find(|row| row["name"] == "task_add").unwrap();
@@ -6342,16 +6343,26 @@ fn cli_task_history_flags_reach_the_daemon_and_render_the_explicit_view() {
         &["task", "read", "t9", "--notes", "2", "--kind", "evidence"],
         "task_read",
         json!({"id":"t9","notes":"2","note_kind":"evidence"}),
-        json!({"id":"t9","title":"Task","status":"open","priority":"low","scope":"global","notes":[{"kind":"evidence","event":"note","at":100,"actor":"%1","reason":"ran checks"}],"notes_more":true}),
+        json!({"id":"t9","title":"Task","status":"open","priority":"low","scope":"global","notes":[{"kind":"evidence","event":"note","at":100,"actor":"%1","reason":"ran checks"}],"notes_more":true,"next_before_note":"17","notes_kind":"evidence"}),
     );
     assert!(page.status.success());
     let text = String::from_utf8(page.stdout).unwrap();
     assert!(text.contains("evidence (note)"));
-    assert!(text.contains("--notes all"));
+    assert!(text.contains("--notes all --before-note 17 --kind evidence"));
     let all = run_daemon_cli(
-        &["task", "read", "t9", "--notes", "all", "--kind", "note"],
+        &[
+            "task",
+            "read",
+            "t9",
+            "--notes",
+            "all",
+            "--kind",
+            "note",
+            "--before-note",
+            "17",
+        ],
         "task_read",
-        json!({"id":"t9","notes":"all","note_kind":"note"}),
+        json!({"id":"t9","notes":"all","note_kind":"note","before_note":"17"}),
         json!({"id":"t9","notes":[]}),
     );
     assert!(all.status.success());

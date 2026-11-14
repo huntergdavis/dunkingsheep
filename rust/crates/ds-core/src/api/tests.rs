@@ -11092,3 +11092,104 @@ fn task_history_summary_and_kinds_are_bounded_explicit_and_private() {
         default
     );
 }
+
+#[test]
+fn task_history_all_has_a_200_note_ceiling_and_scoped_continuation() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_api_fixture();
+    let task = runtime
+        .block_on(tasks.add("w1:p1", "paged history", ""))
+        .unwrap();
+    runtime.block_on(async {
+        for index in 0..407 {
+            tasks
+                .note_with_meta(
+                    &task.id,
+                    "note",
+                    "w1:p1",
+                    Some(&format!("row-{index}")),
+                    &json!({"kind":"evidence"}),
+                )
+                .await
+                .unwrap();
+        }
+    });
+    let read = |before: Option<&str>| {
+        let mut args = json!({"id":task.id,"notes":"all","note_kind":"evidence"});
+        if let Some(before) = before {
+            args["before_note"] = json!(before);
+        }
+        dispatch_task_api(&dispatcher, &flock, &runtime, "task_read", args, "w1:p1").unwrap()
+    };
+    let first = read(None);
+    assert_eq!(first["notes"].as_array().unwrap().len(), 200);
+    assert_eq!(first["notes"][0]["reason"], "row-207");
+    assert_eq!(first["notes"][199]["reason"], "row-406");
+    assert_eq!(first["notes_more"], true);
+    let cursor = first["next_before_note"].as_str().unwrap().to_owned();
+    runtime
+        .block_on(tasks.note_with_meta(
+            &task.id,
+            "note",
+            "w1:p1",
+            Some("new after first page"),
+            &json!({"kind":"evidence"}),
+        ))
+        .unwrap();
+    let second = read(Some(&cursor));
+    assert_eq!(second["notes"].as_array().unwrap().len(), 200);
+    assert_eq!(second["notes"][0]["reason"], "row-7");
+    assert_eq!(second["notes"][199]["reason"], "row-206");
+    let last = read(second["next_before_note"].as_str());
+    assert_eq!(last["notes"].as_array().unwrap().len(), 7);
+    assert_eq!(last["notes"][0]["reason"], "row-0");
+    assert_eq!(last["notes"][6]["reason"], "row-6");
+    assert_eq!(last["notes_more"], false);
+    assert_eq!(last["next_before_note"], Value::Null);
+    let ids: std::collections::HashSet<i64> = [&first, &second, &last]
+        .into_iter()
+        .flat_map(|page| page["notes"].as_array().unwrap())
+        .map(|row| row["note_id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(
+        ids.len(),
+        407,
+        "cursor walk has no duplicates or gaps after append"
+    );
+    let other = runtime
+        .block_on(tasks.add("w1:p1", "another task", ""))
+        .unwrap();
+    runtime
+        .block_on(tasks.note(&other.id, "note", "w1:p1", Some("other task")))
+        .unwrap();
+    let other = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_read",
+        json!({"id":other.id,"notes":"all"}),
+        "w1:p1",
+    )
+    .unwrap();
+    let cross = other["notes"][0]["note_id"].as_i64().unwrap().to_string();
+    for extra in [
+        json!({"notes":"201"}),
+        json!({"notes":"all","before_note":cross}),
+        json!({"notes":"all","before_note":cursor,"note_kind":"correction"}),
+        json!({"notes":"all","before_note":"01"}),
+        json!({"notes":"all","before_note":1}),
+        json!({"before_note":"1"}),
+        json!({"summary":true,"before_note":"1"}),
+    ] {
+        let mut args = extra.as_object().unwrap().clone();
+        args.insert("id".into(), json!(task.id));
+        assert!(dispatch_task_api(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_read",
+            Value::Object(args),
+            "w1:p1"
+        )
+        .is_err());
+    }
+}

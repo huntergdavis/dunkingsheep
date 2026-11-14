@@ -778,7 +778,18 @@ pub fn render_task(task: &Value, stamp: Stamp) -> String {
         }
     }
     if get(task, "notes_more").as_bool() == Some(true) {
-        out += "\nmore notes available; increase --notes N or use --notes all\n";
+        if let Some(cursor) = get(task, "next_before_note").as_str() {
+            let kind = get(task, "notes_kind")
+                .as_str()
+                .map(|kind| format!(" --kind {kind}"))
+                .unwrap_or_default();
+            out += &format!(
+                "\nmore notes: task read {} --notes all --before-note {cursor}{kind}\n",
+                py_str(get(task, "id"))
+            );
+        } else {
+            out += "\nmore notes available\n";
+        }
     }
     out
 }

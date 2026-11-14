@@ -704,14 +704,14 @@
      "summary",
      {
       "type": "boolean",
-      "description": "Bounded summary with latest note of each kind; cannot combine with notes or note_kind."
+      "description": "Bounded summary with latest note of each kind; cannot combine with notes, note_kind or before_note."
      }
     ],
     [
      "notes",
      {
       "type": "string",
-      "description": "Latest N notes (positive integer string), or all; oldest first. Default read unchanged."
+      "description": "Latest 1..200 notes (CEILING), or all for a 200-note page; oldest first. Use next_before_note to continue. Default read unchanged."
      }
     ],
     [
@@ -727,6 +727,13 @@
        "note"
       ],
       "description": "Filter notes by kind; requires notes. note includes legacy events."
+     }
+    ],
+    [
+     "before_note",
+     {
+      "type": "string",
+      "description": "Continue notes before this task/kind-scoped canonical note id; requires notes."
      }
     ]
    ],

@@ -4749,7 +4749,11 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                 if ns.get("summary") == Some(&Value::Bool(true)) {
                     args.insert("summary".into(), Value::Bool(true));
                 }
-                for (flag, key) in [("notes", "notes"), ("kind", "note_kind")] {
+                for (flag, key) in [
+                    ("notes", "notes"),
+                    ("kind", "note_kind"),
+                    ("before_note", "before_note"),
+                ] {
                     if let Some(value) = ns.get(flag).filter(|value| !value.is_null()) {
                         args.insert(key.into(), value.clone());
                     }

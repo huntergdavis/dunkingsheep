@@ -35,7 +35,8 @@ the owner re-registers it.
 > Before handing work to another lane, write `task note <id> --kind handoff
 > --reason "<state, evidence, next action>"`. Use `task read <id> --summary`
 > for a bounded body and the latest note of each kind; `--notes N` or
-> `--notes all --kind evidence` reads more history. Other fixed note kinds are
+> `--notes all --kind evidence` reads history in pages (CEILING 200 notes per
+> call); use the printed `--before-note ID` cursor to continue. Other fixed note kinds are
 > `decision`, `progress` and `correction`. Free `--event` names remain legacy
 > `note` entries. MCP uses `note_kind` to distinguish this from task type `kind`.
 

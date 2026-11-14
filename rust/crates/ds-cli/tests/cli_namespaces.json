@@ -5899,6 +5899,7 @@
    "x"
   ],
   "namespace": {
+   "before_note": null,
    "command": "task",
    "id": "x",
    "json": false,
@@ -5919,6 +5920,7 @@
    "--json"
   ],
   "namespace": {
+   "before_note": null,
    "command": "task",
    "id": "x",
    "json": true,
@@ -5939,6 +5941,7 @@
    "x"
   ],
   "namespace": {
+   "before_note": null,
    "command": "task",
    "id": "x",
    "json": true,
@@ -5959,6 +5962,7 @@
    "--summary"
   ],
   "namespace": {
+   "before_note": null,
    "command": "task",
    "id": "x",
    "json": false,
@@ -5980,6 +5984,7 @@
    "x"
   ],
   "namespace": {
+   "before_note": null,
    "command": "task",
    "id": "x",
    "json": false,
@@ -6001,10 +6006,33 @@
    "evidence"
   ],
   "namespace": {
+   "before_note": null,
    "command": "task",
    "id": "x",
    "json": false,
    "kind": "evidence",
+   "no_start_daemon": false,
+   "notes": null,
+   "self_pane": null,
+   "socket": null,
+   "summary": false,
+   "task_command": "read"
+  }
+ },
+ {
+  "argv": [
+   "task",
+   "read",
+   "x",
+   "--before-note",
+   "x"
+  ],
+  "namespace": {
+   "before_note": "x",
+   "command": "task",
+   "id": "x",
+   "json": false,
+   "kind": null,
    "no_start_daemon": false,
    "notes": null,
    "self_pane": null,
