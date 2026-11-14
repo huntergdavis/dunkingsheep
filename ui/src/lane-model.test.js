@@ -56,8 +56,8 @@ test('a declared model shows who declared it and when, and is not "seen" or "lau
     { known: true, text: 'gpt-luna low', detail: 'declared by %12 10 min ago' },
   );
   assert.deepEqual(
-    laneModel({ value: 'gpt-luna', effort: null, source: 'declared', declared_by: 'owner', age_s: null }),
-    { known: true, text: 'gpt-luna', detail: 'declared by owner, time not recorded' },
+    laneModel({ value: 'gpt-luna', effort: null, source: 'declared', declared_by: 'owner-service', age_s: null }),
+    { known: true, text: 'gpt-luna', detail: 'declared by owner-service, time not recorded' },
   );
 });
 

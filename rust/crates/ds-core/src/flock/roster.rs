@@ -1168,12 +1168,12 @@ mod tests {
             })
         );
         let mut by_owner = declaration();
-        by_owner["by"] = json!("owner");
+        by_owner["by"] = json!("owner-service");
         by_owner["effort"] = Value::Null;
         let cell = model_declared(by_owner, Some((4242, "777")));
         assert_eq!(
             (&cell["declared_by"], &cell["effort"]),
-            (&json!("owner"), &Value::Null)
+            (&json!("owner-service"), &Value::Null)
         );
     }
 

@@ -3005,10 +3005,20 @@ pub fn h_poolrad_progress(context: &HandlerContext<'_>, _args: Args) -> Result<V
     context.env.poolrad_progress()
 }
 
+/// Who a model declaration is recorded as made by: the caller that was actually bound, which
+/// is a pane, or `owner-service` for a request that carries no pane (an owner token). Holding
+/// the owner role is not being the owner, so the role is never what is recorded.
+fn declared_by(caller: Option<&str>) -> &str {
+    caller
+        .filter(|caller| !caller.is_empty())
+        .unwrap_or("owner-service")
+}
+
 /// `lanes action=model` (t4473 slice C): record that a lane's model is now `model`.
 ///
 /// This records a change; it does not make one. Nothing is typed into the pane and nothing is
-/// respawned. A lane may declare its own model; only the owner may declare another lane's. The
+/// respawned. A lane may declare its own model; only a caller with the owner role may declare
+/// another lane's, and the record names that caller (its pane, or `owner-service`). The
 /// declaration is tied to the process running in the pane now, so it stops counting when that
 /// process is replaced. Project membership, role and task leases are not touched.
 fn lane_model(context: &HandlerContext<'_>, args: &Args) -> Result<Value, DunkError> {
@@ -3066,7 +3076,7 @@ fn lane_model(context: &HandlerContext<'_>, args: &Args) -> Result<Value, DunkEr
         "effort": effort,
         "provider": provider,
         "at": context.env.now_s(),
-        "by": if by_lane { pane } else { "owner" },
+        "by": declared_by(own),
         "process_pid": pid,
         "process_start": start,
     });

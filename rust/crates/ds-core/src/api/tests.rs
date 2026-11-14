@@ -4084,6 +4084,12 @@ fn lanes_model_records_a_declaration_for_the_callers_own_pane_only() {
     );
     assert!(flock.launch("w1:p9").is_none());
 
+    // Who a declaration is recorded as made by: the bound caller, never the role it holds.
+    // A caller with the owner role is the VP seat's pane or an owner token, not the owner.
+    assert_eq!(super::declared_by(Some("w1:p7")), "w1:p7");
+    assert_eq!(super::declared_by(None), "owner-service");
+    assert_eq!(super::declared_by(Some("")), "owner-service");
+
     // A pane with no readable process cannot carry a declaration.
     let blind = ParityEnv::new(None);
     let error = dispatch_with_env(
