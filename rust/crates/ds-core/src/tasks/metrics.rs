@@ -433,6 +433,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn blocked_tasks_are_counted_by_what_they_wait_on() {
+        let store = store("metrics-waiting-on").await;
+        for reason in [
+            "needs-owner: pick one",
+            "waiting-release: next daemon",
+            "waiting-release: the one after",
+            "waiting on CI",
+        ] {
+            let task = store.add("global", reason, "").await.unwrap();
+            store.block(&task.id, reason).await.unwrap();
+        }
+        store.add("global", "open", "").await.unwrap();
+        let metrics = store.metrics(MetricsOptions::default()).await.unwrap();
+        assert_eq!(
+            metrics["current"]["blocked_waiting_on"],
+            json!({"owner": 1, "release": 2, "other": 1})
+        );
+    }
+
+    #[tokio::test]
     async fn test_leader_held_is_the_needs_owner_queue() {
         // FLAT_FLEET.md 5: no leader. `leader_held` counts the questions lanes asked the owner
         // (blocked with a 'needs-owner:' reason), nothing else.
@@ -562,7 +582,14 @@ mod tests {
                 bucket: args["bucket"].as_str().unwrap_or("hour").to_string(),
                 scope_label: args["scope_label"].as_str().unwrap_or("all").to_string(),
             };
-            let actual = store.metrics(options).await.unwrap();
+            let mut actual = store.metrics(options).await.unwrap();
+            // t4704: `current.blocked_waiting_on` is Rust-only; the Python golden predates it.
+            // It must be present, and everything else must equal the Python byte for byte.
+            assert!(actual["current"]
+                .as_object_mut()
+                .unwrap()
+                .remove("blocked_waiting_on")
+                .is_some_and(|kinds| kinds.is_object()));
             assert_eq!(
                 case["expected"],
                 actual,
