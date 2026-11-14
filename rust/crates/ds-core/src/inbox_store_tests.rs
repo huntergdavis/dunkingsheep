@@ -1435,3 +1435,81 @@ fn fetch_copies_the_blob_out_under_its_filename() {
     assert_eq!(id, fetched.message_id);
     assert_eq!(10, fetched.size);
 }
+
+#[test]
+fn thread_sidecar_is_additive_and_preserves_legacy_schema_and_sql() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old-inbox.db");
+    std::fs::copy(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/state/inbox.db"),
+        &path,
+    )
+    .unwrap();
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let schema = |db: &rusqlite::Connection| {
+        let mut q = db
+            .prepare("SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
+            .unwrap();
+        q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let before = schema(&db);
+    let count: i64 = db
+        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .unwrap();
+    let store = Store::open(&path, dir.path().join("blobs")).unwrap();
+    let after = schema(&db);
+    for row in &before {
+        assert!(after.contains(row), "legacy DDL changed: {}", row.0);
+    }
+    for name in [
+        "message_threads",
+        "message_threads_root",
+        "message_threads_parent",
+        "message_threads_delete",
+    ] {
+        assert!(
+            after.iter().any(|(key, _)| key == name),
+            "missing sidecar object {name}"
+        );
+    }
+    assert_eq!(
+        count,
+        db.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get::<_, i64>(0))
+            .unwrap()
+    );
+    let id = store
+        .send(&Outgoing {
+            mailbox: "legacy-worker",
+            body: Some("old SQL stays readable"),
+            ..Default::default()
+        })
+        .unwrap();
+    db.execute(
+        "INSERT INTO message_threads VALUES(?,1,NULL,?,'vp','agent')",
+        rusqlite::params![id, id],
+    )
+    .unwrap();
+    assert_eq!(
+        "old SQL stays readable",
+        db.query_row("SELECT body FROM messages WHERE id=?", [&id], |r| r
+            .get::<_, String>(0))
+            .unwrap()
+    );
+    // The delete trigger works even for an old writer that knows nothing of the sidecar.
+    db.execute("DELETE FROM messages WHERE id=?", [&id])
+        .unwrap();
+    assert_eq!(
+        0,
+        db.query_row(
+            "SELECT COUNT(*) FROM message_threads WHERE message_id=?",
+            [&id],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap()
+    );
+    drop(store);
+    Store::open(&path, dir.path().join("blobs")).unwrap();
+}

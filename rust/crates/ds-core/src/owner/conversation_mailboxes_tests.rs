@@ -514,3 +514,102 @@ fn inbox_source_filters_use_metadata_scope_and_opt_in_without_consuming() {
         .is_err());
     assert_eq!(before, snapshot());
 }
+
+#[test]
+fn versioned_views_use_recorded_kind_and_keep_every_legacy_shape_historical() {
+    use crate::owner::ConversationFilter::{Historical, HumanThreads, VpThreads};
+    let (_dir, flock, store) = fixture("thread-views");
+    let db = rusqlite::Connection::open(store.path()).unwrap();
+    let send =
+        |mailbox: &str, pane: Option<&str>, sender: Option<&str>, transport: Option<&str>| {
+            store
+                .send(&Outgoing {
+                    mailbox,
+                    pane_id: pane,
+                    sender,
+                    transport,
+                    body: Some("Your inbox VP human agent-only: words are not classification"),
+                    ..Default::default()
+                })
+                .unwrap()
+        };
+    // Real recorded shapes: untagged pane mail to VP, human web ingress, and
+    // null-transport pane mail in owner. All are prior versions without metadata.
+    let legacy_vp = send(OWNER_LANE_MAILBOX, Some(OWNER), Some("%303"), None);
+    let legacy_human = send("owner", None, None, Some("web"));
+    let legacy_root_agent = send("owner", None, Some("%303"), None);
+    let legacy_tagged = store
+        .send_snapshot_wire_agent_only(
+            &Outgoing {
+                mailbox: OWNER_LANE_MAILBOX,
+                pane_id: Some(OWNER),
+                body: Some("tagged historical"),
+                ..Default::default()
+            },
+            None,
+            None,
+            true,
+        )
+        .unwrap()
+        .summary
+        .message_id;
+    let human = send("owner", None, None, Some("telegram"));
+    let reply = send("owner", None, Some(OWNER), Some("telegram"));
+    let vp = send(OWNER_LANE_MAILBOX, Some(OWNER), Some("%303"), None);
+    let private = send("worker-private", Some(WORKER), Some("%303"), None);
+    for (id, parent, root, kind, sender) in [
+        (&human, None, &human, "human", "human"),
+        (&reply, Some(human.as_str()), &human, "human", "agent"),
+        (&vp, None, &vp, "vp", "agent"),
+        (&private, None, &private, "human", "human"),
+    ] {
+        db.execute("INSERT INTO message_threads(message_id,thread_version,parent_id,root_id,conversation_kind,sender_kind) VALUES(?,1,?,?,?,?)",
+            rusqlite::params![id,parent,root,kind,sender]).unwrap();
+    }
+    let read = |filter| {
+        OwnerConversations::new(&flock, &NoPanes)
+            .conversation_filtered_cursor(Some(100), None, Some(OWNER), filter)
+            .unwrap()
+            .messages
+    };
+    let ids = |rows: &[Value]| {
+        rows.iter()
+            .map(|r| r["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(vec![human.clone(), reply.clone()], ids(&read(HumanThreads)));
+    assert_eq!(vec![vp.clone()], ids(&read(VpThreads)));
+    assert_eq!(
+        vec![legacy_vp, legacy_human, legacy_root_agent, legacy_tagged],
+        ids(&read(Historical))
+    );
+    for row in read(Historical) {
+        assert!(row["thread_version"].is_null());
+    }
+    assert!(
+        read(VpThreads)[0]["audience"].is_null(),
+        "missing audience does not imply human"
+    );
+    let page = OwnerConversations::new(&flock, &NoPanes)
+        .conversation_filtered_cursor(Some(1), None, Some(OWNER), HumanThreads)
+        .unwrap();
+    assert_eq!(vec![reply.clone()], ids(&page.messages));
+    let older = OwnerConversations::new(&flock, &NoPanes)
+        .conversation_filtered_cursor(Some(1), Some(&reply), Some(OWNER), HumanThreads)
+        .unwrap();
+    assert_eq!(vec![human], ids(&older.messages));
+    assert!(
+        OwnerConversations::new(&flock, &NoPanes)
+            .conversation_filtered_cursor(Some(1), Some(&vp), Some(OWNER), HumanThreads)
+            .is_err(),
+        "cursor cannot cross views"
+    );
+    assert!(OwnerConversations::new(&flock, &NoPanes)
+        .conversation_filtered_cursor(Some(100), None, Some(WORKER), Historical)
+        .is_err());
+    assert_eq!(
+        "queued",
+        store.get_message(&reply).unwrap().summary.state,
+        "browse never consumes"
+    );
+}

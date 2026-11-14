@@ -270,7 +270,13 @@ impl Store {
         );
         let annotate_ambiguous =
             exclude_routine || matches!(visibility, ConversationVisibility::Filter(_));
-        let columns = if matches!(visibility, ConversationVisibility::Filter(_)) {
+        let thread_view = match visibility {
+            ConversationVisibility::Filter(filter) => filter.thread_view(),
+            _ => None,
+        };
+        let columns = if thread_view.is_some() {
+            super::threads::COLUMNS
+        } else if matches!(visibility, ConversationVisibility::Filter(_)) {
             "*, (SELECT audience FROM message_audiences WHERE message_id = messages.id) AS audience"
         } else {
             "*"
@@ -278,6 +284,14 @@ impl Store {
         let mut sql =
             format!("SELECT {columns} FROM messages WHERE {condition} AND state != 'cancelled'");
         let mut values: Vec<SqlValue> = box_params.into_iter().map(SqlValue::Text).collect();
+        if let Some(view) = thread_view {
+            if view == "historical" {
+                sql.push_str(" AND NOT EXISTS (SELECT 1 FROM message_threads t WHERE t.message_id = messages.id)");
+            } else {
+                sql.push_str(" AND EXISTS (SELECT 1 FROM message_threads t WHERE t.message_id = messages.id AND t.thread_version = 1 AND t.conversation_kind = ?)");
+                values.push(SqlValue::Text(view.to_owned()));
+            }
+        }
         if exclude_routine {
             // Same rule as `is_routine_mail`: the subject, after leading whitespace, starts with a routine
             // prefix, and the row is not an owner reply. The parameters bind in clause order.
@@ -310,10 +324,13 @@ impl Store {
         match visibility {
             ConversationVisibility::Filter(filter) => {
                 // Only recorded audience metadata classifies mail; filter before LIMIT/cursor.
-                if filter.include_internal() {
-                    sql.push_str(" AND NOT EXISTS (SELECT 1 FROM message_audiences WHERE message_id = messages.id AND (audience IS NULL OR audience != 'agent'))");
-                } else {
-                    sql.push_str(" AND NOT EXISTS (SELECT 1 FROM message_audiences WHERE message_id = messages.id)");
+                // Versioned routing is authoritative; audience is not a view predicate.
+                if filter.thread_view().is_none() {
+                    if filter.include_internal() {
+                        sql.push_str(" AND NOT EXISTS (SELECT 1 FROM message_audiences WHERE message_id = messages.id AND (audience IS NULL OR audience != 'agent'))");
+                    } else {
+                        sql.push_str(" AND NOT EXISTS (SELECT 1 FROM message_audiences WHERE message_id = messages.id)");
+                    }
                 }
             }
             _ => {

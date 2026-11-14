@@ -26,7 +26,8 @@ export default function MailboxBrowser({ api }) {
   const [trail, setTrail] = useState([]);
   const [summary, setSummary] = useState({ state: 'loading' });
   const [selectedId, setSelectedId] = useState(null);
-  const [includeAgent, setIncludeAgent] = useState(false);
+  // Historical browsing includes both recorded audiences; server owner access still applies.
+  const includeAgent = true;
   const [refresh, setRefresh] = useState(0);
   const [body, setBody] = useState({ state: 'idle' });
   const pageKey = JSON.stringify([mailbox, before, includeAgent, refresh]);
@@ -80,20 +81,19 @@ export default function MailboxBrowser({ api }) {
     if (!groups.has(group)) groups.set(group, []);
     groups.get(group).push(row);
   }
-  const agentRows = rows.filter(row => row.audience === 'agent');
   function chooseMailbox(key) { setMailbox(key); setBefore(null); setTrail([]); setSelectedId(null); }
   function reload() { setIndexCursor(null); setBefore(null); setTrail([]); setRefresh(value => value + 1); }
   function messageRow(row) {
-    return <li key={row.message_id}><button className="mailbox-message-row" disabled={row.audience === 'agent' && !includeAgent}
+    return <li key={row.message_id}><button className="mailbox-message-row"
       aria-current={selected?.message_id === row.message_id ? 'true' : undefined} onClick={() => setSelectedId(row.message_id)}>
       <strong>{row.subject || '(No subject)'}</strong><span>{row.sender || 'Unknown sender'}</span>
-      <small>{stamp(row.created_at)} · {row.state}{row.audience === 'agent' ? ' · agent-only' : ''}</small>
+      <small>{stamp(row.created_at)} · {row.state}</small>
     </button></li>;
   }
   return <div className="mailbox-browser">
     <header className="mailbox-browser-heading"><div><h1>Mailboxes</h1><p>Browse history without marking messages read.</p></div><a href="/dash/cos?panel=conversation">VP conversation</a><button onClick={reload}>Refresh</button></header>
     <InboxCompose api={api} onSent={reload} />
-    <label className="mailbox-agent-opt-in"><input type="checkbox" checked={includeAgent} onChange={event => { setIncludeAgent(event.target.checked); setBefore(null); setTrail([]); setSelectedId(null); }} /> Include agent-only mail in this browser</label>
+
     <div className="mailbox-browser-columns">
       <nav className="mailbox-directory" aria-label="Mailboxes">
         <button className="mailbox-folder" aria-current={mailbox === 'owner' ? 'true' : undefined} onClick={() => chooseMailbox('owner')}>Your inbox</button>
@@ -112,12 +112,12 @@ export default function MailboxBrowser({ api }) {
         {summary.key === pageKey && summary.state === 'unavailable' && <p role="status">{summary.error}</p>}
         {summary.key === pageKey && summary.state === 'error' && <p role="alert">Messages unavailable: {summary.error}</p>}
         {summary.key === pageKey && summary.state === 'ready' && !rows.length && <p>No messages in this mailbox.</p>}
-        <ul>{rows.filter(row => row.audience !== 'agent').map(messageRow)}</ul>
-        {agentRows.length > 0 && <details open={includeAgent}><summary>Agent-only messages ({agentRows.length})</summary>{!includeAgent && <p>Enable agent-only mail above to read these messages.</p>}<ul>{agentRows.map(messageRow)}</ul></details>}
+        <ul>{rows.map(messageRow)}</ul>
+
       </section>
       <article className="mailbox-reader" aria-label="Selected mailbox message">
         {!selected && <p>Select a message to read it.</p>}
-        {selected && <><header><h2>{selected.subject || '(No subject)'}</h2><p>{selected.sender || 'Unknown sender'} · {stamp(selected.created_at)}</p><p>{selected.message_id} · {selected.state} · {selected.mailbox}{selected.audience === 'agent' ? ' · agent-only' : ''}</p></header>
+        {selected && <><header><h2>{selected.subject || '(No subject)'}</h2><p>{selected.sender || 'Unknown sender'} · {stamp(selected.created_at)}</p><p>{selected.message_id} · {selected.state} · {selected.mailbox}</p></header>
           {visibleBody.state === 'loading' && <p role="status">Loading message…</p>}
           {visibleBody.state === 'unavailable' && <p role="status">{visibleBody.error}</p>}
           {visibleBody.state === 'error' && <p role="alert">{visibleBody.error}</p>}

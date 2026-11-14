@@ -46,6 +46,9 @@ pub enum ConversationFilter {
     AllSources { include_internal: bool },
     Human { include_internal: bool },
     OwnerLane { include_internal: bool },
+    HumanThreads,
+    VpThreads,
+    Historical,
 }
 impl ConversationFilter {
     pub fn parse(name: &str, include_internal: bool) -> Result<Self, DunkError> {
@@ -54,6 +57,9 @@ impl ConversationFilter {
             "all_sources" => Ok(Self::AllSources { include_internal }),
             "human" => Ok(Self::Human { include_internal }),
             "owner_lane" => Ok(Self::OwnerLane { include_internal }),
+            "human_threads" if !include_internal => Ok(Self::HumanThreads),
+            "vp_threads" if !include_internal => Ok(Self::VpThreads),
+            "historical" if !include_internal => Ok(Self::Historical),
             _ => Err(DunkError::Refused(
                 "invalid conversation source filter".into(),
             )),
@@ -65,11 +71,14 @@ impl ConversationFilter {
             Self::AllSources { .. } => "all_sources",
             Self::Human { .. } => "human",
             Self::OwnerLane { .. } => "owner_lane",
+            Self::HumanThreads => "human_threads",
+            Self::VpThreads => "vp_threads",
+            Self::Historical => "historical",
         }
     }
     pub fn include_internal(self) -> bool {
         match self {
-            Self::All => false,
+            Self::All | Self::HumanThreads | Self::VpThreads | Self::Historical => false,
             Self::AllSources { include_internal }
             | Self::Human { include_internal }
             | Self::OwnerLane { include_internal } => include_internal,
@@ -79,6 +88,16 @@ impl ConversationFilter {
         match self {
             Self::Human { .. } => Some(true),
             Self::OwnerLane { .. } => Some(false),
+            _ => None,
+        }
+    }
+
+    /// New UI views are classified by recorded lineage, never by an audience opt-out.
+    pub fn thread_view(self) -> Option<&'static str> {
+        match self {
+            Self::HumanThreads => Some("human"),
+            Self::VpThreads => Some("vp"),
+            Self::Historical => Some("historical"),
             _ => None,
         }
     }
@@ -327,9 +346,11 @@ impl<'a> OwnerConversations<'a> {
                 .into_iter()
                 .filter(|key| normalise_mailbox(key) != OWNER_MAILBOX)
                 .collect(),
-            ConversationFilter::All | ConversationFilter::AllSources { .. } => {
-                self.conversation_mailboxes(&store)?
-            }
+            ConversationFilter::All
+            | ConversationFilter::AllSources { .. }
+            | ConversationFilter::HumanThreads
+            | ConversationFilter::VpThreads
+            | ConversationFilter::Historical => self.conversation_mailboxes(&store)?,
         };
         // Routine lane mail (review verdicts and notes, marked by subject) is kept in storage and listed nowhere
         // here (t3592). Owner decisions, owner blockers, owner replies and unmarked legacy mail stay listed.

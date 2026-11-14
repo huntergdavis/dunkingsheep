@@ -107,34 +107,31 @@ try:
             page.locator('.mailbox-folder').filter(has_text=LANE).click()
             reader.get_by_text('LANE-PLAIN-BODY', exact=True).wait_for()
             assert page.get_by_role('heading', name='Project: Arbitrary project').count() == 1
-            assert page.locator('.mailbox-message-row').filter(has_text='Agent secret').count() == 0
-            assert all(query.get('message_id') != ['i202'] for _, path, query in requests if path == '/api/mailbox-message')
-            optin = page.get_by_role('checkbox', name='Include agent-only mail in this browser')
-            before_optin = len(requests)
-            optin.check()
+            assert page.get_by_role('checkbox', name='Include agent-only mail in this browser').count() == 0
+            assert page.locator('.mailbox-message-row').filter(has_text='Agent secret').count() == 1
             page.locator('.mailbox-message-row').filter(has_text='Agent secret').click()
             reader.get_by_text('AGENT-ONLY-SECRET', exact=True).wait_for()
-            assert any(path == '/api/mailbox-messages' and query.get('include_agent') == ['true'] for _, path, query in requests[before_optin:])
+            assert any(path == '/api/mailbox-messages' and query.get('include_agent') == ['true'] for _, path, query in requests)
             assert reader.locator('table').count() == 1
             assert reader.locator('.ascii-diagram').count() == 1
             assert reader.locator('script, img, iframe').count() == 0
             assert page.evaluate('window.__mailAttack || 0') == 0
-            optin.uncheck()
-            assert reader.get_by_text('AGENT-ONLY-SECRET', exact=True).count() == 0
+            page.locator('.mailbox-message-row').filter(has_text='Lane plain').click()
             reader.get_by_text('LANE-PLAIN-BODY', exact=True).wait_for()
-            # A late response from an explicitly opted-in read cannot survive opting out.
+            # A late body from a previous mailbox cannot cross the mailbox boundary.
             hold_agent = True
-            optin.check()
             page.locator('.mailbox-message-row').filter(has_text='Agent secret').click()
             page.wait_for_function("document.querySelector('.mailbox-reader').textContent.includes('Loading message')")
-            optin.uncheck()
+            page.get_by_role('button', name='Your inbox', exact=True).click()
             assert pending
             for held in pending:
                 fulfill(held, {'message': {**AGENT, 'body': RAW, 'attachments': []}})
             pending.clear()
             hold_agent = False
-            reader.get_by_text('LANE-PLAIN-BODY', exact=True).wait_for()
+            reader.get_by_text('OWNER-BODY', exact=True).wait_for()
             assert reader.get_by_text('AGENT-ONLY-SECRET', exact=True).count() == 0
+            page.locator('.mailbox-folder').filter(has_text=LANE).click()
+            reader.get_by_text('LANE-PLAIN-BODY', exact=True).wait_for()
             page.get_by_role('button', name='Load more mailboxes', exact=True).click()
             page.get_by_role('heading', name='Unmapped / history').wait_for()
             page.locator('.mailbox-folder').filter(has_text='retired box').click()
@@ -162,10 +159,10 @@ try:
             page.get_by_role('link', name='Back to Inbox', exact=True).wait_for()
             assert urlsplit(page.url).query == 'panel=conversation'
             page.get_by_role('link', name='Back to Inbox', exact=True).click()
-            page.get_by_role('heading', name='Inbox', exact=True).wait_for()
+            page.get_by_role('heading', name='Your inbox', exact=True).wait_for()
             page.get_by_role('link', name='Browse all mailboxes', exact=True).click()
             page.get_by_role('heading', name='Mailboxes', exact=True).wait_for()
-            assert not page.get_by_role('checkbox').is_checked()
+            assert page.get_by_role('checkbox').count() == 0
             page.close()
             assert all(method == 'GET' for method, path, _ in requests if path != '/api/viewport')
             assert {path for _, path, _ in requests} <= {'/api/channels','/api/owner-thread','/api/mailboxes','/api/mailbox-messages','/api/mailbox-message','/api/version','/api/viewport'}
@@ -173,4 +170,4 @@ try:
         browser.close()
 finally:
     server.shutdown()
-print('mailbox browser passed at360/768/1280: directory/pages/body, agent opt-in/late response, sanitizer, empty/error/upgrade fallback, GET-only')
+print('mailbox browser passed at360/768/1280: directory/pages/body, all historical audiences/late mailbox response, sanitizer, empty/error/upgrade fallback, GET-only')
