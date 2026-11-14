@@ -870,9 +870,9 @@
   "inbox_send": {
    "params": [
     [
-     "attach",
+     "to",
      {
-      "description": "Optional local file path(s) to attach, comma separated.",
+      "description": "Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running.",
       "type": "string"
      }
     ],
@@ -884,16 +884,16 @@
      }
     ],
     [
-     "notify",
-     {
-      "description": "Nudge the recipient's pane that mail arrived (default true).",
-      "type": "boolean"
-     }
-    ],
-    [
      "subject",
      {
       "description": "Optional one-line summary.",
+      "type": "string"
+     }
+    ],
+    [
+     "attach",
+     {
+      "description": "Optional local file path(s) to attach, comma separated.",
       "type": "string"
      }
     ],
@@ -905,10 +905,10 @@
      }
     ],
     [
-     "to",
+     "notify",
      {
-      "description": "Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running.",
-      "type": "string"
+      "description": "Nudge the recipient's pane that mail arrived (default true).",
+      "type": "boolean"
      }
     ],
     [
@@ -923,8 +923,9 @@
   "inbox_send_agent_only": {
    "params": [
     [
-     "attach",
+     "to",
      {
+      "description": "Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running.",
       "type": "string"
      }
     ],
@@ -935,22 +936,21 @@
      }
     ],
     [
-     "notify",
-     {
-      "type": "boolean"
-     }
-    ],
-    [
      "subject",
      {
       "type": "string"
      }
     ],
     [
-     "to",
+     "attach",
      {
-      "description": "Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running.",
       "type": "string"
+     }
+    ],
+    [
+     "notify",
+     {
+      "type": "boolean"
      }
     ],
     [
