@@ -5288,6 +5288,7 @@ fn cli_route_guide_and_empty_argv() {
         .lines()
         .filter(|line| {
             !line.trim_start().starts_with("usage-provider ")
+                && !line.trim_start().starts_with("worktrees ")
                 && !line.trim_start().starts_with("pr ")
         })
         .collect::<Vec<_>>()
