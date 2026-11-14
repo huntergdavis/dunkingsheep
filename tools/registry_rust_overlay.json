@@ -280,14 +280,14 @@
        "vp_threads",
        "historical"
       ],
-      "description": "Three-view Inbox: human_threads (Your inbox), vp_threads (VP), historical (unversioned prior messages), classified by recorded lineage. Legacy all/human/owner_lane/all_sources selectors remain compatible."
+      "description": "Thread views: human_threads, vp_threads, historical. Legacy selectors remain supported."
      }
     ],
     [
      "include_internal",
      {
       "type": "boolean",
-      "description": "Legacy selectors only: include explicitly tagged internal mail (default false). New three-view selectors reject true and have no audience toggle."
+      "description": "Legacy audience opt-in; new thread views require false (default)."
      }
     ]
    ]
