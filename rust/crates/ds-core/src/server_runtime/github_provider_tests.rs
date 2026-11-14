@@ -621,3 +621,56 @@ fn task_complete_verdict_error_is_reported_through_the_production_adapter() {
         "no write reaches GitHub when the reviewer App is missing"
     );
 }
+
+#[test]
+fn pr_wait_production_registration_listing_and_cancellation_are_caller_scoped() {
+    let f = Fixture::with(&["reviewer"], lanes());
+    f.services
+        .flock()
+        .remember_lane("%worker", "wait-worker", true);
+    f.services
+        .flock()
+        .remember_lane("%reviewer", "wait-reviewer", true);
+    let wait = f
+        .dispatch("pr_wait", json!({"target":"o/r#7"}), "%worker")
+        .unwrap();
+    assert!(f
+        .dispatch(
+            "pr_wait",
+            json!({"target":"unregistered/repo#1"}),
+            "%worker"
+        )
+        .is_err());
+    assert!(f
+        .dispatch(
+            "pr_wait",
+            json!({"target":"o/r#7","head":"short"}),
+            "%worker"
+        )
+        .is_err());
+    let listed = f
+        .dispatch("pr_wait", json!({"list":true}), "%worker")
+        .unwrap();
+    assert_eq!(listed[0]["id"], wait["id"]);
+    assert!(listed[0].get("last_poll_at").is_some());
+    assert!(f
+        .dispatch("pr_wait", json!({"list":true}), "%reviewer")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        f.dispatch("pr_wait", json!({"cancel":wait["id"]}), "%reviewer")
+            .unwrap()["cancelled"],
+        0
+    );
+    assert_eq!(
+        f.dispatch("pr_wait", json!({"cancel":wait["id"]}), "%worker")
+            .unwrap()["cancelled"],
+        1
+    );
+    assert!(
+        f.endpoint.requests().is_empty(),
+        "registration/list/cancel makes no API calls"
+    );
+}

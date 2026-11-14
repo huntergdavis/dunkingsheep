@@ -274,6 +274,14 @@ pub struct GitHubResponse {
 }
 
 pub trait GitHubTransport: Send + Sync {
+    /// Optional response ETag for conditional, read-only consumers. Existing transports
+    /// need not implement caching; callers must handle a missing ETag.
+    fn send_with_etag<'a>(
+        &'a self,
+        request: GitHubRequest,
+    ) -> PinBoxFuture<'a, Result<(GitHubResponse, Option<String>), String>> {
+        Box::pin(async move { self.send(request).await.map(|response| (response, None)) })
+    }
     fn send<'a>(
         &'a self,
         request: GitHubRequest,
@@ -303,6 +311,16 @@ impl GitHubTransport for ReqwestTransport {
         request: GitHubRequest,
     ) -> PinBoxFuture<'a, Result<GitHubResponse, String>> {
         Box::pin(async move {
+            self.send_with_etag(request)
+                .await
+                .map(|(response, _)| response)
+        })
+    }
+    fn send_with_etag<'a>(
+        &'a self,
+        request: GitHubRequest,
+    ) -> PinBoxFuture<'a, Result<(GitHubResponse, Option<String>), String>> {
+        Box::pin(async move {
             let mut builder = self
                 .client
                 .request(
@@ -317,14 +335,22 @@ impl GitHubTransport for ReqwestTransport {
                 builder = builder.body(body);
             }
             let response = builder.send().await.map_err(|e| e.to_string())?;
+            let etag = response
+                .headers()
+                .get("etag")
+                .and_then(|h| h.to_str().ok())
+                .map(str::to_owned);
             let status = response.status();
             let reason = status.canonical_reason().unwrap_or("unknown").to_owned();
             let body = response.bytes().await.map_err(|e| e.to_string())?.to_vec();
-            Ok(GitHubResponse {
-                status: status.as_u16(),
-                reason,
-                body,
-            })
+            Ok((
+                GitHubResponse {
+                    status: status.as_u16(),
+                    reason,
+                    body,
+                },
+                etag,
+            ))
         })
     }
 }

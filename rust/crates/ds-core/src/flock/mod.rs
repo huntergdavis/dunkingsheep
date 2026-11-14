@@ -120,6 +120,8 @@ pub struct Flock {
     pub launches_file: PathBuf,
     pub lane_registry_path: PathBuf,
     pub persist_enabled: bool,
+    /// Serializes review sweeps and their one-shot wait deliveries for this daemon.
+    pub(crate) review_sweep: Mutex<()>,
     /// pane_id -> {agent, session, session_kind, cwd, argv, command, source, recorded_at}
     launches: Mutex<LaunchMap>,
     /// The in-memory dunk list and next_id slot. Whole-state persistence is owned by the
@@ -204,6 +206,7 @@ impl Flock {
         persist: bool,
     ) -> Flock {
         let flock = Flock {
+            review_sweep: Mutex::new(()),
             launches_file: launches_file.into(),
             lane_registry_path: lane_registry_path.into(),
             persist_enabled: persist,

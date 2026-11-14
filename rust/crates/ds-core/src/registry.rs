@@ -39,7 +39,7 @@ pub struct Group {
     pub actions: &'static [(&'static str, &'static str)],
 }
 
-/// Every command the daemon serves (131 at generation time).
+/// Every command the daemon serves (132 at generation time).
 pub static COMMANDS: &[Command] = &[
     Command {
         name: "add_dunk",
@@ -770,6 +770,16 @@ pub static COMMANDS: &[Command] = &[
         mcp: true,
         owner_only: true,
         roles: &["owner", "system", "web"],
+    },
+    Command {
+        name: "pr_wait",
+        description: "One-shot durable PR wait. Supply target=owner/repo#PR and optional full head SHA, list=true, or cancel=ID. Sends one inbox notice; read-only on GitHub. Driven by review-sync.",
+        params: &[Param { name: "target", schema: "{\"type\":\"string\"}" }, Param { name: "head", schema: "{\"type\":\"string\"}" }, Param { name: "list", schema: "{\"type\":\"boolean\"}" }, Param { name: "cancel", schema: "{\"type\":\"integer\"}" }],
+        dispatch_required: &[],
+        required: &[],
+        mcp: true,
+        owner_only: false,
+        roles: &["owner", "planner", "worker", "reviewer"],
     },
     Command {
         name: "project_spawn",

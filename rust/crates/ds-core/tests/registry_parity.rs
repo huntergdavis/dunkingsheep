@@ -19,6 +19,7 @@ fn every_python_command_is_present_and_no_extra_ones_are() {
     // task_batch_claim (t3583) is the guarded batch claim, API only: the owner keeps it out of
     // the public CLI help, which must match Python.
     let rust_only = [
+        "pr_wait",
         "task_owner_answer",
         "task_owner_question",
         "owner_page",

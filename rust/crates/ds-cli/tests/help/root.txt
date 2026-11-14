@@ -122,6 +122,7 @@ positional arguments:
     commands            list the socket/MCP command registry
     mcp-map             OLD flat MCP tool -> NEW grouped tool/action mapping
     usage-provider      read native provider usage as JSON
+    pr                  one-shot PR event subscriptions
 
 options:
   -h, --help            show this help message and exit

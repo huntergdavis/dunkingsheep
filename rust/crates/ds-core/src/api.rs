@@ -930,6 +930,7 @@ impl Dispatcher {
 
     /// Register only the T39 review synchronization and list handlers.
     pub fn register_review_sync_list(&mut self) {
+        self.register("pr_wait", h_pr_wait);
         self.register("review_sync", h_review_sync);
         self.register("review_list", h_review_list);
     }
@@ -2648,19 +2649,115 @@ pub(crate) fn poolrad_dry_run(value: Option<&Value>) -> bool {
 
 /// `dunk_api.h_review` sync action through the canonical ReviewSync engine.
 pub fn h_review_sync(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let _guard = context
+        .flock
+        .review_sweep
+        .try_lock()
+        .map_err(|_| DunkError::Refused("review sweep already running".into()))?;
     let tokens = context.env.github_tokens()?;
     let transport = context.env.review_transport()?;
     let policy = crate::review::ConfiguredReviewPolicy {
         config_dir: tokens.config_dir().to_path_buf(),
     };
+    let sweep = crate::pr_wait::SweepTransport::new(transport);
+    let dry_run = python_bool_arg(&args, "dry_run", false);
     let result = context.block_on(context.flock.review_sync(
         tokens,
         policy,
         tokens.api_root(),
-        crate::flock::commands_review::BorrowedGitHubTransport(transport),
-        python_bool_arg(&args, "dry_run", false),
+        crate::flock::commands_review::BorrowedGitHubTransport(&sweep),
+        dry_run,
     ))?;
+    if !dry_run {
+        if let Some(store) = context.flock.stores().inbox {
+            let token =
+                context.block_on(crate::review::ReviewTokenSource::reviewer_token(tokens))?;
+            context
+                .block_on(sweep.poll(&store, tokens.api_root(), token, context.env.now_s()))?
+                .map_err(DunkError::Refused)?;
+            for (id, mailbox, body) in store.pr_wait_pending(context.env.now_s())? {
+                let sent = context.env.with_inbox_env(&mut |env| {
+                    context.flock.inbox_send(
+                        env,
+                        &crate::flock::commands_inbox::SendArgs {
+                            to: &mailbox,
+                            body: &body,
+                            subject: Some("PR wait finished"),
+                            attach: &[],
+                            notify: true,
+                            self_pane_id: context.self_pane_id(),
+                            system_sender: None,
+                            agent_only: false,
+                            role_sender: None,
+                            wake_quiet: false,
+                        },
+                    )?;
+                    Ok(Value::Null)
+                });
+                if sent.is_ok() {
+                    store.pr_wait_delivered(id)?;
+                }
+            }
+        }
+    }
     result.map_err(DunkError::Refused)
+}
+
+/// Register, inspect or cancel only the authenticated caller's one-shot PR interests.
+pub fn h_pr_wait(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let pane = context
+        .self_pane_id()
+        .ok_or_else(|| DunkError::Refused("pr wait needs a caller pane".into()))?;
+    let mailbox = context
+        .env
+        .with_inbox_env(&mut |env| context.flock.own_mailbox(env, pane).map(Value::String))?;
+    let mailbox = mailbox
+        .as_str()
+        .ok_or_else(|| DunkError::Refused("invalid mailbox".into()))?;
+    let store = context
+        .flock
+        .stores()
+        .inbox
+        .ok_or_else(|| DunkError::Refused("inbox unavailable".into()))?;
+    if args.get("list").and_then(Value::as_bool) == Some(true) {
+        return store.pr_wait_list(mailbox, None);
+    }
+    if let Some(id) = args.get("cancel").and_then(Value::as_i64) {
+        return store.pr_wait_list(mailbox, Some(id));
+    }
+    let target = args
+        .get("target")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let (repo, number) = target
+        .rsplit_once('#')
+        .ok_or_else(|| DunkError::Refused("expected owner/repo#PR".into()))?;
+    let pr = number
+        .parse::<i64>()
+        .ok()
+        .filter(|p| *p > 0)
+        .ok_or_else(|| DunkError::Refused("expected positive PR number".into()))?;
+    let tokens = context.env.github_tokens()?;
+    let policy = crate::review::ConfiguredReviewPolicy {
+        config_dir: tokens.config_dir().to_path_buf(),
+    };
+    if !crate::review::ReviewRepoConfig::repos(&policy)
+        .map_err(DunkError::Refused)?
+        .iter()
+        .any(|r| r == repo)
+    {
+        return Err(DunkError::Refused(
+            "repository is not in the review registry".into(),
+        ));
+    }
+    let head = args.get("head").and_then(Value::as_str);
+    if head.is_some_and(|h| h.len() != 40 || !h.bytes().all(|b| b.is_ascii_hexdigit())) {
+        return Err(DunkError::Refused(
+            "head must be a full 40 character SHA".into(),
+        ));
+    }
+    let head = head.map(str::to_ascii_lowercase);
+    store.pr_wait_register(repo, pr, mailbox, pane, head.as_deref())
 }
 
 /// `dunk_api.h_review` list action through the attached Tasks actor.

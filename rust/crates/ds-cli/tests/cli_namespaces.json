@@ -15031,5 +15031,120 @@
    "self_pane": null,
    "socket": null
   }
+ },
+ {
+  "argv": [
+   "pr",
+   "wait"
+  ],
+  "namespace": {
+   "cancel": null,
+   "command": "pr",
+   "head": null,
+   "json": false,
+   "list": false,
+   "no_start_daemon": false,
+   "pr_command": "wait",
+   "self_pane": null,
+   "socket": null,
+   "target": null
+  }
+ },
+ {
+  "argv": [
+   "pr",
+   "wait",
+   "--json"
+  ],
+  "namespace": {
+   "cancel": null,
+   "command": "pr",
+   "head": null,
+   "json": true,
+   "list": false,
+   "no_start_daemon": false,
+   "pr_command": "wait",
+   "self_pane": null,
+   "socket": null,
+   "target": null
+  }
+ },
+ {
+  "argv": [
+   "--json",
+   "pr",
+   "wait"
+  ],
+  "namespace": {
+   "cancel": null,
+   "command": "pr",
+   "head": null,
+   "json": true,
+   "list": false,
+   "no_start_daemon": false,
+   "pr_command": "wait",
+   "self_pane": null,
+   "socket": null,
+   "target": null
+  }
+ },
+ {
+  "argv": [
+   "pr",
+   "wait",
+   "--head",
+   "x"
+  ],
+  "namespace": {
+   "cancel": null,
+   "command": "pr",
+   "head": "x",
+   "json": false,
+   "list": false,
+   "no_start_daemon": false,
+   "pr_command": "wait",
+   "self_pane": null,
+   "socket": null,
+   "target": null
+  }
+ },
+ {
+  "argv": [
+   "pr",
+   "wait",
+   "--list"
+  ],
+  "namespace": {
+   "cancel": null,
+   "command": "pr",
+   "head": null,
+   "json": false,
+   "list": true,
+   "no_start_daemon": false,
+   "pr_command": "wait",
+   "self_pane": null,
+   "socket": null,
+   "target": null
+  }
+ },
+ {
+  "argv": [
+   "pr",
+   "wait",
+   "--cancel",
+   "1"
+  ],
+  "namespace": {
+   "cancel": 1,
+   "command": "pr",
+   "head": null,
+   "json": false,
+   "list": false,
+   "no_start_daemon": false,
+   "pr_command": "wait",
+   "self_pane": null,
+   "socket": null,
+   "target": null
+  }
  }
 ]

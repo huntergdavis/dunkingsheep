@@ -3891,6 +3891,19 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             _ => owner_command(ns),
         },
         "token" => token(ns),
+        "pr" => {
+            let args = ["target", "head", "list", "cancel"]
+                .into_iter()
+                .filter_map(|key| {
+                    ns.get(key)
+                        .filter(|v| !v.is_null())
+                        .map(|v| (key.to_owned(), v.clone()))
+                })
+                .collect();
+            crate::daemon_cmd::run_command(ns, "pr_wait", args, |v| {
+                format!("{}\n", serde_json::to_string_pretty(v).unwrap())
+            })
+        }
         "review" => review(ns),
         "state" => state(ns),
         "roster" | "message-state" | "reply-stats" | "project-summary" => read_view(ns),
