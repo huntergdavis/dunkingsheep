@@ -274,9 +274,46 @@ impl Tasks {
         body: &str,
         opts: AddOptions,
     ) -> Result<Task, DunkError> {
-        self.add_with_verdict_guard(scope, title, body, opts, None, None)
+        self.add_with_project(scope, title, body, opts, ProjectRequest::Unset)
+            .await
+    }
+
+    /// `add_with` plus the task's project (t4701), written in the same transaction as the
+    /// task. Only a global task gets a project row; a pane-scoped task is private to its lane.
+    pub async fn add_with_project(
+        &self,
+        scope: &str,
+        title: &str,
+        body: &str,
+        opts: AddOptions,
+        project: ProjectRequest,
+    ) -> Result<Task, DunkError> {
+        if let ProjectRequest::Named(name) | ProjectRequest::NamedBy(name, _) = &project {
+            if name.is_empty() || name.trim() != name {
+                return Err(DunkError::Refused(
+                    "a task project is a non-empty name without surrounding spaces".into(),
+                ));
+            }
+        }
+        self.add_with_verdict_guard(scope, title, body, opts, None, None, project)
             .await?
             .ok_or_else(|| DunkError::Refused("unconditional task insertion was refused".into()))
+    }
+
+    /// The project a task is filed under (`planner_task_projects`), if any.
+    pub async fn task_project(&self, id: &str) -> Result<Option<String>, DunkError> {
+        let id = id.to_string();
+        self.writer
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT project FROM planner_task_projects WHERE task_id=?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(db::map_sqlite)
+            })
+            .await
     }
 
     /// Add a global review task only if its exact terminal-verdict identity set is unchanged.
@@ -301,6 +338,7 @@ impl Tasks {
             opts,
             Some(expected_verdict_ids.to_vec()),
             None,
+            ProjectRequest::Unset,
         )
         .await
     }
@@ -318,11 +356,22 @@ impl Tasks {
         {
             return Err(DunkError::Refused("planner review creation requires global scope and no initial assignees; assign separately".into()));
         }
-        self.add_with_verdict_guard(scope, title, body, opts, None, Some(planner))
-            .await?
-            .ok_or_else(|| DunkError::Refused("planner review creation refused".into()))
+        self.add_with_verdict_guard(
+            scope,
+            title,
+            body,
+            opts,
+            None,
+            Some(planner),
+            ProjectRequest::Unset,
+        )
+        .await?
+        .ok_or_else(|| DunkError::Refused("planner review creation refused".into()))
     }
 
+    // The project request rides beside the verdict guard and the planner identity; grouping
+    // them would change every internal caller for no behaviour.
+    #[allow(clippy::too_many_arguments)]
     async fn add_with_verdict_guard(
         &self,
         scope: &str,
@@ -331,6 +380,7 @@ impl Tasks {
         opts: AddOptions,
         expected_verdict_ids: Option<Vec<String>>,
         planner: Option<planner_scope::PlannerIdentity>,
+        project: ProjectRequest,
     ) -> Result<Option<Task>, DunkError> {
         let scope = validate_scope(scope)?;
         let title = title.trim().to_string();
@@ -450,6 +500,79 @@ impl Tasks {
                 }
                 require(dep)?;
             }
+            // t4701: the task's project, decided BEFORE anything is written, in this transaction:
+            // the creator's own, an explicit one, or the parent's. A lane may put a task only
+            // under its own project or one it holds a live planner grant for (a global grant
+            // covers every project); the owner under any.
+            let may_name = |identity: &Option<(String, i64, String)>,
+                            name: &str|
+             -> Result<bool, DunkError> {
+                let Some((pane, pid, start)) = identity else {
+                    return Ok(false);
+                };
+                let own = lane_project::get(&tx, pane, *pid, start)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|membership| {
+                        membership.scope == lane_project::ProjectScope::Project(name.to_string())
+                    });
+                if own {
+                    return Ok(true);
+                }
+                tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM planner_scope_grants \
+                     WHERE pane_id=?1 AND pane_pid=?2 AND proc_start=?3 \
+                     AND (scope_kind='global' OR project=?4))",
+                    params![pane, pid, start, name],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(db::map_sqlite)
+            };
+            let creator_project: Option<String> = match &project {
+                ProjectRequest::Unset | ProjectRequest::None => None,
+                ProjectRequest::Named(name) => Some(name.clone()),
+                ProjectRequest::NamedBy(name, identity) => {
+                    if !may_name(identity, name)? {
+                        return Err(DunkError::Refused(format!(
+                            "task project {name:?} is neither this lane's project nor one it holds a planner grant for; only the owner files a task under another project"
+                        )));
+                    }
+                    Some(name.clone())
+                }
+                ProjectRequest::Creator(identity, owner) => {
+                    // A stale or unreadable membership is no membership.
+                    let own = identity.as_ref().and_then(|(pane, pid, start)| {
+                        lane_project::get(&tx, pane, *pid, start)
+                            .ok()
+                            .flatten()
+                            .map(|membership| membership.scope)
+                    });
+                    match own {
+                        Some(lane_project::ProjectScope::Project(name)) => Some(name),
+                        // A global member (the owner seat) files unmapped tasks, as before.
+                        Some(lane_project::ProjectScope::Global) => None,
+                        None => {
+                            let inherited: Option<String> = match &parent {
+                                Some(parent) => tx
+                                    .query_row(
+                                        "SELECT project FROM planner_task_projects WHERE task_id=?1",
+                                        params![parent],
+                                        |row| row.get(0),
+                                    )
+                                    .optional()
+                                    .map_err(db::map_sqlite)?,
+                                None => None,
+                            };
+                            // Inherited only when the caller could have named it; otherwise
+                            // the task simply has no project (it is not refused).
+                            match inherited {
+                                Some(name) if *owner || may_name(identity, &name)? => Some(name),
+                                _ => None,
+                            }
+                        }
+                    }
+                }
+            };
             // t1018 finding 5: ONE statement allocates and returns the number.
             let next: i64 = tx
                 .query_row(
@@ -493,6 +616,14 @@ impl Tasks {
                     "INSERT INTO planner_task_projects(task_id,project) SELECT ?1,project FROM planner_repo_projects WHERE repo=?2",
                     params![id, repo],
                 ).map_err(db::map_sqlite)?;
+            }
+            // t4701: never replaces a project the review paths above already wrote.
+            if let Some(project) = creator_project.filter(|_| scope == "global") {
+                tx.execute(
+                    "INSERT OR IGNORE INTO planner_task_projects(task_id,project) VALUES (?1,?2)",
+                    params![id, project],
+                )
+                .map_err(db::map_sqlite)?;
             }
             // `meta={"kind": kind, "author": author}` only when it says something, as json.dumps writes it.
             let meta: Option<String> = (kind != "work" || author.is_some()).then(|| {
@@ -2400,6 +2531,27 @@ pub struct ReviewTaskRow {
     pub pr: Option<i64>,
     pub head: Option<String>,
     pub verdict: Option<String>,
+}
+
+/// Which project a new task is filed under (t4701).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub enum ProjectRequest {
+    /// Internal callers: no project row, as before t4701.
+    #[default]
+    Unset,
+    /// The creator asked for no project.
+    None,
+    /// The owner named the project: any name.
+    Named(String),
+    /// A lane named the project, with its `(pane, root pid, process start)`. Accepted only for
+    /// the lane's own project or one it holds a live planner grant for; refused otherwise.
+    NamedBy(String, Option<(String, i64, String)>),
+    /// The creator lane's own project: `(pane, root pid, process start)` of the caller, or
+    /// `None` when the caller has no live pane process. A project membership bound to that
+    /// process is used; a global membership gives no project; with no membership the task
+    /// takes its parent's project when the caller could have named that project.
+    /// The flag is true for the owner role, which may inherit any parent's project.
+    Creator(Option<(String, i64, String)>, bool),
 }
 
 /// `add`'s optional arguments (t1313 slice 2); `Default` is the Python's defaults.

@@ -650,6 +650,10 @@ pub fn render_task(task: &Value, stamp: Stamp) -> String {
         );
     }
     out += &format!("scope       {}\n", py_str(get(task, "scope")));
+    // t4701: the project a task is filed under, when it has one.
+    if truthy(get(task, "project")) {
+        out += &format!("project     {}\n", py_str(get(task, "project")));
+    }
     if truthy(get(task, "assignees")) {
         out += &format!("assignees   {}\n", join(get(task, "assignees"), ", "));
     }
@@ -2124,6 +2128,15 @@ mod tests {
         );
         let r = json!({"routing": {"b": {"pm": "x", "mode": "m", "members": []}}});
         assert_eq!(render_pm_routing(&r), "b: pm x  mode m  lanes -\n");
+    }
+
+    #[test]
+    fn task_detail_shows_the_project_only_when_the_task_has_one() {
+        let mut task = json!({"id": "t1", "priority": "low", "status": "open", "title": "T", "scope": "global"});
+        assert!(!render_task(&task, &utc_stamp).contains("project"));
+        task["project"] = json!("dunkingsheep");
+        assert!(render_task(&task, &utc_stamp)
+            .contains("scope       global\nproject     dunkingsheep\n"));
     }
 
     #[test]

@@ -49,6 +49,18 @@ pub struct TaskAddArgs<'a> {
     pub multi_assignee: bool,
 }
 
+/// Which project `task_add` files the task under (t4701).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum TaskProject<'a> {
+    /// The creator lane's project, else the parent task's.
+    #[default]
+    Creator,
+    /// `--project NAME`.
+    Named(&'a str),
+    /// `--no-project`.
+    None,
+}
+
 /// `task_update`'s optional arguments; `None` leaves a field alone (the Python's Ellipsis
 /// for `parent_id` and `block_reason` is `Some(None)` to clear).
 #[derive(Debug, Default, Clone)]
@@ -233,6 +245,7 @@ impl Flock {
             .await
     }
 
+    /// `task_add` with the creator lane's project as the default (t4701).
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn task_add_with_planner(
         &self,
@@ -243,6 +256,31 @@ impl Flock {
         self_pane_id: Option<&str>,
         env: &dyn PaneInfoEnv,
         planner: Option<crate::tasks::planner_scope::PlannerIdentity>,
+    ) -> Result<Task, DunkError> {
+        self.task_add_with_project(
+            title,
+            scope,
+            body,
+            opts,
+            self_pane_id,
+            env,
+            planner,
+            TaskProject::Creator,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn task_add_with_project(
+        &self,
+        title: &str,
+        scope: Option<&str>,
+        body: Option<&str>,
+        opts: TaskAddArgs<'_>,
+        self_pane_id: Option<&str>,
+        env: &dyn PaneInfoEnv,
+        planner: Option<crate::tasks::planner_scope::PlannerIdentity>,
+        project: TaskProject<'_>,
     ) -> Result<Task, DunkError> {
         let tasks = self.task_store()?;
         let target = Self::task_scope(scope, self_pane_id, TASK_GLOBAL)?;
@@ -301,8 +339,32 @@ impl Flock {
                 )
                 .await
         } else {
+            // t4701: the creator's identity is read from the live pane record here; the store
+            // matches it against the lane's membership inside the insert transaction.
+            let identity = || {
+                self_pane_id
+                    .filter(|pane| !pane.is_empty())
+                    .and_then(|pane| {
+                        super::lane_project::identity(env, pane)
+                            .ok()
+                            .map(|(pid, start)| (pane.to_string(), pid, start))
+                    })
+            };
+            let project = match project {
+                TaskProject::None => crate::tasks::ProjectRequest::None,
+                // The owner files under any project; a lane only under its own or a granted one.
+                TaskProject::Named(name) if role == "owner" => {
+                    crate::tasks::ProjectRequest::Named(name.to_string())
+                }
+                TaskProject::Named(name) => {
+                    crate::tasks::ProjectRequest::NamedBy(name.to_string(), identity())
+                }
+                TaskProject::Creator => {
+                    crate::tasks::ProjectRequest::Creator(identity(), role == "owner")
+                }
+            };
             tasks
-                .add_with(&target, title, body.unwrap_or(""), add_options)
+                .add_with_project(&target, title, body.unwrap_or(""), add_options, project)
                 .await
         }
     }
@@ -917,6 +979,9 @@ impl Flock {
     }
 }
 
+#[cfg(test)]
+#[path = "commands_tasks_project_tests.rs"]
+mod commands_tasks_project_tests;
 #[cfg(test)]
 #[path = "commands_tasks_tests.rs"]
 mod commands_tasks_tests;
