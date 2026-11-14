@@ -1844,7 +1844,7 @@ fn h_lanes_matches_python() {
             "lanes",
             args(json!({"action":"remove"})),
         )),
-        "lanes action must be list, set, project or planner"
+        "lanes action must be list, set, project, model or planner"
     );
 
     let set = dispatch_as_flock_role(
@@ -4052,9 +4052,10 @@ fn lanes_model_records_a_declaration_for_the_callers_own_pane_only() {
 
     let refused = |value: Value| call(value).unwrap_err().to_string();
     assert!(
-        refused(json!({"action": "model", "pane": "w1:p9", "model": "luna"}))
-            .contains("lane model"),
-        "another lane needs the owner"
+        // The owner gate refuses: with no owner registered (this fixture) it says so, otherwise
+        // it names the action; either way the refusal is about the owner role.
+        refused(json!({"action": "model", "pane": "w1:p9", "model": "luna"})).contains("owner"),
+        "another lane needs the owner role"
     );
     assert!(refused(json!({"action": "model", "pane": "self"})).contains("needs the model"));
     assert!(
