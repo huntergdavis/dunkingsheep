@@ -2480,6 +2480,25 @@ pub static ROOT: Cmd = Cmd {
                     ],
                 },
                 Cmd {
+                    name: "model", aliases: &[],
+                    help: Some("record the model a lane now runs (recorded, not applied)"),
+                    raw: false,
+                    raw_text: false,
+                    about: None,
+                    epilog: None,
+                    args: &[
+                        Arg { id: "json", dest: "json", tri: false, default_int: false, flags: &["--json"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: None, hidden: true, metavar: None, version: None },
+                        Arg { id: "pane", dest: "pane", tri: false, default_int: false, flags: &[], positional: true, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: true, help: Some("live pane id, or 'self'"), hidden: false, metavar: None, version: None },
+                        Arg { id: "model", dest: "model", tri: false, default_int: false, flags: &["--model"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: true, help: Some("the model the lane now runs"), hidden: false, metavar: None, version: None },
+                        Arg { id: "effort", dest: "effort", tri: false, default_int: false, flags: &["--effort"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("the reasoning effort, when the lane has one"), hidden: false, metavar: None, version: None },
+                        Arg { id: "provider", dest: "provider", tri: false, default_int: false, flags: &["--provider"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &["claude", "pi", "codex", "opencode"], default: None, required: false, help: Some("the agent kind"), hidden: false, metavar: None, version: None },
+                    ],
+                    groups: &[],
+                    sub_dest: None, sub_metavar: None, sub_required: false,
+                    subs: &[
+                    ],
+                },
+                Cmd {
                     name: "planner", aliases: &[],
                     help: Some("owner-controlled planner grants and task project scope"),
                     raw: false,

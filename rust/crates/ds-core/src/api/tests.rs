@@ -3996,6 +3996,109 @@ fn h_roster_matches_python() {
     assert_eq!(named["lanes"], json!([]));
 }
 
+/// t4473 slice C: a lane records its own model change; the record is tied to the pane's
+/// process and nothing else about the lane changes.
+#[test]
+fn lanes_model_records_a_declaration_for_the_callers_own_pane_only() {
+    let (_dir, flock) = flock();
+    let me = i64::from(std::process::id());
+    let env = ParityEnv::new(Some(me));
+    let request = RequestCtx {
+        self_pane_id: Some("w1:p1".into()),
+        ..RequestCtx::default()
+    };
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_lanes();
+    let call = |value: Value| {
+        dispatch_with_env(
+            &dispatcher,
+            &flock,
+            &FixedRole("worker", false),
+            "lanes",
+            args(value),
+            &request,
+            &env,
+        )
+    };
+    flock.record_launch("w1:p1", &[("argv", json!(["pi", "--model", "sol"]))]);
+    let launched_at = flock.launch("w1:p1").unwrap()["recorded_at"].clone();
+
+    let result = call(json!({"action": "model", "pane": "self", "model": " luna ", "effort": "low", "provider": "PI"})).unwrap();
+    assert_eq!(result["pane_id"], "w1:p1");
+    let declared = &result["declared"];
+    assert_eq!(
+        (
+            &declared["model"],
+            &declared["effort"],
+            &declared["provider"]
+        ),
+        (&json!("luna"), &json!("low"), &json!("pi"))
+    );
+    assert_eq!(declared["by"], "w1:p1");
+    assert_eq!(declared["process_pid"], json!(me));
+    assert_eq!(
+        declared["process_start"],
+        json!(crate::proc::process_start(me).unwrap())
+    );
+    assert_eq!(declared["at"], json!(env.now_s));
+    let entry = flock.launch("w1:p1").unwrap();
+    assert_eq!(entry["model_declared"], *declared);
+    assert_eq!(entry["recorded_at"], launched_at, "the launch is unchanged");
+    assert_eq!(entry["argv"], json!(["pi", "--model", "sol"]));
+
+    // The same call by pane id is still the caller's own pane.
+    assert!(call(json!({"action": "model", "pane": "w1:p1", "model": "luna"})).is_ok());
+
+    let refused = |value: Value| call(value).unwrap_err().to_string();
+    assert!(
+        refused(json!({"action": "model", "pane": "w1:p9", "model": "luna"}))
+            .contains("lane model"),
+        "another lane needs the owner"
+    );
+    assert!(refused(json!({"action": "model", "pane": "self"})).contains("needs the model"));
+    assert!(
+        refused(json!({"action": "model", "pane": "self", "model": "   "}))
+            .contains("needs the model")
+    );
+    assert!(refused(json!({"action": "model", "model": "luna"})).contains("needs a pane id"));
+    assert!(
+        refused(json!({"action": "model", "pane": "self", "model": 7}))
+            .contains("model must be a string")
+    );
+    assert!(refused(
+        json!({"action": "model", "pane": "self", "model": "luna", "provider": "bash"})
+    )
+    .contains("provider must be one of"));
+    assert!(
+        refused(json!({"action": "model", "pane": "self", "model": "x".repeat(129)}))
+            .contains("at most 128 characters")
+    );
+    assert!(
+        refused(json!({"action": "model", "pane": "self", "model": "a\u{7}b"}))
+            .contains("plain text")
+    );
+    assert_eq!(
+        flock.launch("w1:p1").unwrap()["model_declared"]["model"],
+        "luna",
+        "refusals record nothing"
+    );
+    assert!(flock.launch("w1:p9").is_none());
+
+    // A pane with no readable process cannot carry a declaration.
+    let blind = ParityEnv::new(None);
+    let error = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "lanes",
+        args(json!({"action": "model", "pane": "self", "model": "luna"})),
+        &request,
+        &blind,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("pane is not live"), "{error}");
+}
+
 #[test]
 fn api_handlers_refuse_when_required_adapters_are_not_wired() {
     let (_dir, flock) = flock();

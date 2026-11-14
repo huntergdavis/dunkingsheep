@@ -3005,6 +3005,76 @@ pub fn h_poolrad_progress(context: &HandlerContext<'_>, _args: Args) -> Result<V
     context.env.poolrad_progress()
 }
 
+/// `lanes action=model` (t4473 slice C): record that a lane's model is now `model`.
+///
+/// This records a change; it does not make one. Nothing is typed into the pane and nothing is
+/// respawned. A lane may declare its own model; only the owner may declare another lane's. The
+/// declaration is tied to the process running in the pane now, so it stops counting when that
+/// process is replaced. Project membership, role and task leases are not touched.
+fn lane_model(context: &HandlerContext<'_>, args: &Args) -> Result<Value, DunkError> {
+    let pane = args
+        .get("pane")
+        .and_then(Value::as_str)
+        .filter(|pane| !pane.trim().is_empty())
+        .ok_or_else(|| DunkError::Refused("lane model needs a pane id, or 'self'".into()))?;
+    let own = context.self_pane_id();
+    let pane = if pane == "self" {
+        own.ok_or_else(|| DunkError::Refused("caller pane is unknown".into()))?
+    } else {
+        pane
+    };
+    let by_lane = own == Some(pane);
+    if !by_lane {
+        context
+            .flock
+            .require_superuser(own, "lane model", context.env)?;
+    }
+    // Short plain text only: these values are shown to the owner and stored in a record.
+    let text = |key: &str| -> Result<Option<String>, DunkError> {
+        match args.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(value)) => {
+                let value = value.trim();
+                if value.is_empty() {
+                    Ok(None)
+                } else if value.chars().count() > 128 || value.chars().any(char::is_control) {
+                    Err(DunkError::Refused(format!(
+                        "{key} must be at most 128 characters of plain text"
+                    )))
+                } else {
+                    Ok(Some(value.to_string()))
+                }
+            }
+            Some(_) => Err(DunkError::Refused(format!("{key} must be a string"))),
+        }
+    };
+    let model = text("model")?
+        .ok_or_else(|| DunkError::Refused("lane model needs the model (--model)".into()))?;
+    let effort = text("effort")?;
+    let provider = text("provider")?.map(|provider| provider.to_lowercase());
+    if let Some(provider) = provider.as_deref() {
+        if !crate::state::AGENT_EXES.contains(&provider) {
+            return Err(DunkError::Refused(format!(
+                "provider must be one of {}",
+                crate::state::AGENT_EXES.join(", ")
+            )));
+        }
+    }
+    let (pid, start) = crate::flock::lane_project::identity(context.env, pane)?;
+    let declaration = json!({
+        "model": model,
+        "effort": effort,
+        "provider": provider,
+        "at": context.env.now_s(),
+        "by": if by_lane { pane } else { "owner" },
+        "process_pid": pid,
+        "process_start": start,
+    });
+    context.flock.declare_model(pane, declaration.clone());
+    context.flock.invalidate_view();
+    Ok(json!({"pane_id": pane, "declared": declaration}))
+}
+
 pub fn h_lanes(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let action = args
         .get("action")
@@ -3074,9 +3144,12 @@ pub fn h_lanes(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkEr
         result["pane_id"] = json!(pane);
         return Ok(result);
     }
+    if action == "model" {
+        return lane_model(context, &args);
+    }
     if action != "list" {
         return Err(DunkError::Refused(
-            "lanes action must be list, set, project or planner".into(),
+            "lanes action must be list, set, project, model or planner".into(),
         ));
     }
     let mut rows = context.flock.lanes();

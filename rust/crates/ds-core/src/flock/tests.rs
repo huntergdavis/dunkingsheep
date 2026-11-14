@@ -250,3 +250,37 @@ fn a_new_launch_drops_the_previous_launchs_identity() {
     flock.record_launch("%7", &[("session", json!("s2"))]);
     assert_eq!(flock.launch("%7").unwrap()["provider"], json!("claude"));
 }
+
+#[test]
+fn a_declared_model_is_kept_beside_the_launch_and_dropped_by_the_next_launch() {
+    let dir = crate::testsupport::dir("flock-declare-model");
+    let flock = Flock::new(
+        dir.path().join("launches.json"),
+        dir.path().join("lanes.json"),
+        false,
+    );
+    flock.record_launch(
+        "%7",
+        &[
+            ("argv", json!(["claude", "--model", "opus"])),
+            ("model", json!("opus")),
+        ],
+    );
+    let launched_at = flock.launch("%7").unwrap()["recorded_at"].clone();
+    flock.declare_model("%7", json!({"model": "sonnet", "by": "%7"}));
+    let entry = flock.launch("%7").unwrap();
+    assert_eq!(entry["model_declared"]["model"], json!("sonnet"));
+    assert_eq!(
+        entry["model"],
+        json!("opus"),
+        "the launch itself is unchanged"
+    );
+    assert_eq!(entry["recorded_at"], launched_at, "and so is its time");
+
+    // A new launch is a new process: the declaration for the old one goes.
+    flock.record_launch("%7", &[("argv", json!(["claude"]))]);
+    assert!(!flock.launch("%7").unwrap().contains_key("model_declared"));
+
+    flock.declare_model("", json!({"model": "x"}));
+    assert!(flock.launch("").is_none());
+}

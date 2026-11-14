@@ -205,12 +205,14 @@ pub struct Flock {
 
 /// What a launch record says about the launch itself (t4473): the agent kind, the model and
 /// effort named on the command line, and the process that was started.
-pub const LAUNCH_IDENTITY_KEYS: [&str; 5] = [
+pub const LAUNCH_IDENTITY_KEYS: [&str; 6] = [
     "provider",
     "model",
     "effort",
     "process_pid",
     "process_start",
+    // A model declared after the launch (slice C) belongs to that launch's process.
+    "model_declared",
 ];
 
 /// The identity fields of one launch, for `record_launch`. `provider` is the command's
@@ -744,6 +746,23 @@ impl Flock {
         if changed {
             self.save_launches();
         }
+    }
+
+    /// Record a model change that was made known through Dunking Sheep (t4473 slice C): the
+    /// declaration (`model`, `effort`, `provider`, `at`, `by`, and the pid and start time of the
+    /// pane's process it was made for) is stored beside the launch, not over it. `recorded_at`
+    /// is not touched: it is the time of the launch, and the launch is unchanged.
+    pub fn declare_model(&self, pane_id: &str, declaration: Value) {
+        if pane_id.is_empty() {
+            return;
+        }
+        self.launches
+            .lock()
+            .expect("launches lock")
+            .entry(pane_id.to_string())
+            .or_default()
+            .insert("model_declared".to_string(), declaration);
+        self.save_launches();
     }
 
     /// A copy of one pane's launch entry.

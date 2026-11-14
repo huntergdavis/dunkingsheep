@@ -49,3 +49,26 @@ test('a missing value, a value with no source, or an unrecognised source is unkn
     { known: false, text: 'unknown', detail: 'unrecognised model source: launch command' },
   );
 });
+
+test('a declared model shows who declared it and when, and is not "seen" or "launched as"', () => {
+  assert.deepEqual(
+    laneModel({ value: 'gpt-luna', effort: 'low', source: 'declared', declared_by: '%12', stale: false, observed: false, age_s: 600 }),
+    { known: true, text: 'gpt-luna low', detail: 'declared by %12 10 min ago' },
+  );
+  assert.deepEqual(
+    laneModel({ value: 'gpt-luna', effort: null, source: 'declared', declared_by: 'owner', age_s: null }),
+    { known: true, text: 'gpt-luna', detail: 'declared by owner, time not recorded' },
+  );
+});
+
+test('a stale record shows "stale" with the reason and never its value', () => {
+  assert.deepEqual(
+    laneModel({ value: null, stale: true, reason: 'the model was declared for an earlier process in this pane', age_s: 600 }),
+    { known: false, text: 'stale', detail: 'the model was declared for an earlier process in this pane' },
+  );
+  // Even if a value were attached, a stale cell does not show it.
+  assert.deepEqual(
+    laneModel({ value: 'gpt-luna', source: 'declared', stale: true }),
+    { known: false, text: 'stale', detail: 'the record is for an earlier process' },
+  );
+});
