@@ -137,8 +137,8 @@ pub(super) fn apply(
     let meta = json!({"kind":"decision","rule":RULE,"reason":reason,"project":project,
         "candidates":considered,"known_authors":authors,"assignees":assignees});
     conn.execute(
-        "INSERT INTO task_events(task_id,event,at,actor,reason,meta) VALUES (?1,?2,?3,'review-sync',?4,?5)",
-        params![id,if assigned {"assigned"} else {"review_routing"},now,reason,meta.to_string()],
+        "INSERT INTO task_events(task_id,event,at,actor,meta) VALUES (?1,?2,?3,'review-sync',?4)",
+        params![id,if assigned {"assigned"} else {"review_routing"},now,meta.to_string()],
     ).map_err(db::map_sqlite)?;
     Ok(())
 }
