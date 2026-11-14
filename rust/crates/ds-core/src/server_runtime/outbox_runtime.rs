@@ -1793,6 +1793,15 @@ mod tests {
                         "nothing typed (owner lane)",
                     ],
                 ),
+                (
+                    // Found live on %1: the owner lane's box did not read clear (here an
+                    // ambiguous multi-line composer), and the dunk was held, not stored.
+                    "owner-unclear",
+                    vec![
+                        "dunk d1 -> w1:p1: stored in the inbox as ",
+                        "nothing typed (owner lane)",
+                    ],
+                ),
                 ("clear", vec!["dunk d1 -> w1:p1: typed and submitted"]),
             ] {
                 let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1817,6 +1826,12 @@ mod tests {
                         "case {case}: no journal line {line:?}\n{stderr}"
                     );
                 }
+                if case.starts_with("owner") {
+                    assert!(
+                        !stderr.contains("held before typing"),
+                        "case {case}: an owner lane is stored, never held at the typing gate\n{stderr}"
+                    );
+                }
             }
             return;
         };
@@ -1834,7 +1849,7 @@ mod tests {
             )),
             ..Default::default()
         });
-        if case == "owner" {
+        if case.starts_with("owner") {
             let mut roles = crate::roles::Roles::new(
                 &crate::config::Env::default(),
                 Some(dir.path().join("roles.json")),
@@ -1847,13 +1862,35 @@ mod tests {
                 .unwrap();
             flock.attach_roles(roles, None);
         }
+        // A composer the reader cannot delimit: a prompt row with continuation rows under it.
+        let unclear = {
+            let mut rows: Vec<String> = vec!["synthetic transcript".into()];
+            rows.resize(18, String::new());
+            rows.push("\u{203a} my unfinished draft".into());
+            rows.push("  second line".into());
+            rows.push("  third line".into());
+            rows.push(String::new());
+            rows.push(String::new());
+            rows.push("  model \u{b7} /tmp/synthetic-fixture \u{b7} task".into());
+            rows.join("\n") + "\n"
+        };
+        assert!(
+            crate::terminal::screen::box_text(&unclear)
+                .1
+                .contains("ambiguous composer"),
+            "the fixture screen must read as not clear"
+        );
         let terminal = Arc::new(Mutex::new(FakeTerminal::new()));
         {
             let mut fake = terminal.lock().unwrap();
             fake.panes[0].pane_pid = Some(std::process::id() as i64);
             fake.screens.insert(
                 "w1:p1".into(),
-                if case == "draft" { DRAFT } else { EMPTY }.into(),
+                match case.as_str() {
+                    "draft" => DRAFT.to_string(),
+                    "owner-unclear" => unclear,
+                    _ => EMPTY.to_string(),
+                },
             );
         }
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -1935,6 +1972,15 @@ mod tests {
                     "no key submits the draft: {:?}",
                     fake.keys_sent
                 );
+                assert!(status.starts_with("Stored (inbox) "), "{status}");
+            }
+            "owner-unclear" => {
+                assert_eq!(1, rows, "stored although the box never read clear");
+                assert!(
+                    typed.is_empty(),
+                    "nothing is typed into an unreadable owner box: {typed:?}"
+                );
+                assert!(fake.keys_sent.is_empty(), "{:?}", fake.keys_sent);
                 assert!(status.starts_with("Stored (inbox) "), "{status}");
             }
             "owner" => {

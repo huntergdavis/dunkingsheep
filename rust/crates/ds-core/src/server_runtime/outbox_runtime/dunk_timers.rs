@@ -485,6 +485,35 @@ fn run_dunk_timer(
                 _ => {}
             }
         }
+        // The box is read here on every tick: once it is seen empty the person's draft is
+        // gone, and the pane's notices go back to behaving as on any other lane.
+        if crate::flock::sends::box_is_empty(&env, pane) {
+            flock.set_dunk_draft(pane, false);
+        }
+        // An owner lane is never typed into, so nothing below applies to it: not the typing
+        // gate (an ambiguous composer, or a harness mid-turn, would hold the dunk for as long
+        // as the pane never reads clear) and not the consumption check (there is no typed text
+        // of ours to wait for). The dunk is stored as mail on every due tick; that is what
+        // keeps supervision of the owner seat from going quiet (t4681, found live).
+        if flock.is_owner_lane(pane) {
+            match store_instead_of_typing(&flock, &inbox, &handle, pane, "owner lane") {
+                Some(done) => {
+                    save_timer_state(&flock, &handle, store.as_ref());
+                    if done {
+                        flock.dunks.remove_handle(&handle);
+                        save_timer_state(&flock, &handle, store.as_ref());
+                        break;
+                    }
+                    timer_wait(&signal, &observed_wake, 1.0);
+                }
+                None => {
+                    crate::flock::dunks::DunkList::timer_hold(&handle, "inbox store failed");
+                    save_timer_state(&flock, &handle, store.as_ref());
+                    timer_wait(&signal, &observed_wake, 60.0);
+                }
+            }
+            continue;
+        }
         let settle_interrupted = Cell::new(false);
         if fields.hold_while_typing
             && !crate::flock::sends::clear_to_send(&env, pane, &|seconds| {
@@ -560,30 +589,6 @@ fn run_dunk_timer(
         }
         if signal.cancelled.load(Ordering::Acquire) {
             break;
-        }
-        // The box is read here on every tick: once it is seen empty the person's draft is
-        // gone, and the pane's notices go back to behaving as on any other lane.
-        if crate::flock::sends::box_is_empty(&env, pane) {
-            flock.set_dunk_draft(pane, false);
-        }
-        if flock.is_owner_lane(pane) {
-            match store_instead_of_typing(&flock, &inbox, &handle, pane, "owner lane") {
-                Some(done) => {
-                    save_timer_state(&flock, &handle, store.as_ref());
-                    if done {
-                        flock.dunks.remove_handle(&handle);
-                        save_timer_state(&flock, &handle, store.as_ref());
-                        break;
-                    }
-                    timer_wait(&signal, &observed_wake, 1.0);
-                }
-                None => {
-                    crate::flock::dunks::DunkList::timer_hold(&handle, "inbox store failed");
-                    save_timer_state(&flock, &handle, store.as_ref());
-                    timer_wait(&signal, &observed_wake, 60.0);
-                }
-            }
-            continue;
         }
         crate::flock::dunks::DunkList::set_timer_status(&handle, "Sending...");
         #[cfg(test)]

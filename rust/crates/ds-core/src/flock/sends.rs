@@ -4430,7 +4430,11 @@ impl Flock {
             // goes in), so an agent lane with stray text cannot go deaf.
             preserve_draft: message.dunk_delivery.is_some()
                 || (message.is_notice && self.notice_preserves_draft(&message.pane_id)),
-            inconclusive_fallback: message.holds >= HOLD_ATTEMPT_LIMIT,
+            // The max-hold fallback types into a composer that could not be read. Never for a
+            // notice to an owner lane: an unreadable box there may be a person's draft, and
+            // the stored row waits in the mailbox whether or not the notice gets in.
+            inconclusive_fallback: message.holds >= HOLD_ATTEMPT_LIMIT
+                && !(message.is_notice && self.is_owner_lane(&message.pane_id)),
         };
         let is_keys = message.kind == "keys";
         let press_enter = message.press_enter;
