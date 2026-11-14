@@ -776,3 +776,221 @@ fn accepted_detached_owner_token_calls_are_audited() {
     let _ = unrelated.kill();
     let _ = unrelated.wait();
 }
+
+// ---- t4782: the system token is accepted only from where the daemon's services run ----
+
+#[test]
+fn the_unit_of_a_cgroup_line_and_which_units_are_the_daemons_services() {
+    use super::roles_gate::{is_system_unit, unit_of_cgroup};
+    let timer = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/dunkingsheep-watchdog.service\n";
+    assert_eq!(
+        unit_of_cgroup(timer).as_deref(),
+        Some("dunkingsheep-watchdog.service")
+    );
+    let pane = "0::/user.slice/user-1000.slice/user@1000.service/tmux-spawn-1234.scope\n";
+    assert_eq!(
+        unit_of_cgroup(pane).as_deref(),
+        Some("tmux-spawn-1234.scope")
+    );
+    assert_eq!(unit_of_cgroup("0::/user.slice/user-1000.slice\n"), None);
+    assert_eq!(
+        unit_of_cgroup("1:name=systemd:/x.service\n"),
+        None,
+        "v1 only"
+    );
+    assert_eq!(unit_of_cgroup(""), None);
+
+    for unit in [
+        "dunkingsheep-watchdog.service",
+        "dunkingsheep-health.service",
+        "dunkingsheep-review.service",
+        "dunkingsheep-watchdog-deadman.service",
+    ] {
+        assert!(is_system_unit(unit), "{unit}");
+    }
+    for unit in [
+        "dunkingsheep.service",
+        "dunkingsheep-.service",
+        "dunkingsheep-watchdog.timer",
+        "dunkingsheep-watchdog.scope",
+        "tmux-spawn-1234.scope",
+        "evil-dunkingsheep-watchdog.service",
+        "dunkingsheep-a b.service",
+        "",
+    ] {
+        assert!(!is_system_unit(unit), "{unit}");
+    }
+}
+
+#[test]
+fn a_system_token_is_accepted_from_a_service_unit_and_refused_from_a_detached_stranger() {
+    use super::roles_gate::{system_token_verdict, SystemPeer, SystemTokenVerdict};
+    let listed = vec!["%7".to_string()];
+    // Matching peers: one of the daemon's units, or a pane the owner listed for this label.
+    assert_eq!(
+        system_token_verdict(
+            "timers",
+            &SystemPeer::Unit("dunkingsheep-watchdog.service".into()),
+            &[]
+        ),
+        SystemTokenVerdict::Accept
+    );
+    assert_eq!(
+        system_token_verdict("cos", &SystemPeer::Panes(vec!["%7".into()]), &listed),
+        SystemTokenVerdict::Accept
+    );
+    // Non-matching: outside every pane and not a unit is refused.
+    let SystemTokenVerdict::Refuse(line) =
+        system_token_verdict("timers", &SystemPeer::Detached, &listed)
+    else {
+        panic!("a detached stranger is refused");
+    };
+    assert!(
+        line.contains("'timers'") && line.contains("refused"),
+        "{line}"
+    );
+    // In a pane the owner did not list (or only partly listed): accepted this release, with a
+    // warning that names the label and the pane.
+    for panes in [
+        vec!["%9".to_string()],
+        vec!["%7".to_string(), "%9".to_string()],
+    ] {
+        let SystemTokenVerdict::Warn(line) =
+            system_token_verdict("cos", &SystemPeer::Panes(panes.clone()), &listed)
+        else {
+            panic!("an unlisted pane warns: {panes:?}");
+        };
+        assert!(line.starts_with("WARNING system token 'cos'"), "{line}");
+        assert!(line.contains("%9"), "{line}");
+    }
+    assert!(matches!(
+        system_token_verdict("cos", &SystemPeer::Panes(vec![]), &listed),
+        SystemTokenVerdict::Warn(_)
+    ));
+    assert!(matches!(
+        system_token_verdict("cos", &SystemPeer::Unknown, &listed),
+        SystemTokenVerdict::Warn(_)
+    ));
+}
+
+#[test]
+fn the_owners_pane_list_for_a_system_token_is_read_by_label_and_fails_empty() {
+    let (flock, dir) = bare("system-token-panes");
+    let panes = |label: &str| {
+        flock
+            .with_roles(|roles, _| Ok(roles.system_token_panes(label)))
+            .unwrap()
+    };
+    assert!(panes("cos").is_empty(), "no file lists nothing");
+    let file = dir.join(crate::roles::SYSTEM_TOKEN_PANES_FILE);
+    std::fs::write(&file, r#"{"cos": ["%7", " %8 ", "", 4], "other": "%9"}"#).unwrap();
+    assert_eq!(panes("cos"), ["%7", "%8"]);
+    assert!(panes("other").is_empty(), "a label needs a list");
+    assert!(panes("timers").is_empty());
+    std::fs::write(&file, "{").unwrap();
+    assert!(panes("cos").is_empty(), "a malformed file lists nothing");
+}
+
+#[test]
+fn a_system_token_over_the_socket_is_checked_against_where_the_caller_runs() {
+    struct Panes(Vec<Value>);
+    impl PaneInfoEnv for Panes {
+        fn list_panes_grouped(&self) -> Vec<Value> {
+            self.0.clone()
+        }
+        fn get_pane(&self, id: &str) -> Option<Value> {
+            self.0.iter().find(|p| p["pane_id"] == id).cloned()
+        }
+        fn try_authority_panes(&self) -> Result<Vec<Value>, crate::error::DunkError> {
+            Ok(self.0.clone())
+        }
+    }
+    let (flock, dir) = bare("system-token-peer");
+    let caller_pid = std::process::id() as i64;
+    let caller_start = crate::proc::process_start(caller_pid).unwrap();
+    // The pane root this test process sits under: its tmux pane when run inside one, else
+    // the test process itself stands in for a pane root.
+    let mut cursor = caller_pid;
+    let mut tmux_root = None;
+    for _ in 0..crate::proc::MAX_DEPTH {
+        let row = crate::proc::stat(cursor).unwrap();
+        if row.ppid <= 1 {
+            break;
+        }
+        let parent = crate::proc::stat(row.ppid).unwrap();
+        if parent.comm == "tmux: server" {
+            tmux_root = Some(cursor);
+            break;
+        }
+        cursor = row.ppid;
+    }
+    let pane_root = tmux_root.unwrap_or(caller_pid);
+    let mut roles = Roles::new(
+        &Env::default(),
+        Some(dir.join("roles.json")),
+        Some(dir.join("tokens.json")),
+        None,
+    )
+    .unwrap();
+    let token = roles.issue_token("system", Some("cos"), None).unwrap();
+    flock.attach_roles(roles, None);
+    let caller = json!({"pid": caller_pid, "start": caller_start, "source": "peer"});
+    let check = |rows: Vec<Value>| {
+        flock.clear_caller();
+        flock.set_caller(Some(caller.clone()));
+        flock.set_service_token(Some(&token));
+        flock.set_socket_peer(Some(true));
+        flock.with_caller(|state| state.socket_peer_uid = Some(nix::unistd::geteuid().as_raw()));
+        flock.caller_role(None, &Panes(rows))
+    };
+
+    // Inside a listed pane the owner has not named for this label: accepted this release.
+    let mine = json!({"pane_id": WORKER, "pane_pid": pane_root});
+    assert_eq!(check(vec![mine.clone()]).unwrap(), "system");
+    // Named by the owner for this label: accepted.
+    std::fs::write(
+        dir.join(crate::roles::SYSTEM_TOKEN_PANES_FILE),
+        format!(r#"{{"cos": ["{WORKER}"]}}"#),
+    )
+    .unwrap();
+    assert_eq!(check(vec![mine]).unwrap(), "system");
+
+    // Outside every listed pane, and this test process is not a dunkingsheep service unit.
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let child = Child(
+        std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap(),
+    );
+    let elsewhere = check(vec![
+        json!({"pane_id": "%unrelated", "pane_pid": child.0.id()}),
+    ]);
+    if tmux_root.is_some() {
+        // Run from inside a tmux pane that this listing does not account for: the place
+        // cannot be established, which is accepted with a warning for this release.
+        assert_eq!(elsewhere.unwrap(), "system");
+    } else {
+        let refused = elsewhere.unwrap_err().to_string();
+        assert_eq!(
+            refused,
+            "system token refused: the caller is not a dunkingsheep service unit"
+        );
+        assert!(
+            !refused.contains(&token),
+            "the token is never in the refusal"
+        );
+    }
+
+    // An in-process caller (no socket request) is trusted code and is not checked.
+    flock.clear_caller();
+    flock.clear_socket_peer();
+    flock.set_service_token(Some(&token));
+    assert_eq!(flock.caller_role(None, &NoPanes).unwrap(), "system");
+}

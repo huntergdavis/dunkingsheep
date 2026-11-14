@@ -31,6 +31,8 @@ pub const ROLES: [&str; 8] = [
 pub const LANE_ROLES: [&str; 5] = ["desk", "planner", "worker", "reviewer", "owner"];
 pub const TOKEN_ROLES: [&str; 3] = ["web", "system", "owner"];
 pub const DEFAULT_ROLE: &str = "anonymous";
+/// t4782: the owner's list of panes a system token may be used from, by token label.
+pub const SYSTEM_TOKEN_PANES_FILE: &str = "system-token-panes.json";
 /// With no registry file at all (a fresh install, the test suite) a bound pane is a
 /// worker; the first registration writes the file with default "anonymous" (FLAT_FLEET 4.2).
 pub const UNCONFIGURED_DEFAULT: &str = "worker";
@@ -471,6 +473,40 @@ impl Roles {
             .and_then(|e| e.get("role"))
             .and_then(Value::as_str)
             .map(String::from))
+    }
+
+    /// Non-secret label of a currently valid token; never its value or hash.
+    pub fn token_label(&mut self, token: &str) -> Result<Option<String>, DunkError> {
+        if token.is_empty() {
+            return Ok(None);
+        }
+        self.refresh(false)?;
+        Ok(self
+            .tokens
+            .get(&hash_token(token))
+            .and_then(|entry| entry.get("label").and_then(Value::as_str))
+            .filter(|label| !label.is_empty())
+            .map(String::from))
+    }
+
+    /// t4782: the panes a system token with this label may be used from, as the owner listed
+    /// them in `system-token-panes.json` beside the token file: `{"<label>": ["%12", ...]}`.
+    /// A missing, unreadable or malformed file lists nothing.
+    pub fn system_token_panes(&self, label: &str) -> Vec<String> {
+        let Some(dir) = self.tokens_path.parent() else {
+            return Vec::new();
+        };
+        let Ok(text) = std::fs::read_to_string(dir.join(SYSTEM_TOKEN_PANES_FILE)) else {
+            return Vec::new();
+        };
+        serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|listed| listed.get(label).and_then(Value::as_array).cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|pane| pane.as_str().map(str::trim).map(String::from))
+            .filter(|pane| !pane.is_empty())
+            .collect()
     }
 
     /// Non-secret label for a currently valid owner token; never return its value or hash.

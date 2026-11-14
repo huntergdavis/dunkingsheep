@@ -179,6 +179,20 @@ role; a no-TTY request without one is `anonymous`. The old desk credential
 (`dunk_desk.py`, `desk_token`, `--desk-token`) is retired: it was this
 mechanism for one verb pair, and its name collides with the desk role.
 
+**Where a `system` token may be used from (t4782).** The token file is readable
+by the daemon's Unix user, so the token alone does not show that the caller is
+one of the daemon's services. Over the socket, a `system` token is accepted
+from a `dunkingsheep-*.service` unit (the timers); a caller outside every pane
+that is not such a unit is refused. Use from inside a pane is accepted only for
+panes the owner lists per token label in
+`~/.config/dunkingsheep/system-token-panes.json`, for example
+`{"cos-heartbeat": ["%236"]}`; the file is absent by default. For one release an
+unlisted pane (and a caller whose place cannot be established) is still
+accepted, with a `WARNING system token '<label>' ...` line in the daemon log
+that names the label and the pane, never the token; the release after refuses
+it. Like the owner-token check, this is not a boundary against a determined
+process running as the same user.
+
 Also closed: `inbox read --mailbox X` for another mailbox (`_mailbox_or_self`),
 `task complete` by a non-lease-holder, ungated `owner_push`, and three
 indirect routes the first draft missed: `task update` drops `status` and

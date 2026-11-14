@@ -91,6 +91,87 @@ fn non_empty(text: Option<&str>) -> Option<&str> {
     text.filter(|t| !t.is_empty())
 }
 
+/// t4782: where a system-token caller's process was found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SystemPeer {
+    /// A `dunkingsheep-*.service` unit, named.
+    Unit(String),
+    /// Inside these listed panes.
+    Panes(Vec<String>),
+    /// Outside every listed pane and not a dunkingsheep service unit.
+    Detached,
+    /// The place could not be established.
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SystemTokenVerdict {
+    Accept,
+    /// Accepted for this release; the line is logged.
+    Warn(String),
+    /// Refused; the line is logged.
+    Refuse(String),
+}
+
+/// The systemd unit a process runs in: the last path component of its unified cgroup
+/// (`0::/user.slice/.../dunkingsheep-watchdog.service`), when that component is a unit name.
+pub(crate) fn unit_of_cgroup(cgroup: &str) -> Option<String> {
+    let path = cgroup
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))?
+        .trim();
+    let unit = path.rsplit('/').next()?;
+    (unit.ends_with(".service") || unit.ends_with(".scope")).then(|| unit.to_string())
+}
+
+/// The daemon's own timer and helper services. The daemon itself (`dunkingsheep.service`) does
+/// not call its own socket with a token.
+pub(crate) fn is_system_unit(unit: &str) -> bool {
+    unit.strip_prefix("dunkingsheep-")
+        .and_then(|rest| rest.strip_suffix(".service"))
+        .is_some_and(|name| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '@')
+        })
+}
+
+/// The decision for a system-token caller. Every line names the token's label and the place,
+/// never the token.
+pub(crate) fn system_token_verdict(
+    label: &str,
+    peer: &SystemPeer,
+    allowed_panes: &[String],
+) -> SystemTokenVerdict {
+    match peer {
+        SystemPeer::Unit(_) => SystemTokenVerdict::Accept,
+        SystemPeer::Detached => SystemTokenVerdict::Refuse(format!(
+            "system token '{label}' refused: the caller is outside every pane and is not a dunkingsheep-*.service unit"
+        )),
+        SystemPeer::Panes(panes)
+            if !panes.is_empty() && panes.iter().all(|pane| allowed_panes.contains(pane)) =>
+        {
+            SystemTokenVerdict::Accept
+        }
+        SystemPeer::Panes(panes) => SystemTokenVerdict::Warn(format!(
+            "WARNING system token '{label}' used from pane {}, which the owner has not listed for it; accepted for this release, to be refused in the next",
+            panes.join(", ")
+        )),
+        SystemPeer::Unknown => SystemTokenVerdict::Warn(format!(
+            "WARNING system token '{label}' used by a caller whose place could not be established; accepted for this release, to be refused in the next"
+        )),
+    }
+}
+
+/// A socket caller's verified process ancestry and the listed panes it sits inside.
+struct PeerPlace {
+    first: crate::proc::ProcStat,
+    start: String,
+    chain: Vec<crate::proc::ProcStat>,
+    matched: Vec<(String, i64)>,
+}
+
 impl Flock {
     pub(crate) fn owner_token_audit_actor(
         &self,
@@ -151,6 +232,8 @@ impl Flock {
         let token = self.with_caller(|state| state.service_token.clone());
         let mut role: Option<String> = None;
         let mut owner_token = false;
+        // The non-secret label of a system token, when this request carries one.
+        let mut system_label: Option<String> = None;
         if let Some(token) = non_empty(token.as_deref()) {
             role = self.with_roles(|roles, _| roles.token_role(token))?;
             // The owner token is also used by a legitimate detached owner app.
@@ -158,6 +241,12 @@ impl Flock {
             // client-supplied pane id. Detached callers remain a compatibility
             // exception; this is not an adversarial same-UID isolation boundary.
             owner_token = role.as_deref() == Some("owner");
+            if role.as_deref() == Some("system") {
+                system_label = Some(
+                    self.with_roles(|roles, _| roles.token_label(token))?
+                        .unwrap_or_else(|| "system".to_string()),
+                );
+            }
             if role.is_none() {
                 eprintln!("service token refused (unknown token)");
             }
@@ -200,6 +289,12 @@ impl Flock {
                 self.owner_token_peer_check(env)?;
             }
         }
+        if let Some(label) = system_label.as_deref().filter(|_| role == "system") {
+            // In-process callers (no socket request) are trusted code, as for the owner role.
+            if self.socket_peer_ok().is_some() {
+                self.system_token_peer_check(env, label)?;
+            }
+        }
         self.with_caller(|state| {
             state.role = Some(role.clone());
             state.role_pane = self_pane_id.map(String::from);
@@ -235,9 +330,16 @@ impl Flock {
         *last = Some(call);
     }
 
-    fn owner_token_peer_check(&self, env: &dyn PaneInfoEnv) -> Result<(), DunkError> {
-        let refuse_peer =
-            || refuse("owner token refused: peer identity or pane authority unavailable");
+    /// Where a socket caller's process sits relative to the listed panes: its verified
+    /// ancestry chain and every listed pane whose root process is in that chain. Fails with
+    /// `refuse_peer()` whenever the answer cannot be established: no verified socket peer, a
+    /// dead or changing process, an unreadable pane root, an empty pane listing, or a tmux
+    /// server in the ancestry that the configured listing does not account for.
+    fn peer_place(
+        &self,
+        env: &dyn PaneInfoEnv,
+        refuse_peer: &dyn Fn() -> DunkError,
+    ) -> Result<PeerPlace, DunkError> {
         if self.socket_peer_ok() != Some(true) {
             return Err(refuse_peer());
         }
@@ -303,7 +405,7 @@ impl Flock {
                 return Err(refuse_peer());
             }
             if ancestry.contains(&root) {
-                matched.push((id, root));
+                matched.push((id.to_string(), root));
             }
         }
         // A private or omitted tmux server must not be mistaken for a detached
@@ -325,6 +427,83 @@ impl Flock {
                 return Err(refuse_peer());
             }
         }
+        Ok(PeerPlace {
+            first,
+            start: start.to_string(),
+            chain,
+            matched,
+        })
+    }
+
+    /// t4782: where a system-token caller connects from. The system token is a file readable by
+    /// the daemon's Unix user, so the token alone does not show that the caller is one of the
+    /// daemon's own services. Like the owner-token check, this is not a boundary against a
+    /// determined same-user process; it stops the token being used casually from a lane.
+    ///
+    /// * a `dunkingsheep-*.service` unit (the timers): accepted, without needing the pane
+    ///   listing, so the watchdog still delivers when the terminal backend is down;
+    /// * outside every listed pane and not such a unit: REFUSED;
+    /// * inside a pane the owner listed for this token label: accepted;
+    /// * inside any other pane, or a place that cannot be established: accepted for this
+    ///   release with a warning that names the label and the pane, never the token.
+    fn system_token_peer_check(&self, env: &dyn PaneInfoEnv, label: &str) -> Result<(), DunkError> {
+        let unknown = || refuse("system token refused: peer identity unavailable");
+        let verified_unit = || -> Option<String> {
+            if self.socket_peer_ok() != Some(true) {
+                return None;
+            }
+            let caller = self.current_caller()?;
+            let pid = caller
+                .get("pid")
+                .and_then(Value::as_i64)
+                .filter(|p| *p > 1)?;
+            let start = caller.get("start").and_then(Value::as_str)?;
+            if !crate::proc::process_alive(pid, Some(start)) {
+                return None;
+            }
+            let unit =
+                unit_of_cgroup(&std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?)?;
+            // The pid must still be the same process after the read.
+            crate::proc::process_alive(pid, Some(start)).then_some(unit)
+        };
+        let peer = match verified_unit().filter(|unit| is_system_unit(unit)) {
+            Some(unit) => SystemPeer::Unit(unit),
+            None => match self.peer_place(env, &unknown) {
+                Ok(place) if place.matched.is_empty() => SystemPeer::Detached,
+                Ok(place) => {
+                    SystemPeer::Panes(place.matched.into_iter().map(|(pane, _)| pane).collect())
+                }
+                Err(_) => SystemPeer::Unknown,
+            },
+        };
+        let allowed = self
+            .with_roles(|roles, _| Ok(roles.system_token_panes(label)))
+            .unwrap_or_default();
+        match system_token_verdict(label, &peer, &allowed) {
+            SystemTokenVerdict::Accept => Ok(()),
+            SystemTokenVerdict::Warn(line) => {
+                eprintln!("{line}");
+                Ok(())
+            }
+            SystemTokenVerdict::Refuse(line) => {
+                eprintln!("{line}");
+                Err(refuse(
+                    "system token refused: the caller is not a dunkingsheep service unit",
+                ))
+            }
+        }
+    }
+
+    fn owner_token_peer_check(&self, env: &dyn PaneInfoEnv) -> Result<(), DunkError> {
+        let refuse_peer =
+            || refuse("owner token refused: peer identity or pane authority unavailable");
+        let PeerPlace {
+            first,
+            start,
+            chain,
+            matched,
+        } = self.peer_place(env, &refuse_peer)?;
+        let start = start.as_str();
         if matched.is_empty() {
             // Legacy detached owner compatibility: still accepted, now on the record.
             self.audit_detached_owner(&chain);
@@ -333,7 +512,7 @@ impl Flock {
         if matched.len() != 1 {
             return Err(refuse_peer());
         }
-        let (pane, root) = matched[0];
+        let (pane, root) = (matched[0].0.as_str(), matched[0].1);
         let entry = self
             .with_roles(|roles, _| roles.entry(pane))?
             .ok_or_else(refuse_peer)?;
