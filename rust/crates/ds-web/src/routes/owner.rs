@@ -163,9 +163,11 @@ async fn api_owner_send(
     Extension(scheme): Extension<RequestScheme>,
     request: Request,
 ) -> Response {
-    if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return response.into_response();
+    let identity = match authenticate(auth.as_ref(), request.headers(), scheme).await {
+        Ok(identity) => identity,
+        Err(response) => return response.into_response(),
     };
+    let human = matches!(identity, Identity::Owner);
 
     let body_bytes = match to_bytes(request.into_body(), usize::MAX).await {
         Ok(body) => body,
@@ -211,11 +213,30 @@ async fn api_owner_send(
         .filter(|value| is_truthy(value))
         .map(python_string)
         .filter(|value| !value.is_empty());
+    let parent = match body.get("parent_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(id)) if ds_core::inbox::valid_message_id(id) => Some(id.clone()),
+        _ => return detail_response(StatusCode::BAD_REQUEST, "invalid parent message ID".into()),
+    };
+    if parent.is_some() && !human {
+        return detail_response(
+            StatusCode::FORBIDDEN,
+            "replies require an owner session".into(),
+        );
+    }
+    let mut ingest_args = json!({"body":text,"transport":"web","external_id":external_id});
+    if let Some(parent) = &parent {
+        ingest_args["parent_id"] = json!(parent);
+    }
     let ingested = match state
         .backend
         .rpc(
-            "owner_ingest",
-            json!({"body": text, "transport": "web", "external_id": external_id}),
+            if human {
+                "owner_ingest_thread"
+            } else {
+                "owner_ingest"
+            },
+            ingest_args,
         )
         .await
     {
@@ -248,6 +269,31 @@ async fn api_owner_send(
         "note": "Recorded in the owner mailbox. Stored is not read: the desk has not seen it until it answers."
     });
 
+    if human {
+        let thread = &ingested["thread"];
+        if !message_id
+            .as_str()
+            .is_some_and(ds_core::inbox::valid_message_id)
+            || parent.is_none() && thread["root_id"] != message_id
+            || thread["thread_version"] != 1
+            || !thread["root_id"]
+                .as_str()
+                .is_some_and(ds_core::inbox::valid_message_id)
+            || thread["conversation_kind"] != "human"
+            || thread["sender_kind"] != "human"
+            || thread["parent_id"] != json!(parent)
+        {
+            return detail_response(
+                StatusCode::BAD_GATEWAY,
+                "The message receipt could not be verified. Check your inbox before sending again."
+                    .into(),
+            );
+        }
+        result["thread"] = thread.clone();
+        if thread["recipient_route_kind"] == "lane" {
+            return Json(result).into_response();
+        }
+    }
     let pane = desk_pane(state.backend.as_ref()).await.unwrap_or_default();
     let Some(pane) = pane else {
         result["notify"] = json!({
@@ -678,6 +724,11 @@ async fn owner_thread(
                                 "root_id",
                                 "conversation_kind",
                                 "sender_kind",
+                                "unresolved_parent",
+                                "sender_route_kind",
+                                "sender_route_mailbox",
+                                "recipient_route_kind",
+                                "recipient_route_mailbox",
                             ] {
                                 item[field] = row[field].clone();
                             }
@@ -742,6 +793,9 @@ async fn owner_thread(
         result["next_before"] = json!(next_before);
         result["source_filter"] = json!(filter.name());
         result["include_internal"] = json!(filter.include_internal());
+        if matches!(filter.thread_view(), Some("human" | "vp")) {
+            result["view_revision"] = data["view_revision"].clone();
+        }
     }
     Ok(result)
 }
@@ -1262,6 +1316,10 @@ mod tests {
         }
     }
 
+    fn human_thread(_id: &str, parent: Option<&str>, root: &str) -> Value {
+        json!({"thread_version":1,"parent_id":parent,"root_id":root,"conversation_kind":"human","sender_kind":"human","recipient_route_kind":"vp"})
+    }
+
     struct FakeOwner {
         calls: Mutex<Vec<(String, Value)>>,
         replies: Mutex<HashMap<String, VecDeque<Result<Value, OwnerWebError>>>>,
@@ -1377,9 +1435,9 @@ mod tests {
 
     fn set_send_responses(backend: &FakeOwner, outcome: &str) {
         backend.reply(
-            "owner_ingest",
+            "owner_ingest_thread",
             json!({
-                "message": {"message_id": "i7"}, "duplicate": false
+                "thread":human_thread("i7",None,"i7"), "message": {"message_id": "i7"}, "duplicate": false
             }),
         );
         backend.reply(
@@ -1465,6 +1523,10 @@ mod tests {
     fn a_web_message_lands_in_the_owner_mailbox_and_is_typed_straight_to_the_desk() {
         let backend = Arc::new(FakeOwner::new());
         set_send_responses(&backend, "ok");
+        backend.reply(
+            "owner_ingest",
+            json!({"message":{"message_id":"i7"},"duplicate":false}),
+        );
         let auth = Arc::new(FakeAuth::accepting(Identity::Api));
         let mut request = request(
             "POST",
@@ -1601,7 +1663,10 @@ mod tests {
             let mut fake = FakeOwner::new();
             fake.channel = Some(json!({"id":"cos", "match":"desk", "pane":"%259"}));
             let backend = Arc::new(fake);
-            backend.reply("owner_ingest", json!({"message":{"message_id":"i7"}}));
+            backend.reply(
+                "owner_ingest_thread",
+                json!({"message":{"message_id":"i7"},"thread":human_thread("i7",None,"i7")}),
+            );
             let mut panes = vec![json!({"pane_id":"%133", "tab_label":"sn-desk"})];
             if live {
                 panes.push(json!({"pane_id":"%259", "tab_label":"sn-desk-terra"}));
@@ -1630,7 +1695,7 @@ mod tests {
                 assert!(!calls.iter().any(|(_, args)| args["target"] == "%133"));
             } else {
                 assert_eq!(body["notify"]["state"], "desk_offline");
-                assert_eq!(backend.methods(), ["owner_ingest", "list_panes"]);
+                assert_eq!(backend.methods(), ["owner_ingest_thread", "list_panes"]);
             }
         }
     }
@@ -1639,9 +1704,9 @@ mod tests {
     fn no_live_desk_still_stores_and_says_so() {
         let backend = Arc::new(FakeOwner::new());
         backend.reply(
-            "owner_ingest",
+            "owner_ingest_thread",
             json!({
-                "message": {"message_id": "i7"}, "duplicate": false
+                "thread":human_thread("i7",None,"i7"), "message": {"message_id": "i7"}, "duplicate": false
             }),
         );
         backend.reply("list_panes", json!({"panes": []}));
@@ -1655,7 +1720,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["outcome"], "stored");
         assert_eq!(body["notify"]["state"], "desk_offline");
-        assert_eq!(backend.methods(), ["owner_ingest", "list_panes"]);
+        assert_eq!(backend.methods(), ["owner_ingest_thread", "list_panes"]);
     }
 
     #[test]
@@ -1683,7 +1748,7 @@ mod tests {
         assert_eq!(
             backend.methods(),
             [
-                "owner_ingest",
+                "owner_ingest_thread",
                 "list_panes",
                 "delivery_capability",
                 "send_text",
@@ -2226,5 +2291,63 @@ mod tests {
             json!(["Agent-only", "Routine agent mail", "Scheduled check-in"])
         );
         assert_eq!(body["items"][0]["body"], "unchanged");
+    }
+
+    #[test]
+    fn thread_reply_uses_explicit_parent_and_recorded_lane_without_desk_nudge() {
+        let backend = Arc::new(FakeOwner::new());
+        let mut thread = human_thread("i9", Some("i8"), "i7");
+        thread["recipient_route_kind"] = json!("lane");
+        backend.reply(
+            "owner_ingest_thread",
+            json!({"message":{"message_id":"i9"},"thread":thread}),
+        );
+        let response=block_on(app(authorized(),backend.clone()).oneshot(request("POST","/api/owner-send",Some(json!({"text":"follow up","parent_id":"i8","root_id":"i999","sender_kind":"agent"}).to_string())))).unwrap();
+        let (status, body, _) = response_json(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["thread"]["root_id"], "i7");
+        assert_eq!(body["thread"]["parent_id"], "i8");
+        assert_eq!(backend.methods(), ["owner_ingest_thread"]);
+        let calls = backend.calls.lock().unwrap();
+        assert_eq!(
+            calls[0].1,
+            json!({"body":"follow up","transport":"web","external_id":null,"parent_id":"i8"})
+        );
+    }
+
+    #[test]
+    fn thread_reply_refuses_agent_api_and_unconfirmed_parent_receipts() {
+        let backend = Arc::new(FakeOwner::new());
+        let response = block_on(
+            app(
+                Arc::new(FakeAuth::accepting(Identity::Api)),
+                backend.clone(),
+            )
+            .oneshot(request(
+                "POST",
+                "/api/owner-send",
+                Some(json!({"text":"not human","parent_id":"i8"}).to_string()),
+            )),
+        )
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(backend.methods().is_empty());
+        for thread in [json!(null), human_thread("i9", Some("i999"), "i7")] {
+            backend.reply(
+                "owner_ingest_thread",
+                json!({"message":{"message_id":"i9"},"thread":thread}),
+            );
+            let response = block_on(app(authorized(), backend.clone()).oneshot(request(
+                "POST",
+                "/api/owner-send",
+                Some(json!({"text":"draft","parent_id":"i8"}).to_string()),
+            )))
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        }
+        assert_eq!(
+            backend.methods(),
+            ["owner_ingest_thread", "owner_ingest_thread"]
+        );
     }
 }

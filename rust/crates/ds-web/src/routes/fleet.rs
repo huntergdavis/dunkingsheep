@@ -355,9 +355,11 @@ async fn api_pane_inbox(
     Extension(scheme): Extension<RequestScheme>,
     request: Request,
 ) -> Response {
-    if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return response.into_response();
-    }
+    let identity = match authenticate(auth.as_ref(), request.headers(), scheme).await {
+        Ok(identity) => identity,
+        Err(response) => return response.into_response(),
+    };
+    let human = matches!(identity, Identity::Owner);
     let Ok(bytes) = to_bytes(request.into_body(), PANE_INBOX_BODY_LIMIT).await else {
         return detail(StatusCode::PAYLOAD_TOO_LARGE, "message too large");
     };
@@ -398,7 +400,11 @@ async fn api_pane_inbox(
     let stored = match state
         .rpc
         .rpc(
-            "inbox_send",
+            if human {
+                "inbox_send_human"
+            } else {
+                "inbox_send"
+            },
             json!({"to":pane,"body":message,"notify":true}),
         )
         .await
@@ -432,6 +438,7 @@ async fn api_pane_inbox(
         "state": stored["state"],
         "notified": stored["notified"] == true,
         "redirected": stored["redirected"],
+        "thread": stored["thread"],
         "note": "Stored in the lane's inbox. It has not been read until the lane opens its mail.",
     }))
     .into_response()

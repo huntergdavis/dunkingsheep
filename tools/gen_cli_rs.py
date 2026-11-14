@@ -37,6 +37,7 @@ def load_parser():
     # Inbox reads are compact by default in Rust; keep the archived parser
     # unchanged and generate an explicit opt-in for the previous task tail.
     inbox_actions = next(a for a in root.choices["inbox"]._actions if isinstance(a, argparse._SubParsersAction))
+    inbox_actions.choices["send"].add_argument("--reply-to", dest="parent_id", help="explicit versioned parent message ID")
     inbox_read = inbox_actions.choices["read"]
     next(a for a in inbox_read._actions if a.dest == "messages_only").help = (
         "omit task queues (the default; overrides --with-tasks)"

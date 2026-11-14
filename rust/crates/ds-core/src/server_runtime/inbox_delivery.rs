@@ -152,6 +152,7 @@ mod tests {
             transport: None,
             reply_to: None,
             external_id: None,
+            thread: None,
         };
         let first = store.send(&outgoing).unwrap();
         let second = store.send(&outgoing).unwrap();

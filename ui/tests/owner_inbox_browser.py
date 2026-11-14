@@ -71,7 +71,7 @@ def mock(route):
     else:
         value = {'ok': True}
     if path == '/api/owner-thread':
-        value.update({'source_filter': 'human_threads', 'include_internal': False})
+        value.update({'view_revision':0, 'source_filter': 'human_threads', 'include_internal': False})
         for row in value.get('items', []):
             row.update({'audience': None, 'conversation_source': 'human', 'mailbox': 'owner', 'thread_version': 1, 'parent_id': None, 'root_id': f"i{row['id']}", 'conversation_kind': 'human', 'sender_kind': 'human' if row.get('role') == 'owner' else 'agent'})
     route.fulfill(status=200, content_type='application/json', body=json.dumps(value))

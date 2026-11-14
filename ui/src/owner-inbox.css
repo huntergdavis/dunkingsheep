@@ -30,3 +30,7 @@
 
 .owner-inbox-views { display: flex; flex-wrap: wrap; gap: 8px; }
 .owner-inbox-views button[aria-pressed="true"] { border-color: var(--dash-accent); font-weight: 700; }
+
+.owner-thread-message { padding: 12px 0; border-bottom: 1px solid var(--dash-border); }
+.owner-thread-message h4 { margin: 0 0 8px; }
+form.inbox-compose { display: grid; gap: 10px; padding: 16px; margin-top: 16px; border: 1px solid var(--dash-border); }

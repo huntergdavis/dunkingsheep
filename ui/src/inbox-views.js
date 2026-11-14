@@ -13,6 +13,7 @@ export function validateInboxPage(data, viewName) {
   if (!view || !data || !Object.hasOwn(data, 'next_before') || data.source_filter !== viewName || data.include_internal !== false || !Array.isArray(data.items)) {
     throw new Error('This inbox view is unavailable. Try refreshing after the service is updated.');
   }
+  if (viewName !== 'historical' && (!Number.isSafeInteger(data.view_revision) || data.view_revision < 0)) throw new Error('This inbox revision could not be verified. Try refreshing.');
   for (const item of data.items) {
     const scoped = item.conversation_source === view.source && Object.hasOwn(item, 'audience') && (item.audience === null || item.audience === 'agent');
     const versioned = item.thread_version === 1 && item.conversation_kind === view.source && messageId(item.root_id) && (item.parent_id === null || messageId(item.parent_id)) && ['human', 'agent', 'system'].includes(item.sender_kind);

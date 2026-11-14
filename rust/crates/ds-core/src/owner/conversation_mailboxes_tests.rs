@@ -561,7 +561,7 @@ fn thread_views_use_recorded_kind_and_keep_every_legacy_shape_historical() {
         (&human, None, &human, "human", "human"),
         (&reply, Some(human.as_str()), &human, "human", "agent"),
         (&vp, None, &vp, "vp", "agent"),
-        (&private, None, &private, "human", "human"),
+        (&private, None, &private, "other", "agent"),
     ] {
         db.execute("INSERT INTO message_threads(message_id,thread_version,parent_id,root_id,conversation_kind,sender_kind) VALUES(?,1,?,?,?,?)",
             rusqlite::params![id,parent,root,kind,sender]).unwrap();

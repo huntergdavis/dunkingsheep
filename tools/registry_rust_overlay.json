@@ -866,6 +866,307 @@
      }
     ]
    ]
+  },
+  "inbox_send": {
+   "params": [
+    [
+     "attach",
+     {
+      "description": "Optional local file path(s) to attach, comma separated.",
+      "type": "string"
+     }
+    ],
+    [
+     "body",
+     {
+      "description": "The message. Any length.",
+      "type": "string"
+     }
+    ],
+    [
+     "notify",
+     {
+      "description": "Nudge the recipient's pane that mail arrived (default true).",
+      "type": "boolean"
+     }
+    ],
+    [
+     "subject",
+     {
+      "description": "Optional one-line summary.",
+      "type": "string"
+     }
+    ],
+    [
+     "system_sender",
+     {
+      "description": "Non-agent sender name (\"watchdog\" only); refused from any caller that has a pane.",
+      "type": "string"
+     }
+    ],
+    [
+     "to",
+     {
+      "description": "Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running.",
+      "type": "string"
+     }
+    ],
+    [
+     "parent_id",
+     {
+      "type": "string",
+      "description": "Explicit versioned parent ID; no inferred links."
+     }
+    ]
+   ]
+  },
+  "inbox_send_agent_only": {
+   "params": [
+    [
+     "attach",
+     {
+      "type": "string"
+     }
+    ],
+    [
+     "body",
+     {
+      "type": "string"
+     }
+    ],
+    [
+     "notify",
+     {
+      "type": "boolean"
+     }
+    ],
+    [
+     "subject",
+     {
+      "type": "string"
+     }
+    ],
+    [
+     "to",
+     {
+      "description": "Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running.",
+      "type": "string"
+     }
+    ],
+    [
+     "parent_id",
+     {
+      "type": "string",
+      "description": "Explicit versioned parent ID; no inferred links."
+     }
+    ]
+   ]
+  },
+  "inbox_send_human": {
+   "new": true,
+   "description": "Private authenticated human producer. Not exposed through MCP.",
+   "params": [
+    [
+     "attach",
+     {
+      "description": "Optional local file path(s) to attach, comma separated.",
+      "type": "string"
+     }
+    ],
+    [
+     "body",
+     {
+      "description": "The message. Any length.",
+      "type": "string"
+     }
+    ],
+    [
+     "notify",
+     {
+      "description": "Nudge the recipient's pane that mail arrived (default true).",
+      "type": "boolean"
+     }
+    ],
+    [
+     "subject",
+     {
+      "description": "Optional one-line summary.",
+      "type": "string"
+     }
+    ],
+    [
+     "system_sender",
+     {
+      "description": "Non-agent sender name (\"watchdog\" only); refused from any caller that has a pane.",
+      "type": "string"
+     }
+    ],
+    [
+     "to",
+     {
+      "description": "Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running.",
+      "type": "string"
+     }
+    ],
+    [
+     "parent_id",
+     {
+      "type": "string",
+      "description": "Explicit versioned parent ID; no inferred links."
+     }
+    ]
+   ],
+   "required": [
+    "to",
+    "body"
+   ],
+   "mcp_required": [
+    "to",
+    "body"
+   ],
+   "mcp": false,
+   "owner_only": false,
+   "roles": [
+    "web"
+   ]
+  },
+  "owner_ingest_thread": {
+   "new": true,
+   "description": "Private authenticated human producer. Not exposed through MCP.",
+   "params": [
+    [
+     "attach",
+     {
+      "description": "Local file paths to attach, comma separated.",
+      "type": "string"
+     }
+    ],
+    [
+     "body",
+     {
+      "description": "The question text.",
+      "type": "string"
+     }
+    ],
+    [
+     "external_id",
+     {
+      "description": "The transport's id for this message (dedupe key).",
+      "type": "string"
+     }
+    ],
+    [
+     "subject",
+     {
+      "description": "Optional one-line summary.",
+      "type": "string"
+     }
+    ],
+    [
+     "transport",
+     {
+      "description": "Where the question arrived.",
+      "enum": [
+       "web",
+       "telegram",
+       "report"
+      ],
+      "type": "string"
+     }
+    ],
+    [
+     "parent_id",
+     {
+      "type": "string",
+      "description": "Explicit versioned parent ID; no inferred links."
+     }
+    ],
+    [
+     "transport_channel",
+     {
+      "type": "string",
+      "description": "Authenticated transport coordinate."
+     }
+    ],
+    [
+     "transport_message_id",
+     {
+      "type": "string",
+      "description": "Authenticated transport coordinate."
+     }
+    ],
+    [
+     "parent_transport_id",
+     {
+      "type": "string",
+      "description": "Authenticated transport coordinate."
+     }
+    ]
+   ],
+   "required": [
+    "body",
+    "transport"
+   ],
+   "mcp_required": [
+    "body",
+    "transport"
+   ],
+   "mcp": false,
+   "owner_only": false,
+   "roles": [
+    "web",
+    "system"
+   ]
+  },
+  "owner_delivered_thread": {
+   "new": true,
+   "description": "Private authenticated bridge delivery receipt with external chunk IDs.",
+   "params": [
+    [
+     "message_id",
+     {
+      "type": "string"
+     }
+    ],
+    [
+     "transport",
+     {
+      "type": "string"
+     }
+    ],
+    [
+     "transport_channel",
+     {
+      "type": "string"
+     }
+    ],
+    [
+     "transport_message_ids",
+     {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     }
+    ]
+   ],
+   "required": [
+    "message_id",
+    "transport",
+    "transport_channel",
+    "transport_message_ids"
+   ],
+   "mcp_required": [
+    "message_id",
+    "transport",
+    "transport_channel",
+    "transport_message_ids"
+   ],
+   "mcp": false,
+   "owner_only": false,
+   "roles": [
+    "system"
+   ]
   }
  },
  "groups": {

@@ -72,7 +72,7 @@ impl Bot for FakeBot {
                 }
                 let chat = payload.get("chat_id").cloned().unwrap_or(Value::Null);
                 state.sent.push((chat, text));
-                Ok(json!({}))
+                Ok(json!({"message_id":state.sent.len()}))
             }
             "getUpdates" => {
                 state.poll_payloads.push(payload);
@@ -168,7 +168,7 @@ impl FakeDaemon {
             .collect()
     }
     pub fn receipts(&self) -> Vec<String> {
-        self.args_of("owner_delivered")
+        self.args_of("owner_delivered_thread")
             .iter()
             .map(|args| args["message_id"].as_str().unwrap_or("").to_string())
             .collect()
@@ -181,7 +181,7 @@ impl Daemon for FakeDaemon {
         state.calls.push((cmd.to_string(), args.clone()));
         match cmd {
             "owner_outbox" => Ok(json!({"messages": state.outbox.clone()})),
-            "owner_ingest" => {
+            "owner_ingest_thread" => {
                 if let Some(attachments) = args.get("attach").and_then(Value::as_array) {
                     for attachment in attachments {
                         if let Some(path) = attachment.as_str() {
@@ -335,7 +335,7 @@ const DESK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS messages (\
 pub fn text_update(update_id: i64, chat_id: i64, text: &str) -> Value {
     json!({
         "update_id": update_id,
-        "message": {"chat": {"id": chat_id, "type": "private"}, "text": text}
+        "message": {"message_id":update_id,"chat": {"id": chat_id, "type": "private"}, "text": text}
     })
 }
 

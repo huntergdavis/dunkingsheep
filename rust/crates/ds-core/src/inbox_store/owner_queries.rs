@@ -21,6 +21,7 @@ use super::{
 enum ConversationVisibility {
     Legacy { exclude_routine: bool },
     Filter(crate::owner::ConversationFilter),
+    ThreadParticipants(crate::owner::ConversationFilter),
 }
 
 fn required_transport(transport: Option<&str>, message: &str) -> Result<String, DunkError> {
@@ -118,16 +119,19 @@ impl Store {
                 [&question_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             ).optional().map_err(map_sqlite)?;
             let (mailbox, parent, transport) = question.ok_or_else(|| refuse(format!("no message with id {question_id:?}")))?;
-            if crate::inbox::normalise_mailbox(&mailbox) != OWNER_MAILBOX {
+            let scope:Option<String>=tx.query_row("SELECT conversation_kind FROM message_threads WHERE message_id=? AND thread_version=1",[&question_id],|r|r.get(0)).optional().map_err(map_sqlite)?;
+            let versioned=scope.is_some();
+            if versioned && scope.as_deref()!=Some("human"){return Err(refuse("owner reply requires a human conversation"));}
+            if !versioned && crate::inbox::normalise_mailbox(&mailbox) != OWNER_MAILBOX {
                 return Err(refuse(format!("{question_id} is not an {OWNER_MAILBOX} message (mailbox {})", py_repr(&mailbox))));
             }
-            if parent.as_deref().is_some_and(|id| !id.is_empty()) {
+            if !versioned && parent.as_deref().is_some_and(|id| !id.is_empty()) {
                 return Err(refuse(format!("{question_id} is itself a reply; answer the question it belongs to")));
             }
             let existing: Option<String> = tx.query_row(
                 "SELECT id FROM messages WHERE reply_to = ? ORDER BY created_at LIMIT 1", [&question_id], |row| row.get(0),
             ).optional().map_err(map_sqlite)?;
-            if let Some(id) = existing {
+            if let Some(id) = existing.filter(|_|!versioned) {
                 return Err(refuse(format!("{question_id} was already answered by {id}; one answer per question, so the latency metric has one edge")));
             }
             if body.trim().is_empty() { return Err(refuse("a reply needs a body")); }
@@ -135,9 +139,15 @@ impl Store {
             crate::inbox::check_sizes(body.len(), "", 0, 0).map_err(refuse)?;
             let id = next_message_id(&tx)?;
             let now = now_s();
+            let context=if versioned {
+                let mut context=super::ThreadWrite::root(super::ThreadKind::Human,if sender.is_some(){super::ThreadSender::Agent}else{super::ThreadSender::System});
+                context.parent_id=Some(question_id.clone());context.sender_route=super::ThreadRoute::Vp;context.recipient_route=super::ThreadRoute::Human;Some(context)
+            }else{None};
+            let prepared=context.as_ref().map(|context|super::threads::prepare(&tx,&id,context)).transpose()?;
             tx.execute("INSERT INTO messages (id, mailbox, mailbox_label, pane_id, sender, subject, body, state, created_at, transport, reply_to, external_id) VALUES (?, ?, ?, NULL, ?, NULL, ?, 'queued', ?, ?, ?, NULL)",
                 params![id, OWNER_MAILBOX, OWNER_MAILBOX, sender, body, now, transport, question_id]).map_err(map_sqlite)?;
             tx.execute("UPDATE messages SET state = 'acked', acked_at = ?, read_at = COALESCE(read_at, ?) WHERE id = ? AND state IN ('queued', 'read')", params![now, now, question_id]).map_err(map_sqlite)?;
+            if let (Some(prepared),Some(context))=(&prepared,&context){super::threads::record(&tx,&id,prepared,context)?;}
             let message = full_message(&tx, &id)?.ok_or_else(|| refuse("inserted owner answer missing"))?;
             tx.commit().map_err(map_sqlite)?;
             Ok(message)
@@ -242,6 +252,28 @@ impl Store {
         self.conversation_rows(mailboxes, Some(limit), None, visibility, Some(before_id))
     }
 
+    /// Only the already-authorized owner conversation service calls this participant view.
+    pub(crate) fn conversation_thread_cursor(
+        &self,
+        limit: i64,
+        before_id: Option<&str>,
+        filter: crate::owner::ConversationFilter,
+    ) -> Result<Vec<Value>, DunkError> {
+        if !matches!(filter.thread_view(), Some("human" | "vp")) {
+            return Err(refuse("invalid participant view"));
+        }
+        if before_id.is_some_and(|id| !crate::inbox::valid_message_id(id)) {
+            return Err(refuse("invalid conversation cursor"));
+        }
+        self.conversation_rows(
+            &[],
+            Some(limit),
+            None,
+            ConversationVisibility::ThreadParticipants(filter),
+            Some(before_id),
+        )
+    }
+
     fn conversation_rows(
         &self,
         mailboxes: &[String],
@@ -257,7 +289,9 @@ impl Store {
             conditions.push(condition);
             box_params.extend(params);
         }
-        let condition = if conditions.is_empty() {
+        let condition = if matches!(visibility, ConversationVisibility::ThreadParticipants(_)) {
+            "1".to_string() // Only trusted, versioned human/VP participation below grants visibility.
+        } else if conditions.is_empty() {
             "0".to_string()
         } else {
             format!("({})", conditions.join(" OR "))
@@ -268,15 +302,22 @@ impl Store {
                 exclude_routine: true
             }
         );
-        let annotate_ambiguous =
-            exclude_routine || matches!(visibility, ConversationVisibility::Filter(_));
+        let annotate_ambiguous = exclude_routine
+            || matches!(
+                visibility,
+                ConversationVisibility::Filter(_) | ConversationVisibility::ThreadParticipants(_)
+            );
         let thread_view = match visibility {
-            ConversationVisibility::Filter(filter) => filter.thread_view(),
+            ConversationVisibility::Filter(filter)
+            | ConversationVisibility::ThreadParticipants(filter) => filter.thread_view(),
             _ => None,
         };
         let columns = if thread_view.is_some() {
             super::threads::COLUMNS
-        } else if matches!(visibility, ConversationVisibility::Filter(_)) {
+        } else if matches!(
+            visibility,
+            ConversationVisibility::Filter(_) | ConversationVisibility::ThreadParticipants(_)
+        ) {
             "*, (SELECT audience FROM message_audiences WHERE message_id = messages.id) AS audience"
         } else {
             "*"
@@ -310,7 +351,8 @@ impl Store {
             );
         }
         let root_partition = match visibility {
-            ConversationVisibility::Filter(filter) => filter.root_partition(),
+            ConversationVisibility::Filter(filter)
+            | ConversationVisibility::ThreadParticipants(filter) => filter.root_partition(),
             _ => None,
         };
         if let Some(root) = root_partition {
@@ -322,7 +364,8 @@ impl Store {
             values.extend(params.into_iter().map(SqlValue::Text));
         }
         match visibility {
-            ConversationVisibility::Filter(filter) => {
+            ConversationVisibility::Filter(filter)
+            | ConversationVisibility::ThreadParticipants(filter) => {
                 // Only recorded audience metadata classifies mail; filter before LIMIT/cursor.
                 // Versioned routing is authoritative; audience is not a view predicate.
                 if filter.thread_view().is_none() {
@@ -513,7 +556,26 @@ impl Store {
         transport: Option<&str>,
         external_id: Option<&str>,
     ) -> Result<Message, DunkError> {
+        self.mark_delivered_with_refs(message_id, transport, external_id, Vec::new())
+    }
+
+    pub fn mark_delivered_with_refs(
+        &self,
+        message_id: &str,
+        transport: Option<&str>,
+        external_id: Option<&str>,
+        references: Vec<super::ThreadTransportRef>,
+    ) -> Result<Message, DunkError> {
         let transport = required_transport(transport, "a delivery receipt needs a transport")?;
+        if references.len() > 100 {
+            return Err(refuse("too many transport receipts"));
+        }
+        if references
+            .iter()
+            .any(|r| r.transport != transport || r.parent_external_id.is_some())
+        {
+            return Err(refuse("receipt transport mismatch"));
+        }
         let message_id = message_id.to_string();
         let external_id = external_id.filter(|id| !id.is_empty()).map(str::to_string);
         let receipt_transport = transport.clone();
@@ -547,6 +609,9 @@ impl Store {
                 return Err(refuse(format!(
                     "{message_id} belongs to transport {actual}, not {receipt_transport}"
                 )));
+            }
+            for reference in &references {
+                super::threads::record_transport(&transaction, &message_id, reference)?;
             }
             if delivered_at.is_none() {
                 transaction

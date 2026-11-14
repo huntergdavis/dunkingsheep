@@ -39,7 +39,7 @@ pub struct Group {
     pub actions: &'static [(&'static str, &'static str)],
 }
 
-/// Every command the daemon serves (135 at generation time).
+/// Every command the daemon serves (138 at generation time).
 pub static COMMANDS: &[Command] = &[
     Command {
         name: "add_dunk",
@@ -394,7 +394,7 @@ pub static COMMANDS: &[Command] = &[
     Command {
         name: "inbox_send",
         description: "Put a message in another agent's inbox. Nothing is typed into their terminal, so it cannot collide with what a human is writing, cannot stick half-sent, and has no size limit. By default the recipient gets one short line telling them they have mail. Prefer this over send_text for anything going to another agent. Returns a stable message_id.",
-        params: &[Param { name: "to", schema: "{\"type\":\"string\",\"description\":\"Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running.\"}" }, Param { name: "body", schema: "{\"type\":\"string\",\"description\":\"The message. Any length.\"}" }, Param { name: "subject", schema: "{\"type\":\"string\",\"description\":\"Optional one-line summary.\"}" }, Param { name: "attach", schema: "{\"type\":\"string\",\"description\":\"Optional local file path(s) to attach, comma separated.\"}" }, Param { name: "system_sender", schema: "{\"type\":\"string\",\"description\":\"Non-agent sender name (\\\"watchdog\\\" only); refused from any caller that has a pane.\"}" }, Param { name: "notify", schema: "{\"type\":\"boolean\",\"description\":\"Nudge the recipient's pane that mail arrived (default true).\"}" }],
+        params: &[Param { name: "attach", schema: "{\"description\":\"Optional local file path(s) to attach, comma separated.\",\"type\":\"string\"}" }, Param { name: "body", schema: "{\"description\":\"The message. Any length.\",\"type\":\"string\"}" }, Param { name: "notify", schema: "{\"description\":\"Nudge the recipient's pane that mail arrived (default true).\",\"type\":\"boolean\"}" }, Param { name: "subject", schema: "{\"description\":\"Optional one-line summary.\",\"type\":\"string\"}" }, Param { name: "system_sender", schema: "{\"description\":\"Non-agent sender name (\\\"watchdog\\\" only); refused from any caller that has a pane.\",\"type\":\"string\"}" }, Param { name: "to", schema: "{\"description\":\"Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running.\",\"type\":\"string\"}" }, Param { name: "parent_id", schema: "{\"type\":\"string\",\"description\":\"Explicit versioned parent ID; no inferred links.\"}" }],
         dispatch_required: &["to", "body"],
         required: &["to", "body"],
         mcp: true,
@@ -404,12 +404,22 @@ pub static COMMANDS: &[Command] = &[
     Command {
         name: "inbox_send_agent_only",
         description: "Send agent coordination with an explicit audience, excluded from the human owner conversation.",
-        params: &[Param { name: "to", schema: "{\"type\":\"string\",\"description\":\"Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running.\"}" }, Param { name: "body", schema: "{\"type\":\"string\"}" }, Param { name: "subject", schema: "{\"type\":\"string\"}" }, Param { name: "attach", schema: "{\"type\":\"string\"}" }, Param { name: "notify", schema: "{\"type\":\"boolean\"}" }],
+        params: &[Param { name: "attach", schema: "{\"type\":\"string\"}" }, Param { name: "body", schema: "{\"type\":\"string\"}" }, Param { name: "notify", schema: "{\"type\":\"boolean\"}" }, Param { name: "subject", schema: "{\"type\":\"string\"}" }, Param { name: "to", schema: "{\"description\":\"Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running.\",\"type\":\"string\"}" }, Param { name: "parent_id", schema: "{\"type\":\"string\",\"description\":\"Explicit versioned parent ID; no inferred links.\"}" }],
         dispatch_required: &["to", "body"],
         required: &["to", "body"],
         mcp: true,
         owner_only: false,
         roles: &["owner", "system", "web", "planner", "worker", "reviewer"],
+    },
+    Command {
+        name: "inbox_send_human",
+        description: "Private authenticated human producer. Not exposed through MCP.",
+        params: &[Param { name: "attach", schema: "{\"description\":\"Optional local file path(s) to attach, comma separated.\",\"type\":\"string\"}" }, Param { name: "body", schema: "{\"description\":\"The message. Any length.\",\"type\":\"string\"}" }, Param { name: "notify", schema: "{\"description\":\"Nudge the recipient's pane that mail arrived (default true).\",\"type\":\"boolean\"}" }, Param { name: "subject", schema: "{\"description\":\"Optional one-line summary.\",\"type\":\"string\"}" }, Param { name: "system_sender", schema: "{\"description\":\"Non-agent sender name (\\\"watchdog\\\" only); refused from any caller that has a pane.\",\"type\":\"string\"}" }, Param { name: "to", schema: "{\"description\":\"Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running.\",\"type\":\"string\"}" }, Param { name: "parent_id", schema: "{\"type\":\"string\",\"description\":\"Explicit versioned parent ID; no inferred links.\"}" }],
+        dispatch_required: &["to", "body"],
+        required: &["to", "body"],
+        mcp: false,
+        owner_only: false,
+        roles: &["web"],
     },
     Command {
         name: "inbox_stats",
@@ -622,6 +632,16 @@ pub static COMMANDS: &[Command] = &[
         roles: &["owner", "system", "web"],
     },
     Command {
+        name: "owner_delivered_thread",
+        description: "Private authenticated bridge delivery receipt with external chunk IDs.",
+        params: &[Param { name: "message_id", schema: "{\"type\":\"string\"}" }, Param { name: "transport", schema: "{\"type\":\"string\"}" }, Param { name: "transport_channel", schema: "{\"type\":\"string\"}" }, Param { name: "transport_message_ids", schema: "{\"type\":\"array\",\"items\":{\"type\":\"string\"}}" }],
+        dispatch_required: &["message_id", "transport", "transport_channel", "transport_message_ids"],
+        required: &["message_id", "transport", "transport_channel", "transport_message_ids"],
+        mcp: false,
+        owner_only: false,
+        roles: &["system"],
+    },
+    Command {
         name: "owner_ingest",
         description: "Record one owner question that arrived on a transport (t594, the inbound half of FLAT_FLEET.md 7.2). A bridge does not keep its own store: the question lands in the one owner mailbox with `transport` set, and owner_reply answers it back the same way. `external_id` is the transport's own id (telegram:<update_id>), so a redelivered update returns the row it already produced instead of a second question. System, desk and owner only.",
         params: &[Param { name: "body", schema: "{\"type\":\"string\",\"description\":\"The question text.\"}" }, Param { name: "transport", schema: "{\"type\":\"string\",\"enum\":[\"web\",\"telegram\",\"report\"],\"description\":\"Where the question arrived.\"}" }, Param { name: "external_id", schema: "{\"type\":\"string\",\"description\":\"The transport's id for this message (dedupe key).\"}" }, Param { name: "subject", schema: "{\"type\":\"string\",\"description\":\"Optional one-line summary.\"}" }, Param { name: "attach", schema: "{\"type\":\"string\",\"description\":\"Local file paths to attach, comma separated.\"}" }],
@@ -630,6 +650,16 @@ pub static COMMANDS: &[Command] = &[
         mcp: true,
         owner_only: false,
         roles: &["owner", "system", "web"],
+    },
+    Command {
+        name: "owner_ingest_thread",
+        description: "Private authenticated human producer. Not exposed through MCP.",
+        params: &[Param { name: "attach", schema: "{\"description\":\"Local file paths to attach, comma separated.\",\"type\":\"string\"}" }, Param { name: "body", schema: "{\"description\":\"The question text.\",\"type\":\"string\"}" }, Param { name: "external_id", schema: "{\"description\":\"The transport's id for this message (dedupe key).\",\"type\":\"string\"}" }, Param { name: "subject", schema: "{\"description\":\"Optional one-line summary.\",\"type\":\"string\"}" }, Param { name: "transport", schema: "{\"description\":\"Where the question arrived.\",\"enum\":[\"web\",\"telegram\",\"report\"],\"type\":\"string\"}" }, Param { name: "parent_id", schema: "{\"type\":\"string\",\"description\":\"Explicit versioned parent ID; no inferred links.\"}" }, Param { name: "transport_channel", schema: "{\"type\":\"string\",\"description\":\"Authenticated transport coordinate.\"}" }, Param { name: "transport_message_id", schema: "{\"type\":\"string\",\"description\":\"Authenticated transport coordinate.\"}" }, Param { name: "parent_transport_id", schema: "{\"type\":\"string\",\"description\":\"Authenticated transport coordinate.\"}" }],
+        dispatch_required: &["body", "transport"],
+        required: &["body", "transport"],
+        mcp: false,
+        owner_only: false,
+        roles: &["web", "system"],
     },
     Command {
         name: "owner_outbox",

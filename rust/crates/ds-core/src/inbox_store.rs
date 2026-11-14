@@ -38,6 +38,7 @@ mod owner_handoff;
 mod owner_queries;
 mod owner_service;
 mod threads;
+pub use threads::{ThreadKind, ThreadRoute, ThreadSender, ThreadTransportRef, ThreadWrite};
 const _: () = assert!(MAX_BLOB_BYTES > 0);
 
 /// What `send` stores. Every field but `mailbox` and `body` is optional, as in the Python.
@@ -53,6 +54,8 @@ pub struct Outgoing<'a> {
     pub transport: Option<&'a str>,
     pub reply_to: Option<&'a str>,
     pub external_id: Option<&'a str>,
+    /// Trusted daemon-stamped lineage; ordinary network callers cannot choose it.
+    pub thread: Option<ThreadWrite>,
 }
 
 /// Fields for inserting or refreshing a digest message.
@@ -385,6 +388,7 @@ impl Store {
             context,
             false,
         )
+        .map(|(message, _)| message)
     }
 
     pub fn send_snapshot_wire(
@@ -400,6 +404,7 @@ impl Store {
             ErrorContext::default(),
             false,
         )
+        .map(|(message, _)| message)
     }
     pub(crate) fn send_snapshot_wire_agent_only(
         &self,
@@ -415,6 +420,26 @@ impl Store {
             ErrorContext::default(),
             agent_only,
         )
+        .map(|(message, _)| message)
+    }
+    /// New runtime writes return an atomic deduplication receipt with the message.
+    pub(crate) fn send_thread_snapshot_wire(
+        &self,
+        outgoing: &Outgoing,
+        subject: Option<&JsonValue>,
+        attachments: Option<&JsonValue>,
+        agent_only: bool,
+    ) -> Result<(Message, bool), DunkError> {
+        if outgoing.thread.is_none() {
+            return Err(refuse("thread write context is required"));
+        }
+        self.send_snapshot_wire_context(
+            outgoing,
+            subject,
+            attachments,
+            ErrorContext::default(),
+            agent_only,
+        )
     }
     fn send_snapshot_wire_context(
         &self,
@@ -423,7 +448,7 @@ impl Store {
         attachments: Option<&JsonValue>,
         context: ErrorContext,
         agent_only: bool,
-    ) -> Result<Message, DunkError> {
+    ) -> Result<(Message, bool), DunkError> {
         let mailbox = outgoing.mailbox.trim().to_string();
         if mailbox.is_empty() {
             return Err(refuse("a mailbox is required"));
@@ -452,11 +477,64 @@ impl Store {
             .external_id
             .filter(|id| !id.is_empty())
             .map(str::to_string);
+        let thread = outgoing.thread.clone();
         let db_path = self.writer.path().to_path_buf();
         self.writer.call(move |connection| {
             let map_sqlite = |error| context.sqlite(error, &db_path, "send_snapshot");
             let transaction = connection.transaction().map_err(map_sqlite)?;
+            if let Some(context) = &thread {
+                if let Some(existing) = threads::existing(
+                    &transaction,
+                    &mailbox,
+                    external_id.as_deref(),
+                    transport.as_deref(),
+                    context,
+                )? {
+                    let mut message = transaction
+                        .query_row(
+                            &format!("SELECT {FULL_COLUMNS} FROM messages WHERE id=?"),
+                            [&existing],
+                            |r| full_from_row(r, now_s()),
+                        )
+                        .map_err(map_sqlite)?;
+                    message.attachments =
+                        attachments_of_context(&transaction, &existing, &map_sqlite)?;
+                    transaction.commit().map_err(map_sqlite)?;
+                    return Ok((message, true));
+                }
+            }
             let message_id = next_message_id_context(&transaction, &map_sqlite)?;
+            let prepared = thread
+                .as_ref()
+                .map(|context| threads::prepare(&transaction, &message_id, context))
+                .transpose()?;
+            let actual_mailbox = prepared
+                .as_ref()
+                .map(|p| p.delivery_mailbox(&mailbox))
+                .unwrap_or_else(|| mailbox.clone());
+            let pane_id = if actual_mailbox != mailbox {
+                None
+            } else {
+                pane_id
+            };
+            let label = if actual_mailbox != mailbox {
+                actual_mailbox.clone()
+            } else {
+                label
+            };
+            let mailbox = actual_mailbox;
+            let reply_to = prepared
+                .as_ref()
+                .map(|p| p.legacy_parent())
+                .unwrap_or(reply_to);
+            let transport = if normalise_mailbox(&mailbox) == OWNER_MAILBOX && reply_to.is_some() {
+                prepared
+                    .as_ref()
+                    .and_then(|p| p.parent_transport.clone())
+                    .or(transport)
+            } else {
+                transport
+            };
             let created = now_s();
             transaction
                 .execute(
@@ -505,6 +583,9 @@ impl Store {
                     )
                     .map_err(map_sqlite)?;
             }
+            if let (Some(prepared), Some(context)) = (&prepared, &thread) {
+                threads::record(&transaction, &message_id, prepared, context)?;
+            }
             transaction.commit().map_err(map_sqlite)?;
             let mut message = connection
                 .query_row(
@@ -514,7 +595,7 @@ impl Store {
                 )
                 .map_err(map_sqlite)?;
             message.attachments = attachments_of_context(connection, &message_id, &map_sqlite)?;
-            Ok(message)
+            Ok((message, false))
         })
     }
 

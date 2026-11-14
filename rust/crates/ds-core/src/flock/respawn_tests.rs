@@ -525,6 +525,7 @@ fn unread_mail_and_count_errors_refuse_without_mutation() {
             transport: None,
             reply_to: None,
             external_id: None,
+            thread: None,
         })
         .unwrap();
     let (p, s) = f.original();

@@ -338,3 +338,17 @@ fn the_daemon_is_asked_for_the_telegram_outbox_only() {
     assert_eq!(asked.len(), 1);
     assert_eq!(asked[0]["transport"], json!("telegram"));
 }
+
+#[test]
+fn chunked_reply_receipt_records_every_external_message_id() {
+    let fixture = Fixture::new();
+    fixture.daemon.0.borrow_mut().outbox =
+        vec![outbox_row("i91", None, &"a".repeat(5000), Some("i90"))];
+    let mut bridge = fixture.bridge();
+    let mut config = config_with(json!({}));
+    bridge.send_owner_outbox(&mut config).unwrap();
+    let receipts = fixture.daemon.args_of("owner_delivered_thread");
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0]["transport_channel"], "42");
+    assert_eq!(receipts[0]["transport_message_ids"], json!(["1", "2"]));
+}

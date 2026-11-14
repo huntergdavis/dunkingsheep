@@ -355,7 +355,11 @@ impl<'a> OwnerConversations<'a> {
         // Routine lane mail (review verdicts and notes, marked by subject) is kept in storage and listed nowhere
         // here (t3592). Owner decisions, owner blockers, owner replies and unmarked legacy mail stay listed.
         let mut messages: Vec<Value> = if let Some(before_id) = cursor {
-            store.conversation_filtered_cursor(&mailboxes, limit, before_id, filter)?
+            if matches!(filter.thread_view(), Some("human" | "vp")) {
+                store.conversation_thread_cursor(limit, before_id, filter)?
+            } else {
+                store.conversation_filtered_cursor(&mailboxes, limit, before_id, filter)?
+            }
         } else {
             store.conversation_across_visible(&mailboxes, Some(limit), before)?
         };
@@ -430,6 +434,7 @@ impl<'a> OwnerConversations<'a> {
             transport: Some(&transport),
             reply_to: None,
             external_id: args.external_id,
+            thread: None,
         };
         let message_id = store.send(&outgoing)?;
         let message = store.get_message(&message_id)?;
@@ -488,6 +493,53 @@ impl<'a> OwnerConversations<'a> {
         Ok(Ingested {
             message,
             duplicate: false,
+            transport,
+        })
+    }
+
+    /// New authenticated ingress; legacy callers keep their original, unversioned format.
+    pub fn ingest_lineage_wire(
+        &self,
+        args: OwnerIngestWire<'_>,
+        mut thread: crate::inbox_store::ThreadWrite,
+        self_pane_id: Option<&str>,
+    ) -> Result<Ingested, DunkError> {
+        self.authorised_role(self_pane_id)?;
+        let transport_value = args.transport.filter(|v| !v.is_null()).map(python_str);
+        let transport = validate_transport(transport_value.as_deref())
+            .map_err(DunkError::Refused)?
+            .ok_or_else(|| {
+                DunkError::Refused("an ingested owner question needs a transport".into())
+            })?;
+        if thread
+            .transport_ref
+            .as_ref()
+            .is_some_and(|r| r.transport != transport)
+        {
+            return Err(DunkError::Refused(
+                "transport reference does not match ingress".into(),
+            ));
+        }
+        let external = args.external_id.filter(|v| value_truthy(v)).map(python_str);
+        let body = args.body.map(python_str).unwrap_or_default();
+        thread.dedupe_external_id = true;
+        let (message, duplicate) = self.inbox_store()?.send_thread_snapshot_wire(
+            &Outgoing {
+                mailbox: OWNER_MAILBOX,
+                body: Some(&body),
+                transport: Some(&transport),
+                external_id: external.as_deref(),
+                thread: Some(thread),
+                ..Default::default()
+            },
+            args.subject,
+            args.attachments,
+            false,
+        )?;
+        self.flock.invalidate_view();
+        Ok(Ingested {
+            message,
+            duplicate,
             transport,
         })
     }
@@ -567,6 +619,7 @@ impl<'a> OwnerConversations<'a> {
             transport: Some(transport),
             reply_to: None,
             external_id: external_id.as_deref(),
+            thread: None,
         };
         let message_id = store.send(&outgoing)?;
         let message = store.get_message(&message_id)?;

@@ -63,7 +63,8 @@
                   "id": 42,
                   "type": "private"
                 },
-                "text": "/pair PAIRCODE"
+                "text": "/pair PAIRCODE",
+                "message_id": 1
               },
               "update_id": 1
             }
@@ -126,7 +127,8 @@
                   "id": 42,
                   "type": "private"
                 },
-                "text": "/pair NOPE"
+                "text": "/pair NOPE",
+                "message_id": 1
               },
               "update_id": 1
             }
@@ -189,7 +191,8 @@
                   "id": 42,
                   "type": "private"
                 },
-                "text": "hello there"
+                "text": "hello there",
+                "message_id": 1
               },
               "update_id": 1
             }
@@ -263,7 +266,8 @@
                   "id": 42,
                   "type": "group"
                 },
-                "text": "hi"
+                "text": "hi",
+                "message_id": 1
               },
               "update_id": 1
             }
@@ -276,7 +280,8 @@
                   "id": 99,
                   "type": "private"
                 },
-                "text": "hi"
+                "text": "hi",
+                "message_id": 2
               },
               "update_id": 2
             }
@@ -364,12 +369,30 @@
                   "id": 42,
                   "type": "private"
                 },
-                "text": "is the desk up?"
+                "text": "is the desk up?",
+                "message_id": 7
               },
               "update_id": 7
             }
           }
-        ]
+        ],
+        "port": {
+          "daemon_log": [
+            [
+              "owner_ingest_thread",
+              {
+                "body": "is the desk up?",
+                "external_id": "telegram:7",
+                "subject": null,
+                "transport": "telegram",
+                "transport_channel": "42",
+                "transport_message_id": "7",
+                "parent_transport_id": null
+              }
+            ]
+          ],
+          "lineage_difference": "t5026: private producer/receipt operations carry exact transport chat/message coordinates; frozen Python output stays in expected."
+        }
       },
       "name": "text_question_is_recorded_and_acknowledged"
     },
@@ -452,12 +475,30 @@
                   "id": 42,
                   "type": "private"
                 },
-                "text": "again"
+                "text": "again",
+                "message_id": 7
               },
               "update_id": 7
             }
           }
-        ]
+        ],
+        "port": {
+          "daemon_log": [
+            [
+              "owner_ingest_thread",
+              {
+                "body": "again",
+                "external_id": "telegram:7",
+                "subject": null,
+                "transport": "telegram",
+                "transport_channel": "42",
+                "transport_message_id": "7",
+                "parent_transport_id": null
+              }
+            ]
+          ],
+          "lineage_difference": "t5026: private producer/receipt operations carry exact transport chat/message coordinates; frozen Python output stays in expected."
+        }
       },
       "name": "redelivered_question_says_already_recorded"
     },
@@ -555,7 +596,7 @@
           ],
           "daemon_log": [
             [
-              "owner_ingest",
+              "owner_ingest_thread",
               {
                 "attach": [
                   "telegram-photo.jpg"
@@ -563,11 +604,15 @@
                 "body": "look at this",
                 "external_id": "telegram:20",
                 "subject": null,
-                "transport": "telegram"
+                "transport": "telegram",
+                "transport_channel": "42",
+                "transport_message_id": "20",
+                "parent_transport_id": null
               }
             ]
           ],
-          "desk_attachments": []
+          "desk_attachments": [],
+          "lineage_difference": "t5026: private producer/receipt operations carry exact transport chat/message coordinates; frozen Python output stays in expected."
         },
         "registry": [
           {
@@ -599,7 +644,8 @@
                     "file_id": "photo-large",
                     "file_size": 12
                   }
-                ]
+                ],
+                "message_id": 20
               },
               "update_id": 20
             }
@@ -697,7 +743,7 @@
           ],
           "daemon_log": [
             [
-              "owner_ingest",
+              "owner_ingest_thread",
               {
                 "attach": [
                   "report_.txt"
@@ -705,11 +751,15 @@
                 "body": "please review",
                 "external_id": "telegram:21",
                 "subject": null,
-                "transport": "telegram"
+                "transport": "telegram",
+                "transport_channel": "42",
+                "transport_message_id": "21",
+                "parent_transport_id": null
               }
             ]
           ],
-          "desk_attachments": []
+          "desk_attachments": [],
+          "lineage_difference": "t5026: private producer/receipt operations carry exact transport chat/message coordinates; frozen Python output stays in expected."
         },
         "registry": [
           {
@@ -737,7 +787,8 @@
                   "file_name": "../../report?.txt",
                   "file_size": 13,
                   "mime_type": "text/plain"
-                }
+                },
+                "message_id": 21
               },
               "update_id": 21
             }
@@ -813,7 +864,8 @@
                   "file_id": "too-large",
                   "file_name": "large.bin",
                   "file_size": 20971521
-                }
+                },
+                "message_id": 22
               },
               "update_id": 22
             }
@@ -895,7 +947,8 @@
                   "id": 42,
                   "type": "private"
                 },
-                "text": "/start"
+                "text": "/start",
+                "message_id": 3
               },
               "update_id": 3
             }
@@ -908,7 +961,8 @@
                   "id": 42,
                   "type": "private"
                 },
-                "text": " /help "
+                "text": " /help ",
+                "message_id": 4
               },
               "update_id": 4
             }
@@ -979,7 +1033,8 @@
                   "id": 42,
                   "type": "private"
                 },
-                "sticker": {}
+                "sticker": {},
+                "message_id": 5
               },
               "update_id": 5
             }
@@ -1069,12 +1124,30 @@
                   "id": 42,
                   "type": "private"
                 },
-                "text": "hello"
+                "text": "hello",
+                "message_id": 8
               },
               "update_id": 8
             }
           }
-        ]
+        ],
+        "port": {
+          "daemon_log": [
+            [
+              "owner_ingest_thread",
+              {
+                "body": "hello",
+                "external_id": "telegram:8",
+                "subject": null,
+                "transport": "telegram",
+                "transport_channel": "42",
+                "transport_message_id": "8",
+                "parent_transport_id": null
+              }
+            ]
+          ],
+          "lineage_difference": "t5026: private producer/receipt operations carry exact transport chat/message coordinates; frozen Python output stays in expected."
+        }
       },
       "name": "routing_file_names_the_desk"
     },
@@ -1138,7 +1211,8 @@
                   "id": 42,
                   "type": "private"
                 },
-                "text": "hi"
+                "text": "hi",
+                "message_id": 1
               },
               "update_id": 1
             }
@@ -1206,7 +1280,8 @@
                   "id": 42,
                   "type": "private"
                 },
-                "text": "hi"
+                "text": "hi",
+                "message_id": 1
               },
               "update_id": 1
             }
@@ -1274,7 +1349,8 @@
                   "id": 42,
                   "type": "private"
                 },
-                "text": "hi"
+                "text": "hi",
+                "message_id": 1
               },
               "update_id": 1
             }
@@ -1438,7 +1514,29 @@
           {
             "op": "send_owner_outbox"
           }
-        ]
+        ],
+        "port": {
+          "daemon_log": [
+            [
+              "owner_outbox",
+              {
+                "transport": "telegram"
+              }
+            ],
+            [
+              "owner_delivered_thread",
+              {
+                "message_id": "m9",
+                "transport": "telegram",
+                "transport_channel": "42",
+                "transport_message_ids": [
+                  "1"
+                ]
+              }
+            ]
+          ],
+          "lineage_difference": "t5026: private producer/receipt operations carry exact transport chat/message coordinates; frozen Python output stays in expected."
+        }
       },
       "name": "a_telegram_reply_is_sent_and_receipted"
     },
@@ -1538,7 +1636,29 @@
           {
             "op": "send_owner_outbox"
           }
-        ]
+        ],
+        "port": {
+          "daemon_log": [
+            [
+              "owner_outbox",
+              {
+                "transport": "telegram"
+              }
+            ],
+            [
+              "owner_delivered_thread",
+              {
+                "message_id": "i90",
+                "transport": "telegram",
+                "transport_channel": "42",
+                "transport_message_ids": [
+                  "1"
+                ]
+              }
+            ]
+          ],
+          "lineage_difference": "t5026: private producer/receipt operations carry exact transport chat/message coordinates; frozen Python output stays in expected."
+        }
       },
       "name": "mailbox_page_is_sent_once_and_receipted"
     },
@@ -1699,7 +1819,51 @@
           {
             "op": "send_owner_outbox"
           }
-        ]
+        ],
+        "port": {
+          "daemon_log": [
+            [
+              "owner_outbox",
+              {
+                "transport": "telegram"
+              }
+            ],
+            [
+              "owner_delivered_thread",
+              {
+                "message_id": "i1",
+                "transport": "telegram",
+                "transport_channel": "42",
+                "transport_message_ids": [
+                  "1"
+                ]
+              }
+            ],
+            [
+              "owner_delivered_thread",
+              {
+                "message_id": "i2",
+                "transport": "telegram",
+                "transport_channel": "42",
+                "transport_message_ids": [
+                  "2"
+                ]
+              }
+            ],
+            [
+              "owner_delivered_thread",
+              {
+                "message_id": "i3",
+                "transport": "telegram",
+                "transport_channel": "42",
+                "transport_message_ids": [
+                  "3"
+                ]
+              }
+            ]
+          ],
+          "lineage_difference": "t5026: private producer/receipt operations carry exact transport chat/message coordinates; frozen Python output stays in expected."
+        }
       },
       "name": "mailbox_pages_share_the_budget"
     },
@@ -1799,7 +1963,29 @@
           {
             "op": "send_owner_outbox"
           }
-        ]
+        ],
+        "port": {
+          "daemon_log": [
+            [
+              "owner_outbox",
+              {
+                "transport": "telegram"
+              }
+            ],
+            [
+              "owner_delivered_thread",
+              {
+                "message_id": "i90",
+                "transport": "telegram",
+                "transport_channel": "42",
+                "transport_message_ids": [
+                  "1"
+                ]
+              }
+            ]
+          ],
+          "lineage_difference": "t5026: private producer/receipt operations carry exact transport chat/message coordinates; frozen Python output stays in expected."
+        }
       },
       "name": "mailbox_page_does_not_move_the_legacy_watermark"
     },
@@ -3325,7 +3511,8 @@
                       "id": 42,
                       "type": "private"
                     },
-                    "text": "one"
+                    "text": "one",
+                    "message_id": 7
                   },
                   "update_id": 7
                 },
@@ -3335,7 +3522,8 @@
                       "id": 42,
                       "type": "private"
                     },
-                    "text": "two"
+                    "text": "two",
+                    "message_id": 8
                   },
                   "update_id": 8
                 }
@@ -3344,7 +3532,48 @@
             ],
             "op": "run"
           }
-        ]
+        ],
+        "port": {
+          "daemon_log": [
+            [
+              "owner_ingest_thread",
+              {
+                "body": "one",
+                "external_id": "telegram:7",
+                "subject": null,
+                "transport": "telegram",
+                "transport_channel": "42",
+                "transport_message_id": "7",
+                "parent_transport_id": null
+              }
+            ],
+            [
+              "owner_ingest_thread",
+              {
+                "body": "two",
+                "external_id": "telegram:8",
+                "subject": null,
+                "transport": "telegram",
+                "transport_channel": "42",
+                "transport_message_id": "8",
+                "parent_transport_id": null
+              }
+            ],
+            [
+              "owner_outbox",
+              {
+                "transport": "telegram"
+              }
+            ],
+            [
+              "owner_outbox",
+              {
+                "transport": "telegram"
+              }
+            ]
+          ],
+          "lineage_difference": "t5026: private producer/receipt operations carry exact transport chat/message coordinates; frozen Python output stays in expected."
+        }
       },
       "name": "poll_loop_processes_updates_in_order_and_saves_the_offset"
     },
@@ -3483,7 +3712,8 @@
                       "id": 42,
                       "type": "private"
                     },
-                    "text": "question"
+                    "text": "question",
+                    "message_id": 3
                   },
                   "update_id": 3
                 }
@@ -3491,7 +3721,41 @@
             ],
             "op": "run"
           }
-        ]
+        ],
+        "port": {
+          "daemon_log": [
+            [
+              "owner_ingest_thread",
+              {
+                "body": "question",
+                "external_id": "telegram:3",
+                "subject": null,
+                "transport": "telegram",
+                "transport_channel": "42",
+                "transport_message_id": "3",
+                "parent_transport_id": null
+              }
+            ],
+            [
+              "owner_outbox",
+              {
+                "transport": "telegram"
+              }
+            ],
+            [
+              "owner_delivered_thread",
+              {
+                "message_id": "m2",
+                "transport": "telegram",
+                "transport_channel": "42",
+                "transport_message_ids": [
+                  "2"
+                ]
+              }
+            ]
+          ],
+          "lineage_difference": "t5026: private producer/receipt operations carry exact transport chat/message coordinates; frozen Python output stays in expected."
+        }
       },
       "name": "poll_loop_sends_replies_after_each_batch"
     },
@@ -3684,7 +3948,8 @@
                   "id": 42,
                   "type": "private"
                 },
-                "text": "/status"
+                "text": "/status",
+                "message_id": 9
               },
               "update_id": 9
             }
@@ -3785,7 +4050,8 @@
                   "id": 42,
                   "type": "private"
                 },
-                "text": "/status"
+                "text": "/status",
+                "message_id": 9
               },
               "update_id": 9
             }
@@ -3917,7 +4183,8 @@
                   "id": 42,
                   "type": "private"
                 },
-                "text": " /status "
+                "text": " /status ",
+                "message_id": 9
               },
               "update_id": 9
             }
@@ -4027,7 +4294,8 @@
                   "id": 42,
                   "type": "private"
                 },
-                "text": "/status"
+                "text": "/status",
+                "message_id": 9
               },
               "update_id": 9
             }
@@ -5182,7 +5450,8 @@
                   "id": 42,
                   "type": "private"
                 },
-                "text": "/status"
+                "text": "/status",
+                "message_id": 9
               },
               "update_id": 9
             }

@@ -71,7 +71,7 @@ fn a_text_question_is_one_owner_mailbox_row_with_its_telegram_id() {
     bridge
         .process_update(&text_update(7, 42, "is the desk up?"), &mut config)
         .unwrap();
-    let ingest = fixture.daemon.args_of("owner_ingest");
+    let ingest = fixture.daemon.args_of("owner_ingest_thread");
     assert_eq!(ingest.len(), 1);
     assert_eq!(ingest[0]["body"], json!("is the desk up?"));
     assert_eq!(ingest[0]["transport"], json!("telegram"));
@@ -124,14 +124,13 @@ fn a_group_chat_and_another_chat_are_ignored() {
     let fixture = Fixture::new();
     let mut bridge = fixture.bridge();
     let mut config = as_config(paired_config(42));
-    let group =
-        json!({"update_id": 1, "message": {"chat": {"id": 42, "type": "group"}, "text": "hi"}});
+    let group = json!({"update_id": 1, "message": {"message_id":5,"chat": {"id": 42, "type": "group"}, "text": "hi"}});
     bridge.process_update(&group, &mut config).unwrap();
     bridge
         .process_update(&text_update(2, 99, "hi"), &mut config)
         .unwrap();
     assert_eq!(fixture.bot.sent_count(), 0);
-    assert!(fixture.daemon.args_of("owner_ingest").is_empty());
+    assert!(fixture.daemon.args_of("owner_ingest_thread").is_empty());
 }
 
 #[test]
@@ -149,7 +148,7 @@ fn start_and_help_get_the_help_text_and_record_nothing() {
         fixture.bot.texts(),
         vec![HELP.to_string(), HELP.to_string()]
     );
-    assert!(fixture.daemon.args_of("owner_ingest").is_empty());
+    assert!(fixture.daemon.args_of("owner_ingest_thread").is_empty());
 }
 
 #[test]
@@ -157,11 +156,10 @@ fn a_sticker_with_no_text_gets_the_other_items_reply() {
     let fixture = Fixture::new();
     let mut bridge = fixture.bridge();
     let mut config = as_config(paired_config(42));
-    let sticker =
-        json!({"update_id": 5, "message": {"chat": {"id": 42, "type": "private"}, "sticker": {}}});
+    let sticker = json!({"update_id": 5, "message": {"message_id":5,"chat": {"id": 42, "type": "private"}, "sticker": {}}});
     bridge.process_update(&sticker, &mut config).unwrap();
     assert_eq!(fixture.bot.texts(), vec![OTHER.to_string()]);
-    assert!(fixture.daemon.args_of("owner_ingest").is_empty());
+    assert!(fixture.daemon.args_of("owner_ingest_thread").is_empty());
 }
 
 #[test]
@@ -177,7 +175,7 @@ fn a_photo_with_caption_is_downloaded_and_saved_as_a_desk_attachment() {
     let mut config = as_config(paired_config(42));
     let photo = json!({
         "update_id": 6,
-        "message": {"chat": {"id": 42, "type": "private"}, "caption": "look", "photo": [{"file_id": "photo-file", "file_size": 11}]}
+        "message": {"message_id":5,"chat": {"id": 42, "type": "private"}, "caption": "look", "photo": [{"file_id": "photo-file", "file_size": 11}]}
     });
     bridge.process_update(&photo, &mut config).unwrap();
     assert_eq!(
@@ -187,7 +185,7 @@ fn a_photo_with_caption_is_downloaded_and_saved_as_a_desk_attachment() {
     let calls = fixture.bot.0.borrow().log.clone();
     assert_eq!(calls[0].0, "getFile");
     assert_eq!(calls[0].1["file_id"], "photo-file");
-    let ingest = fixture.daemon.args_of("owner_ingest");
+    let ingest = fixture.daemon.args_of("owner_ingest_thread");
     assert_eq!(1, ingest.len());
     assert_eq!("look", ingest[0]["body"]);
     assert_eq!("telegram", ingest[0]["transport"]);
@@ -217,7 +215,7 @@ fn a_redelivered_attachment_update_uses_owner_ingest_deduplication() {
     let mut config = as_config(paired_config(42));
     let photo = json!({
         "update_id": 6,
-        "message": {"chat": {"id": 42, "type": "private"}, "caption": "look", "photo": [{"file_id": "photo-file", "file_size": 11}]}
+        "message": {"message_id":5,"chat": {"id": 42, "type": "private"}, "caption": "look", "photo": [{"file_id": "photo-file", "file_size": 11}]}
     });
     bridge.process_update(&photo, &mut config).unwrap();
     assert_eq!(
@@ -609,7 +607,7 @@ fn a_tick_polls_with_the_saved_offset_and_advances_it_past_each_update() {
         json!(9),
         "and is saved after each one"
     );
-    assert_eq!(fixture.daemon.args_of("owner_ingest").len(), 2);
+    assert_eq!(fixture.daemon.args_of("owner_ingest_thread").len(), 2);
 }
 
 #[test]
@@ -621,4 +619,35 @@ fn a_first_poll_sends_no_offset_at_all() {
     bridge.tick(&mut config).unwrap();
     let polls = fixture.bot.0.borrow().poll_payloads.clone();
     assert!(!polls[0].contains_key("offset"));
+}
+
+#[test]
+fn authenticated_reply_carries_exact_chat_and_parent_message_coordinates() {
+    let fixture = Fixture::new();
+    let mut bridge = fixture.bridge();
+    let mut config = as_config(paired_config(42));
+    let mut update = text_update(100, 42, "explicit follow up");
+    update["message"]["message_id"] = json!(17);
+    update["message"]["reply_to_message"] = json!({"message_id":12});
+    bridge.process_update(&update, &mut config).unwrap();
+    let requests = fixture.daemon.args_of("owner_ingest_thread");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["external_id"], "telegram:100");
+    assert_eq!(requests[0]["transport_channel"], "42");
+    assert_eq!(requests[0]["transport_message_id"], "17");
+    assert_eq!(requests[0]["parent_transport_id"], "12");
+    assert!(!requests[0].contains_key("root_id"));
+    assert!(!requests[0].contains_key("sender_kind"));
+}
+
+#[test]
+fn unavailable_transport_parent_is_reported_as_a_new_conversation() {
+    let fixture = Fixture::new();
+    fixture.daemon.0.borrow_mut().ingest = json!({"message":{"message_id":"i7"},"thread":{"unresolved_parent":true},"duplicate":false});
+    let mut bridge = fixture.bridge();
+    let mut config = as_config(paired_config(42));
+    let mut update = text_update(100, 42, "follow up");
+    update["message"]["reply_to_message"] = json!({"message_id":1});
+    bridge.process_update(&update, &mut config).unwrap();
+    assert!(fixture.bot.texts()[0].contains("starts a new conversation"));
 }
