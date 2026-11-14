@@ -100,18 +100,35 @@ try:
         page.get_by_text('Connected',exact=True).wait_for(timeout=10000)
         page.wait_for_timeout(2000)
         page.locator('.xterm-helper-textarea').focus()
+        def wait_until(check, seconds, label):
+            deadline = time.monotonic() + seconds
+            while not check():
+                assert time.monotonic() < deadline, label
+                page.wait_for_timeout(100)
+        def received_bytes():
+            return (RUN/'received').read_bytes() if (RUN/'received').exists() else b''
+        timings = {}
         payload = 'abcdefghijklmnopqrstuvwxyz0123456789'*4
+        started = time.monotonic()
         page.keyboard.type(payload,delay=0)
-        page.wait_for_timeout(7000)
-        # Exceed the server input buffer with a paste, then exercise many short
-        # output notifications while keeping the same authenticated connection.
+        wait_until(lambda: received_bytes() == payload.encode(), 15, 'rapid keys not delivered')
+        timings['rapid_keys_s'] = time.monotonic() - started
+        # Exceed the input buffer, then start output only once the paste arrives.
         paste = 'p' * (48 * 1024)
+        started = time.monotonic()
         page.keyboard.insert_text(paste)
+        payload += paste
+        wait_until(lambda: received_bytes() == payload.encode(), 30, 'paste not delivered')
+        timings['paste_s'] = time.monotonic() - started
+        started = time.monotonic()
         page.keyboard.type('!')
-        page.wait_for_timeout(7000)
-        payload += paste + '!'
+        payload += '!'
+        wait_until(lambda: b't4955-output-end' in output, 30, 'output burst did not finish')
+        timings['output_burst_s'] = time.monotonic() - started
+        page.wait_for_timeout(1500)
+        (RUN/'output.bin').write_bytes(output)
         received = (RUN/'received').read_bytes() if (RUN/'received').exists() else b''
-        result = {'fixture':str(RUN),'pane':pane,'non_owner':True,'sent':len(payload),'received':len(received),'exact':received==payload.encode(),'output_complete':b't4955-output-end' in output,'events':events,'status':page.locator('.project-terminal [role=status]').inner_text()}
+        result = {'fixture':str(RUN),'pane':pane,'non_owner':True,'sent':len(payload),'received':len(received),'exact':received==payload.encode(),'output_complete':b't4955-output-end' in output,'output_bytes':len(output),'timings':timings,'events':events,'status':page.locator('.project-terminal [role=status]').inner_text()}
         (RUN/'result.json').write_text(json.dumps(result,indent=2))
         print(json.dumps(result),flush=True)
         browser.close()
