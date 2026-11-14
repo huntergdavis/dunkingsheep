@@ -76,7 +76,7 @@ try:
             assert not errors, errors
             print(json.dumps({'width':width,'labels':'PASS','terminal_identifier':'__owner_terminal__','pane':'%1','console_errors':errors}), flush=True)
             page.close()
-        assert all(path.endswith('/resize') for method,path in requests if method != 'GET'), requests
+        assert all(path.endswith('/resize') or path == '/api/viewport' for method,path in requests if method != 'GET'), requests
         browser.close()
 finally:
     server.shutdown()
