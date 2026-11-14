@@ -328,6 +328,10 @@ impl ReviewRepoConfig for FakeReviewPolicy {
 struct FakeReviewTokens(Result<String, String>);
 
 impl ReviewTokenSource for FakeReviewTokens {
+    fn reviewer_app(&self) -> Result<Option<crate::github::StatusApp>, String> {
+        Ok(Some(reviewer_app_fixture()))
+    }
+
     fn reviewer_token(&self) -> ReviewFuture<'_, Result<String, String>> {
         Box::pin(async move { self.0.clone() })
     }
@@ -351,6 +355,10 @@ impl FakeAccountingTokens {
 }
 
 impl ReviewTokenSource for FakeAccountingTokens {
+    fn reviewer_app(&self) -> Result<Option<crate::github::StatusApp>, String> {
+        Ok(Some(reviewer_app_fixture()))
+    }
+
     fn reviewer_token(&self) -> ReviewFuture<'_, Result<String, String>> {
         self.calls.lock().unwrap().push("reviewer");
         let result = self.reviewer.clone();
@@ -3989,7 +3997,7 @@ fn required_ci_responses(head: &str) -> Vec<Result<crate::github::GitHubResponse
         ),
         github_response(
             200,
-            json!({"required_status_checks":{"contexts":["dunkingsheep/review","CI"],"checks":[]}}),
+            json!({"required_status_checks":{"contexts":["CI","dunkingsheep/review"],"checks":[{"context":"CI","app_id":7},{"context":"dunkingsheep/review","app_id":5531872}]}}),
         ),
         github_response(
             200,
@@ -3997,7 +4005,7 @@ fn required_ci_responses(head: &str) -> Vec<Result<crate::github::GitHubResponse
         ),
         github_response(
             200,
-            json!({"sha":head,"total_count":1,"statuses":[{"id":1,"context":"dunkingsheep/review","state":"success"}]}),
+            json!([{"id":1,"context":"dunkingsheep/review","state":"success","creator":{"id":42,"login":"dunkingsheep-reviewer[bot]","type":"Bot"}}]),
         ),
     ]
 }
@@ -4010,6 +4018,7 @@ async fn required_ci_gate_holds_unknown_missing_pending_and_truncated_policy_or_
         "forbidden",
         "empty",
         "malformed",
+        "no-app-id",
         "missing",
         "pending",
         "failed",
@@ -4038,6 +4047,10 @@ async fn required_ci_gate_holds_unknown_missing_pending_and_truncated_policy_or_
                 json!({"required_status_checks":{"contexts":[],"checks":[]}}),
             ),
             "malformed" => change(&mut responses[1], json!({})),
+            "no-app-id" => change(
+                &mut responses[1],
+                json!({"required_status_checks":{"contexts":["CI"],"checks":[{"context":"CI"}]}}),
+            ),
             "missing" => change(&mut responses[2], json!({"total_count":0,"check_runs":[]})),
             "pending" | "failed" | "wrong-app" | "wrong-head" => {
                 let mut runs = json!({"total_count":1,"check_runs":[{"id":2,"name":"CI","app":{"id":7},"head_sha":"exact-head","status":"completed","conclusion":"success"}]});
@@ -4059,15 +4072,24 @@ async fn required_ci_gate_holds_unknown_missing_pending_and_truncated_policy_or_
             ),
             "truncated-statuses" => change(
                 &mut responses[3],
-                json!({"sha":"exact-head","total_count":101,"statuses":[]}),
+                json!(vec![
+                    json!({"id":1,"context":"history","state":"success"});
+                    100
+                ]),
             ),
-            "review-pending" => change(
-                &mut responses[3],
-                json!({"sha":"exact-head","total_count":1,"statuses":[{"id":2,"context":"dunkingsheep/review","state":"pending"}]}),
-            ),
+            "review-pending" => {
+                change(
+                    &mut responses[1],
+                    json!({"required_status_checks":{"contexts":["dunkingsheep/review"],"checks":[{"context":"dunkingsheep/review","app_id":5531872}]}}),
+                );
+                change(
+                    &mut responses[3],
+                    json!([{"id":2,"context":"dunkingsheep/review","state":"pending","creator":{"id":42,"type":"Bot","login":"dunkingsheep-reviewer[bot]"}}]),
+                );
+            }
             "same-name-status-failed" => change(
                 &mut responses[3],
-                json!({"sha":"exact-head","total_count":2,"statuses":[{"id":1,"context":"dunkingsheep/review","state":"success"},{"id":2,"context":"CI","state":"failure"}]}),
+                json!([{"id":1,"context":"dunkingsheep/review","state":"success"},{"id":2,"context":"CI","state":"failure"}]),
             ),
             "all-green" => {}
             _ => unreachable!(),
@@ -4080,10 +4102,15 @@ async fn required_ci_gate_holds_unknown_missing_pending_and_truncated_policy_or_
             7,
             "exact-head",
             "token",
+            Some(&reviewer_app_fixture()),
+            None,
         )
         .await;
         assert_eq!(case == "all-green", result.is_ok(), "{case}: {result:?}");
-        if matches!(case, "unprotected" | "forbidden" | "empty" | "malformed") {
+        if matches!(
+            case,
+            "unprotected" | "forbidden" | "empty" | "malformed" | "no-app-id"
+        ) {
             assert_eq!(
                 "merge held: required checks unknown",
                 result.unwrap_err(),
@@ -4116,6 +4143,8 @@ async fn required_ci_gate_uses_latest_attempt_and_keeps_branch_names_in_one_segm
         7,
         "exact-head",
         "token",
+        Some(&reviewer_app_fixture()),
+        None,
     )
     .await
     .unwrap();
@@ -4196,24 +4225,22 @@ async fn required_ci_gate_applies_to_verdict_and_sync_merge_paths() {
 
 #[tokio::test]
 async fn required_ci_gate_binds_commit_status_to_the_required_app_not_creator_user_id() {
-    for (creator_type, app_id, expected) in
-        [("Bot", 42, true), ("Bot", 7, false), ("User", 42, false)]
-    {
+    for (creator_type, app_id, login, expected) in [
+        ("Bot", 5531872, "dunkingsheep-reviewer[bot]", true),
+        ("Bot", 7, "dunkingsheep-reviewer[bot]", false),
+        ("User", 5531872, "dunkingsheep-reviewer[bot]", false),
+        ("Bot", 5531872, "other-app[bot]", false),
+    ] {
         let mut responses = required_ci_responses("exact-head");
         responses[1] = github_response(
             200,
-            json!({"required_status_checks":{"contexts":["dunkingsheep/review"],"checks":[{"context":"dunkingsheep/review","app_id":42}]}}),
+            json!({"required_status_checks":{"contexts":["dunkingsheep/review"],"checks":[{"context":"dunkingsheep/review","app_id":5531872}]}}),
         );
         responses[3] = github_response(
             200,
-            json!({"sha":"exact-head","total_count":1,"statuses":[{"id":1,"context":"dunkingsheep/review","state":"success","creator":{"id":42,"type":creator_type,"login":"review-app[bot]"}}]}),
+            json!([{"id":1,"context":"dunkingsheep/review","state":"success","creator":{"id":42,"type":creator_type,"login":login}}]),
         );
-        if creator_type == "Bot" {
-            responses.push(github_response(
-                200,
-                json!({"id":app_id,"slug":"review-app"}),
-            ));
-        }
+
         let transport = FakeReviewTransport::with_responses(responses);
         let result = crate::github::require_merge_ci(
             &transport,
@@ -4222,6 +4249,11 @@ async fn required_ci_gate_binds_commit_status_to_the_required_app_not_creator_us
             7,
             "exact-head",
             "token",
+            Some(&crate::github::StatusApp {
+                id: app_id,
+                bot_login: "dunkingsheep-reviewer[bot]".into(),
+            }),
+            None,
         )
         .await;
         assert_eq!(
@@ -4229,15 +4261,19 @@ async fn required_ci_gate_binds_commit_status_to_the_required_app_not_creator_us
             result.is_ok(),
             "{creator_type}/{app_id}: {result:?}"
         );
-        if creator_type == "Bot" {
+        assert!(transport
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| !r.url.contains("/apps/")));
+        if app_id == 5531872 {
             assert!(transport
                 .requests
                 .lock()
                 .unwrap()
-                .last()
-                .unwrap()
-                .url
-                .ends_with("/apps/review-app"));
+                .iter()
+                .any(|r| r.url.ends_with("/commits/exact-head/statuses?per_page=100")));
         }
     }
 }
@@ -4337,5 +4373,330 @@ async fn required_ci_gate_holds_accounting_auto_merge_without_a_known_green_poli
             .all(|r| !r.url.ends_with("/graphql")));
         let notes = sync.flock.notes(&stored.id).await.unwrap();
         assert!(notes.iter().any(|n| n.text.starts_with("merge held:")));
+    }
+}
+
+fn reviewer_app_fixture() -> crate::github::StatusApp {
+    crate::github::StatusApp {
+        id: 5531872,
+        bot_login: "dunkingsheep-reviewer[bot]".into(),
+    }
+}
+
+fn trusted_policy_fixture(repo: &str, branch: &str) -> Value {
+    let mut policy = json!({"version":1,"repos":{}});
+    policy["repos"][repo] = json!({});
+    policy["repos"][repo][branch] = json!([
+        {"context":"CI","app_id":7},
+        {"context":"dunkingsheep/review","app_id":5531872}
+    ]);
+    policy
+}
+
+#[tokio::test]
+async fn required_ci_gate_owner_policy_is_exact_and_only_falls_back_on_protection_refusal() {
+    for (status, kind, expected) in [
+        (403, "valid", true),
+        (404, "valid", true),
+        (500, "valid", false),
+        (429, "valid", false),
+        (200, "empty-api", false),
+        (200, "extra-api", false),
+        (403, "missing", false),
+        (403, "wrong-repo", false),
+        (403, "wrong-branch", false),
+        (403, "empty", false),
+        (403, "missing-review", false),
+        (403, "wrong-app", false),
+        (403, "pending", false),
+        (403, "empty-results", false),
+    ] {
+        let mut responses = required_ci_responses("exact-head");
+        responses[1] = match kind {
+            "empty-api" => github_response(
+                200,
+                json!({"required_status_checks":{"contexts":[],"checks":[]}}),
+            ),
+            "extra-api" => github_response(
+                200,
+                json!({"required_status_checks":{"contexts":["CI","extra","dunkingsheep/review"],"checks":[{"context":"CI","app_id":7},{"context":"extra","app_id":7},{"context":"dunkingsheep/review","app_id":5531872}]}}),
+            ),
+            _ => github_response(status, json!({"message":"policy unavailable"})),
+        };
+        let mut policy = trusted_policy_fixture("o/r", "main");
+        match kind {
+            "wrong-repo" => policy = trusted_policy_fixture("other/repo", "main"),
+            "wrong-branch" => policy = trusted_policy_fixture("o/r", "other"),
+            "empty" => policy["repos"]["o/r"]["main"] = json!([]),
+            "missing-review" => {
+                policy["repos"]["o/r"]["main"] = json!([{"context":"CI","app_id":7}])
+            }
+            "wrong-app" => policy["repos"]["o/r"]["main"][1]["app_id"] = json!(7),
+            "pending" => {
+                responses[2] = github_response(
+                    200,
+                    json!({"total_count":1,"check_runs":[{"id":1,"name":"CI","app":{"id":7},"head_sha":"exact-head","status":"in_progress","conclusion":null}]}),
+                )
+            }
+            "empty-results" => {
+                responses[2] = github_response(200, json!({"total_count":0,"check_runs":[]}))
+            }
+            _ => {}
+        }
+        let transport = FakeReviewTransport::with_responses(responses);
+        let identity = reviewer_app_fixture();
+        let result = crate::github::require_merge_ci(
+            &transport,
+            "https://api.example.test",
+            "o/r",
+            7,
+            "exact-head",
+            "token",
+            Some(&identity),
+            if kind == "missing" {
+                None
+            } else {
+                Some(&policy)
+            },
+        )
+        .await;
+        assert_eq!(expected, result.is_ok(), "{status}/{kind}: {result:?}");
+        assert!(transport
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| r.method == "GET"));
+    }
+}
+
+#[test]
+fn required_ci_policy_file_is_private_regular_bounded_and_read_fresh() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let dir = crate::testsupport::dir("required-ci-owner-policy");
+    let path = dir.path().join("required-checks.json");
+    assert!(crate::github::read_required_checks(&path).is_err());
+    let write = |value: &Value, mode| {
+        std::fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    let good = trusted_policy_fixture("o/r", "main");
+    write(&good, 0o644);
+    assert!(crate::github::read_required_checks(&path).is_err());
+    write(&good, 0o600);
+    assert_eq!(good, crate::github::read_required_checks(&path).unwrap());
+    let changed = trusted_policy_fixture("o/r", "desk/new");
+    write(&changed, 0o600);
+    assert_eq!(
+        changed,
+        crate::github::read_required_checks(&path).unwrap(),
+        "no cached policy"
+    );
+    let link = dir.path().join("linked-policy.json");
+    symlink(&path, &link).unwrap();
+    assert!(crate::github::read_required_checks(&link).is_err());
+    std::fs::write(&path, "{").unwrap();
+    assert!(crate::github::read_required_checks(&path).is_err());
+    std::fs::write(&path, " ".repeat(65537)).unwrap();
+    assert!(crate::github::read_required_checks(&path).is_err());
+}
+
+#[test]
+fn required_ci_registration_requires_explicit_slug_and_never_reads_a_private_key() {
+    let dir = crate::testsupport::dir("required-ci-app-identity");
+    let path = dir.path().join("github-app-reviewer.json");
+    let tokens = crate::github::Tokens::new(
+        Some(dir.path().join("tokens.json")),
+        dir.path().into(),
+        Box::new(FakeReviewTransport::default()),
+        Some("https://api.example.test".into()),
+    );
+    for bad in [
+        json!({"id":5531872}),
+        json!({"id":5531872,"slug":""}),
+        json!({"id":5531872,"slug":"forged[bot]"}),
+        json!({"slug":"dunkingsheep-reviewer"}),
+    ] {
+        std::fs::write(&path, serde_json::to_vec(&bad).unwrap()).unwrap();
+        assert!(tokens.registered_app_identity("reviewer").is_err());
+    }
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({"id":5531872,"slug":"dunkingsheep-reviewer"})).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        reviewer_app_fixture(),
+        tokens.registered_app_identity("reviewer").unwrap()
+    );
+    assert!(
+        !dir.path().join("github-app-reviewer.pem").exists(),
+        "identity uses metadata only"
+    );
+}
+
+struct AccountingRetryPolicy;
+impl ReviewPolicy for AccountingRetryPolicy {
+    fn required_verdicts(&self, _: &str) -> Result<usize, String> {
+        Ok(2)
+    }
+}
+impl ReviewRepoConfig for AccountingRetryPolicy {
+    fn repos(&self) -> Result<Vec<String>, String> {
+        Ok(vec!["huntergdavis/poolrad-decomp".into()])
+    }
+    fn author_from_mints(&self, _: f64) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+async fn accounting_pending_creation_retries_in_real_sync_and_enables_only_once() {
+    let dir = crate::testsupport::dir("review-accounting-later-sync");
+    let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let (stored, task) = add_poolrad_review(&tasks, "OVL_007F_0F7E").await;
+    finish_review(&tasks, &stored.id, "%3", "accept").await;
+    let mut responses = accounting_success_responses();
+    responses.truncate(14);
+    let mut gate = required_ci_responses("new-commit");
+    gate[2] = github_response(
+        200,
+        json!({"total_count":1,"check_runs":[{"id":1,"name":"CI","app":{"id":7},"head_sha":"new-commit","status":"in_progress","conclusion":null}]}),
+    );
+    responses.extend(gate);
+    let sync = ReviewSync::with_transport(
+        tasks,
+        FakeAccountingTokens::new(Ok("reviewer-token"), Ok("author-token")),
+        AccountingRetryPolicy,
+        "https://api.example.test",
+        FakeReviewTransport::with_responses(responses),
+    );
+    let out = sync.account(&task, Some("%3"), false).await.unwrap();
+    assert!(out["held"].is_object());
+    assert_eq!(82, out["accounting_pr"]);
+    assert_eq!(
+        Some((stored.id.clone(), "new-commit".into())),
+        sync.flock
+            .accounting_review("huntergdavis/poolrad-decomp", 82)
+            .await
+            .unwrap()
+    );
+    // A later sync sees only the accounting PR: the merged body has disappeared.
+    // Its head is omitted from this list fixture so the separate normal review path is idle;
+    // the retry MUST fetch authoritative detail and verify the persisted head itself.
+    let listing = || {
+        github_response(
+            200,
+            json!([{"number":82,"head":{"ref":"accounting/pr7-OVL_007F_0F7E"},"base":{"ref":"main"},"draft":false}]),
+        )
+    };
+    {
+        let mut queue = sync.transport.responses.lock().unwrap();
+        queue.push_back(listing());
+        queue.extend(required_ci_responses("new-commit"));
+        queue.push_back(github_response(200, json!({"node_id":"PR_node"})));
+        queue.push_back(github_response(
+            200,
+            json!({"data":{"enablePullRequestAutoMerge":{"pullRequest":{"number":82}}}}),
+        ));
+    }
+    let report = sync.run(false).await.unwrap();
+    assert_eq!(true, report["accounting_retries"][0]["enabled"]);
+    {
+        let mut gate = required_ci_responses("new-commit");
+        let mut detail: Value = serde_json::from_slice(&gate[0].as_ref().unwrap().body).unwrap();
+        detail["auto_merge"] = json!({"enabledAt":"now"});
+        gate[0] = github_response(200, detail);
+        let mut queue = sync.transport.responses.lock().unwrap();
+        queue.push_back(listing());
+        queue.extend(gate);
+    }
+    let report = sync.run(false).await.unwrap();
+    assert_eq!(true, report["accounting_retries"][0]["already_enabled"]);
+    let requests = sync.transport.requests.lock().unwrap();
+    assert_eq!(
+        1,
+        requests
+            .iter()
+            .filter(|r| r.url.ends_with("/graphql"))
+            .count()
+    );
+    assert_eq!(
+        1,
+        requests
+            .iter()
+            .filter(|r| r.method == "POST" && r.url.ends_with("/git/commits"))
+            .count()
+    );
+    assert_eq!(
+        1,
+        requests
+            .iter()
+            .filter(|r| r.method == "POST" && r.url.ends_with("/pulls"))
+            .count()
+    );
+    assert_eq!(
+        1,
+        requests
+            .iter()
+            .filter(|r| r.method == "POST" && r.url.ends_with("/reviews"))
+            .count()
+    );
+    let mutation = requests
+        .iter()
+        .find(|r| r.url.ends_with("/graphql"))
+        .unwrap();
+    let payload: Value = serde_json::from_slice(mutation.body.as_ref().unwrap()).unwrap();
+    assert_eq!("new-commit", payload["variables"]["head"]);
+    assert!(payload["query"]
+        .as_str()
+        .unwrap()
+        .contains("expectedHeadOid"));
+    assert!(sync.transport.responses.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn accounting_retry_holds_missing_provenance_and_a_moved_head() {
+    for known in [false, true] {
+        let dir = crate::testsupport::dir("accounting-retry-provenance");
+        let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+        let (stored, _) = add_poolrad_review(&tasks, "body").await;
+        finish_review(&tasks, &stored.id, "%3", "accept").await;
+        tasks.set_accounting_pr(&stored.id, 82).await.unwrap();
+        if known {
+            tasks.note_with_meta(&stored.id,"accounting","review-sync",None,
+                &json!({"accounting_pr":82,"accounting_head":"saved-head","review":"approved_by_author_app"})).await.unwrap();
+        }
+        let mut responses = vec![github_response(
+            200,
+            json!([{"number":82,"head":{"ref":"accounting/pr7-row"}}]),
+        )];
+        if known {
+            responses.push(github_response(
+                200,
+                json!({"state":"open","head":{"sha":"different-head"},"base":{"ref":"main"}}),
+            ));
+        }
+        let sync = ReviewSync::with_transport(
+            tasks,
+            FakeAccountingTokens::new(Ok("reviewer"), Ok("author")),
+            AccountingRetryPolicy,
+            "https://api.example.test",
+            FakeReviewTransport::with_responses(responses),
+        );
+        let report = sync.run(false).await.unwrap();
+        if known {
+            assert!(report["accounting_retries"][0]["held"]
+                .as_str()
+                .unwrap()
+                .contains("head"));
+        }
+        assert!(sync
+            .transport
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| r.method == "GET"));
     }
 }

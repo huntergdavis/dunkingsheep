@@ -1,9 +1,97 @@
 //! Fail-closed merge checks. Observed green checks never substitute for an unknown policy.
-use super::{request, GitHubTransport, RequestOptions};
+use super::{request, GitHubRequest, GitHubTransport, RequestOptions};
 use serde_json::Value;
-use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 const UNKNOWN: &str = "merge held: required checks unknown";
+
+/// Trusted, non-secret identity from the review App registration used to mint its token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusApp {
+    pub id: i64,
+    pub bot_login: String,
+}
+
+/// Optional owner policy. Read on every gate evaluation, never cached or written by the daemon.
+/// An absent, linked, non-0600, foreign-owned, oversized or malformed file supplies no policy.
+pub fn read_required_checks(path: &std::path::Path) -> Result<Value, String> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| UNKNOWN)?;
+    let metadata = file.metadata().map_err(|_| UNKNOWN)?;
+    if !metadata.is_file()
+        || metadata.mode() & 0o7777 != 0o600
+        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.len() > 65536
+    {
+        return Err(UNKNOWN.into());
+    }
+    let mut raw = String::new();
+    file.take(65537)
+        .read_to_string(&mut raw)
+        .map_err(|_| UNKNOWN)?;
+    if raw.len() > 65536 {
+        return Err(UNKNOWN.into());
+    }
+    let value: Value = serde_json::from_str(&raw).map_err(|_| UNKNOWN)?;
+    if value["version"] != 1 || !value["repos"].is_object() {
+        return Err(UNKNOWN.into());
+    }
+    Ok(value)
+}
+
+fn check_names(checks: &Value) -> Result<BTreeSet<(String, i64)>, String> {
+    let mut names = BTreeSet::new();
+    for check in checks.as_array().ok_or(UNKNOWN)? {
+        let name = check["context"]
+            .as_str()
+            .filter(|name| !name.is_empty() && name.trim() == *name)
+            .ok_or(UNKNOWN)?;
+        let app = check["app_id"]
+            .as_i64()
+            .filter(|id| *id > 0)
+            .ok_or(UNKNOWN)?;
+        names.insert((name.to_string(), app));
+    }
+    if names.is_empty() {
+        return Err(UNKNOWN.into());
+    }
+    Ok(names)
+}
+
+async fn protection_response(
+    transport: &dyn GitHubTransport,
+    root: &str,
+    repo: &str,
+    branch: &str,
+    token: &str,
+) -> Result<(u16, Value), String> {
+    // Preserve the actual HTTP status: only a protection 403/404 may use owner policy.
+    let response = transport
+        .send(GitHubRequest {
+            method: "GET".into(),
+            url: format!(
+                "{root}/repos/{repo}/branches/{}/protection",
+                segment(branch)
+            ),
+            headers: BTreeMap::from([
+                ("Accept".into(), "application/vnd.github+json".into()),
+                ("User-Agent".into(), "dunkingsheep".into()),
+                ("X-GitHub-Api-Version".into(), "2022-11-28".into()),
+                ("Authorization".into(), format!("token {token}")),
+            ]),
+            body: None,
+            timeout_s: 20,
+        })
+        .await
+        .map_err(|_| UNKNOWN)?;
+    let value = serde_json::from_slice(&response.body).unwrap_or(Value::Null);
+    Ok((response.status, value))
+}
 
 fn segment(value: &str) -> String {
     value
@@ -45,6 +133,7 @@ async fn get(
 /// Both callers still enforce distinct exact-head reviews. This gate adds a known nonempty
 /// branch-protection policy plus successful results for each required context on that head.
 /// Every unavailable, malformed, incomplete or truncated response holds the merge.
+#[allow(clippy::too_many_arguments)]
 pub async fn require_merge_ci(
     transport: &dyn GitHubTransport,
     root: &str,
@@ -52,7 +141,9 @@ pub async fn require_merge_ci(
     number: i64,
     head: &str,
     token: &str,
-) -> Result<(), String> {
+    reviewer: Option<&StatusApp>,
+    trusted: Option<&Value>,
+) -> Result<Value, String> {
     let pull = get(
         transport,
         root,
@@ -60,46 +151,46 @@ pub async fn require_merge_ci(
         &format!("repos/{repo}/pulls/{number}"),
     )
     .await?;
-    if pull["state"] != "open" || pull["head"]["sha"].as_str() != Some(head) {
+    if pull["state"] != "open"
+        || pull["head"]["sha"].as_str() != Some(head)
+        || pull["draft"] == true
+    {
         return Err("merge held: reviewed head is no longer the open PR head".into());
     }
     let branch = pull["base"]["ref"]
         .as_str()
         .filter(|s| !s.is_empty())
         .ok_or(UNKNOWN)?;
-    let protection = get(
-        transport,
-        root,
-        token,
-        &format!("repos/{repo}/branches/{}/protection", segment(branch)),
-    )
-    .await?;
-    let required = &protection["required_status_checks"];
-    let mut names = BTreeSet::new();
-    for context in required["contexts"].as_array().ok_or(UNKNOWN)? {
-        let name = context.as_str().filter(|s| !s.is_empty()).ok_or(UNKNOWN)?;
-        names.insert((name.to_owned(), None));
+    let (status, protection) = protection_response(transport, root, repo, branch, token).await?;
+    let names = if status == 200 {
+        let required = &protection["required_status_checks"];
+        let names = check_names(&required["checks"])?;
+        for context in required["contexts"].as_array().ok_or(UNKNOWN)? {
+            let name = context.as_str().filter(|s| !s.is_empty()).ok_or(UNKNOWN)?;
+            if !names.iter().any(|(bound, _)| bound == name) {
+                return Err(UNKNOWN.into());
+            }
+        }
+        names
+    } else if matches!(status, 403 | 404) {
+        // No observed-check inference. This exact repo/branch must have a nonempty owner policy.
+        let policy = trusted.filter(|p| p["version"] == 1).ok_or(UNKNOWN)?;
+        check_names(&policy["repos"][repo][branch])?
+    } else {
+        return Err(UNKNOWN.into());
+    };
+    // Neither source can waive the review gate or its configured producer. Owner policy is
+    // only a fallback for an unreadable protection policy, never a replacement for readable API checks.
+    let reviewer = reviewer
+        .filter(|app| app.id > 0 && !app.bot_login.is_empty())
+        .ok_or(UNKNOWN)?;
+    if !names.contains(&(super::REVIEW_CONTEXT.to_string(), reviewer.id)) {
+        return Err(UNKNOWN.into());
     }
-    // GitHub returns both the legacy contexts list and app-bound checks. A bound entry
-    // replaces its legacy duplicate, so a different App cannot satisfy the requirement.
-    for check in required["checks"].as_array().ok_or(UNKNOWN)? {
-        let name = check["context"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .ok_or(UNKNOWN)?;
-        let app = match check.get("app_id") {
-            Some(Value::Null) => None,
-            Some(value) => match value.as_i64() {
-                Some(-1) => None,
-                Some(id) if id > 0 => Some(id),
-                _ => return Err(UNKNOWN.into()),
-            },
-            None => return Err(UNKNOWN.into()),
-        };
-        names.remove(&(name.to_owned(), None));
-        names.insert((name.to_owned(), app));
-    }
-    if names.is_empty() {
+    if names
+        .iter()
+        .any(|(name, id)| name == super::REVIEW_CONTEXT && *id != reviewer.id)
+    {
         return Err(UNKNOWN.into());
     }
     let runs = get(
@@ -109,30 +200,29 @@ pub async fn require_merge_ci(
         &format!("repos/{repo}/commits/{head}/check-runs?per_page=100&filter=latest"),
     )
     .await?;
-    let combined = get(
+    let listed = get(
         transport,
         root,
         token,
-        &format!("repos/{repo}/commits/{head}/status?per_page=100"),
+        &format!("repos/{repo}/commits/{head}/statuses?per_page=100"),
     )
     .await?;
     let waiting = "merge held: waiting for CI";
     let checks = runs["check_runs"].as_array().ok_or(waiting)?;
-    let statuses = combined["statuses"].as_array().ok_or(waiting)?;
+    // The list endpoint includes creator; combined status entries do not. A full
+    // page may have more history beyond it, so refuse rather than miss a latest result.
+    let statuses = listed.as_array().ok_or(waiting)?;
     if runs["total_count"].as_u64() != Some(checks.len() as u64)
-        || combined["total_count"].as_u64() != Some(statuses.len() as u64)
         || checks.len() > 100
-        || statuses.len() > 100
-        || combined["sha"].as_str() != Some(head)
+        || statuses.len() >= 100
     {
         return Err("merge held: incomplete or truncated CI results".into());
     }
-    let mut status_apps = BTreeMap::new();
     for (name, app) in names {
         let mut latest = BTreeMap::new();
         for run in checks.iter().filter(|r| r["name"].as_str() == Some(&name)) {
             let run_app = run["app"]["id"].as_i64().ok_or(waiting)?;
-            if app.is_some_and(|id| id != run_app) {
+            if app != run_app {
                 continue;
             }
             let id = run["id"].as_u64().ok_or(waiting)?;
@@ -143,39 +233,26 @@ pub async fn require_merge_ci(
                 latest.insert(run_app, run);
             }
         }
+        if statuses
+            .iter()
+            .filter(|s| s["context"].as_str() == Some(&name))
+            .any(|s| s["id"].as_u64().is_none())
+        {
+            return Err(waiting.into());
+        }
         let status = statuses
             .iter()
             .filter(|s| s["context"].as_str() == Some(&name))
             .max_by_key(|s| s["id"].as_u64().unwrap_or(0));
-        let status = if let (Some(app_id), Some(status)) = (app, status) {
-            // Commit statuses expose their creator, not an App id. Resolve a GitHub
-            // App bot's slug via the read-only public App endpoint; never confuse a
-            // creator/user id with an App id or accept a same-named user's status.
-            let slug = status["creator"]["login"]
-                .as_str()
-                .filter(|_| status["creator"]["type"] == "Bot")
-                .and_then(|login| login.strip_suffix("[bot]"))
-                .filter(|slug| !slug.is_empty());
-            let matches = if let Some(slug) = slug {
-                if let Entry::Vacant(entry) = status_apps.entry(slug.to_owned()) {
-                    let info =
-                        get(transport, root, token, &format!("apps/{}", segment(slug))).await?;
-                    let id = info["id"].as_i64().filter(|id| *id > 0).ok_or(UNKNOWN)?;
-                    if info["slug"].as_str() != Some(slug) {
-                        return Err(UNKNOWN.into());
-                    }
-                    entry.insert(id);
-                }
-                status_apps.get(slug) == Some(&app_id)
-            } else {
-                false
-            };
-            matches.then_some(status)
-        } else {
-            status
-        };
-        if latest.is_empty() && status.is_none() {
-            return Err(format!("{waiting}: {name} missing"));
+        let bound_status = status.filter(|status| {
+            reviewer.id == app
+                && status["creator"]["type"] == "Bot"
+                && status["creator"]["login"].as_str() == Some(reviewer.bot_login.as_str())
+        });
+        if latest.is_empty() && bound_status.is_none() {
+            return Err(format!(
+                "{waiting}: {name} missing or required App unverified"
+            ));
         }
         for run in latest.values() {
             if run["head_sha"].as_str() != Some(head)
@@ -191,5 +268,5 @@ pub async fn require_merge_ci(
             return Err(format!("{waiting}: {name} status is not successful"));
         }
     }
-    Ok(())
+    Ok(pull)
 }

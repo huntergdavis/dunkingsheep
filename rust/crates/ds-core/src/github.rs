@@ -11,7 +11,7 @@ pub use mints::{
     repos_config, AuthorMintRecord,
 };
 pub(crate) use mints::{python_number_string, DEFAULT_REPOS};
-pub use required_ci::require_merge_ci;
+pub use required_ci::{read_required_checks, require_merge_ci, StatusApp};
 
 /// Parse a Python-compatible float string using the existing mint decoder.
 pub(crate) fn parse_python_float(raw: &str) -> Option<f64> {
@@ -567,6 +567,38 @@ impl Tokens {
         })?;
         let id = first.get("id").ok_or_else(|| GitHubError("'id'".into()))?;
         python_int(id)
+    }
+
+    /// Non-secret App identity, read through the same registration seam as token minting.
+    /// This reads metadata and checks key existence; it does not read or expose a private key.
+    pub fn registered_app_identity(&self, kind: &str) -> Result<StatusApp, GitHubError> {
+        if !KINDS.contains(&kind) {
+            return Err(GitHubError("invalid App kind".into()));
+        }
+        let raw = self
+            .app_file_system
+            .read_config(&app_file(kind, &self.config_dir))
+            .map_err(|_| GitHubError("registered App metadata unavailable".into()))?;
+        let data: Value = serde_json::from_str(&raw)
+            .map_err(|_| GitHubError("invalid registered App metadata".into()))?;
+        let id = data["id"]
+            .as_i64()
+            .filter(|id| *id > 0)
+            .ok_or_else(|| GitHubError("registered App id missing".into()))?;
+        // Token loading has a compatibility default slug; identity binding MUST NOT use it.
+        let slug = data["slug"]
+            .as_str()
+            .filter(|slug| {
+                !slug.is_empty()
+                    && slug
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            })
+            .ok_or_else(|| GitHubError("explicit registered App slug missing or invalid".into()))?;
+        Ok(StatusApp {
+            id,
+            bot_login: format!("{slug}[bot]"),
+        })
     }
 
     /// Return a cached installation token or mint one when it is within the
@@ -1346,6 +1378,33 @@ pub async fn enable_auto_merge(
     token: &str,
     method: Option<&str>,
 ) -> Result<Value, GitHubError> {
+    enable_auto_merge_impl(transport, api_root, repo, number, token, method, None).await
+}
+
+/// Enable accounting auto-merge only while GitHub still has the verified exact head.
+pub async fn enable_auto_merge_at_head(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    number: i64,
+    head: &str,
+    token: &str,
+) -> Result<Value, GitHubError> {
+    if head.is_empty() {
+        return Err(GitHubError("auto-merge expected head is empty".into()));
+    }
+    enable_auto_merge_impl(transport, api_root, repo, number, token, None, Some(head)).await
+}
+
+async fn enable_auto_merge_impl(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    number: i64,
+    token: &str,
+    method: Option<&str>,
+    head: Option<&str>,
+) -> Result<Value, GitHubError> {
     let url = format!("{api_root}/repos/{repo}/pulls/{number}");
     let (_, pull) = request(
         transport,
@@ -1371,15 +1430,14 @@ pub async fn enable_auto_merge(
             ))
         })?;
     let method = method.unwrap_or("MERGE").to_uppercase();
-    let variables = serde_json::json!({"id":node_id,"method":method});
-    let result = graphql(
-        transport,
-        api_root,
-        "mutation($id: ID!, $method: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: $method}) { pullRequest { number } } }",
-        token,
-        Some(&variables),
-    )
-    .await?;
+    let mut variables = serde_json::json!({"id":node_id,"method":method});
+    let mutation = if let Some(head) = head {
+        variables["head"] = Value::String(head.into());
+        "mutation($id: ID!, $method: PullRequestMergeMethod!, $head: GitObjectID!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: $method, expectedHeadOid: $head}) { pullRequest { number } } }"
+    } else {
+        "mutation($id: ID!, $method: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: $method}) { pullRequest { number } } }"
+    };
+    let result = graphql(transport, api_root, mutation, token, Some(&variables)).await?;
     Ok(result
         .get("enablePullRequestAutoMerge")
         .filter(|value| python_truthy(value))

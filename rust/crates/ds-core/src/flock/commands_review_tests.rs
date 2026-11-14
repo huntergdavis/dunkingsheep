@@ -12,6 +12,13 @@ use crate::tasks::{AddOptions, Tasks};
 struct TestTokens(Result<String, String>);
 
 impl ReviewTokenSource for TestTokens {
+    fn reviewer_app(&self) -> Result<Option<crate::github::StatusApp>, String> {
+        Ok(Some(crate::github::StatusApp {
+            id: 5531872,
+            bot_login: "dunkingsheep-reviewer[bot]".into(),
+        }))
+    }
+
     fn reviewer_token(&self) -> ReviewFuture<'_, Result<String, String>> {
         let result = self.0.clone();
         Box::pin(async move { result })
@@ -66,9 +73,9 @@ impl TestTransport {
     fn with_green_merge_gate_at(self, index: usize, head: &str) -> Self {
         let fixtures = [
             json!({"state":"open","head":{"sha":head},"base":{"ref":"main"}}),
-            json!({"required_status_checks":{"contexts":["dunkingsheep/review","CI"],"checks":[]}}),
+            json!({"required_status_checks":{"contexts":["CI","dunkingsheep/review"],"checks":[{"context":"CI","app_id":7},{"context":"dunkingsheep/review","app_id":5531872}]}}),
             json!({"total_count":1,"check_runs":[{"id":1,"name":"CI","app":{"id":7},"head_sha":head,"status":"completed","conclusion":"success"}]}),
-            json!({"sha":head,"total_count":1,"statuses":[{"id":1,"context":"dunkingsheep/review","state":"success"}]}),
+            json!([{"id":1,"context":"dunkingsheep/review","state":"success","creator":{"id":42,"login":"dunkingsheep-reviewer[bot]","type":"Bot"}}]),
         ];
         let mut responses = self.responses.lock().unwrap();
         for (offset, value) in fixtures.into_iter().enumerate() {

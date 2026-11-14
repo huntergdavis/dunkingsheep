@@ -54,6 +54,14 @@ pub trait ReviewTaskStore {
 /// Async actor operations needed by the source-faithful ReviewSync methods.
 /// Production uses `Tasks`; tests inject a recording actor without opening a live DB.
 pub trait ReviewTaskActor {
+    fn accounting_review<'a>(
+        &'a self,
+        _repo: &'a str,
+        _number: i64,
+    ) -> ReviewFuture<'a, Result<Option<(String, String)>, String>> {
+        Box::pin(async { Ok(None) })
+    }
+
     fn refresh_review_author<'a>(
         &'a self,
         _id: &'a str,
@@ -123,6 +131,18 @@ pub trait ReviewTaskActor {
 }
 
 impl ReviewTaskActor for Tasks {
+    fn accounting_review<'a>(
+        &'a self,
+        repo: &'a str,
+        number: i64,
+    ) -> ReviewFuture<'a, Result<Option<(String, String)>, String>> {
+        Box::pin(async move {
+            Tasks::accounting_review(self, repo, number)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
     fn refresh_review_author<'a>(
         &'a self,
         id: &'a str,
@@ -277,6 +297,19 @@ fn attached_review_tasks(flock: &Flock) -> Result<std::sync::Arc<Tasks>, crate::
 }
 
 impl ReviewTaskActor for Flock {
+    fn accounting_review<'a>(
+        &'a self,
+        repo: &'a str,
+        number: i64,
+    ) -> ReviewFuture<'a, Result<Option<(String, String)>, String>> {
+        Box::pin(async move {
+            let tasks = attached_review_tasks(self).map_err(|e| e.to_string())?;
+            Tasks::accounting_review(&tasks, repo, number)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
     fn refresh_review_author<'a>(
         &'a self,
         id: &'a str,
@@ -557,12 +590,31 @@ impl ReviewRepoConfig for ConfiguredReviewPolicy {
 pub trait ReviewTokenSource {
     fn reviewer_token(&self) -> ReviewFuture<'_, Result<String, String>>;
 
+    fn reviewer_app(&self) -> Result<Option<crate::github::StatusApp>, String> {
+        Ok(None)
+    }
+
+    fn required_checks_policy(&self) -> Result<Option<Value>, String> {
+        Ok(None)
+    }
+
     fn author_token(&self) -> ReviewFuture<'_, Result<String, String>> {
         Box::pin(async { Err("author token source is unavailable".into()) })
     }
 }
 
 impl ReviewTokenSource for crate::github::Tokens {
+    fn required_checks_policy(&self) -> Result<Option<Value>, String> {
+        crate::github::read_required_checks(&self.config_dir().join("required-checks.json"))
+            .map(Some)
+    }
+
+    fn reviewer_app(&self) -> Result<Option<crate::github::StatusApp>, String> {
+        self.registered_app_identity("reviewer")
+            .map(Some)
+            .map_err(|error| error.to_string())
+    }
+
     fn reviewer_token(&self) -> ReviewFuture<'_, Result<String, String>> {
         Box::pin(async move {
             let token = self
@@ -1045,6 +1097,8 @@ where
         let meta = serde_json::json!({
             "reason": summary,
             "accounting_pr": out.get("accounting_pr").cloned().unwrap_or(Value::Null),
+            "accounting_head": out.get("accounting_head").cloned().unwrap_or(Value::Null),
+            "review": out.get("review").cloned().unwrap_or(Value::Null),
             "body_pr": out.get("body_pr").cloned().unwrap_or(Value::Null),
             "row": out.get("row").cloned().unwrap_or(Value::Null),
             "url": out.get("url").cloned().unwrap_or(Value::Null),
@@ -1174,6 +1228,92 @@ where
     T: ReviewTokenSource,
     X: GitHubTransport,
 {
+    async fn retry_accounting_pr(
+        &self,
+        repo: &str,
+        number: i64,
+        reviewer: &str,
+        report: &mut Value,
+    ) {
+        if accounting_ledger(repo).is_none() {
+            return;
+        }
+        let provenance = self.flock.accounting_review(repo, number).await;
+        let (task, head) = match provenance {
+            Ok(Some(pair)) => pair,
+            Ok(None) => return,
+            Err(error) => {
+                append_report(report, "errors", Value::String(error));
+                return;
+            }
+        };
+        let identity = self.tokens.reviewer_app().ok().flatten();
+        let trusted = self.tokens.required_checks_policy().ok().flatten();
+        let pull = match crate::github::require_merge_ci(
+            &self.transport,
+            &self.api_root,
+            repo,
+            number,
+            &head,
+            reviewer,
+            identity.as_ref(),
+            trusted.as_ref(),
+        )
+        .await
+        {
+            Ok(pull) => pull,
+            Err(reason) => {
+                self.record_merge_hold(Some(&task), repo, number, &head, &reason)
+                    .await;
+                append_report(
+                    report,
+                    "accounting_retries",
+                    serde_json::json!({"pr":number,"held":reason}),
+                );
+                return;
+            }
+        };
+        if pull["base"]["ref"].as_str() != accounting_ledger(repo).map(|cfg| cfg.base) {
+            return;
+        }
+        if pull.get("auto_merge").is_some_and(python_truthy) {
+            append_report(
+                report,
+                "accounting_retries",
+                serde_json::json!({"pr":number,"already_enabled":true}),
+            );
+            return;
+        }
+        let author = match self.tokens.author_token().await {
+            Ok(token) => token,
+            Err(error) => {
+                append_report(report, "errors", Value::String(error));
+                return;
+            }
+        };
+        match crate::github::enable_auto_merge_at_head(
+            &self.transport,
+            &self.api_root,
+            repo,
+            number,
+            &head,
+            &author,
+        )
+        .await
+        {
+            Ok(_) => append_report(
+                report,
+                "accounting_retries",
+                serde_json::json!({"pr":number,"enabled":true,"head":head}),
+            ),
+            Err(error) => append_report(
+                report,
+                "errors",
+                Value::String(format!("accounting auto-merge retry: {error}")),
+            ),
+        }
+    }
+
     /// Open and queue the accounting PR for an accepted body, refusing any row whose
     /// evidence is ambiguous, incomplete, already credited, or not yet on the base branch.
     pub async fn account(
@@ -1491,7 +1631,27 @@ where
                 out["url"] = open.get("url").cloned().unwrap_or(Value::Null);
                 out["reason"] =
                     Value::String(format!("an accounting PR for {ident} is already open"));
-                let _ = self._record_accounting(task, &out).await;
+                if let Some(accounting_number) = open.get("number").and_then(Value::as_i64) {
+                    if let Some((id, head)) = self
+                        .flock
+                        .accounting_review(&repo, accounting_number)
+                        .await?
+                    {
+                        out["accounting_head"] = Value::String(head);
+                        let mut report = serde_json::json!({});
+                        self.retry_accounting_pr(&repo, accounting_number, &reviewer, &mut report)
+                            .await;
+                        out["retry"] = report;
+                        // The mapping belongs to this task only; another accepted task cannot replace it.
+                        if task.get("id").and_then(Value::as_str) != Some(id.as_str()) {
+                            return Ok(out);
+                        }
+                    } else {
+                        let _ = self._record_accounting(task, &out).await;
+                        return Ok(out);
+                    }
+                }
+
                 return Ok(out);
             }
             out["reason"] = Value::String(format!(
@@ -1612,6 +1772,7 @@ where
             .and_then(Value::as_i64)
             .ok_or_else(|| "'number'".to_string())?;
         out["accounting_pr"] = Value::from(accounting_number);
+        out["accounting_head"] = Value::String(accounting_commit.clone());
         out["url"] = opened.get("url").cloned().unwrap_or(Value::Null);
         let accounting_head = task_head.chars().take(12).collect::<String>();
         match crate::github::review_pull(
@@ -1634,6 +1795,8 @@ where
                 Value::String(format!("approve as the author App: {error}")),
             ),
         }
+        let reviewer_app = self.tokens.reviewer_app().ok().flatten();
+        let trusted_checks = self.tokens.required_checks_policy().ok().flatten();
         if let Err(reason) = crate::github::require_merge_ci(
             &self.transport,
             &self.api_root,
@@ -1641,6 +1804,8 @@ where
             accounting_number,
             &accounting_commit,
             &reviewer,
+            reviewer_app.as_ref(),
+            trusted_checks.as_ref(),
         )
         .await
         {
@@ -1656,13 +1821,13 @@ where
             let _ = self._record_accounting(task, &out).await;
             return Ok(out);
         }
-        match crate::github::enable_auto_merge(
+        match crate::github::enable_auto_merge_at_head(
             &self.transport,
             &self.api_root,
             &repo,
             accounting_number,
+            &accounting_commit,
             &author,
-            None,
         )
         .await
         {
@@ -2002,6 +2167,8 @@ where
                     Value::String(format!("approve: {error}")),
                 ),
             }
+            let reviewer_app = self.tokens.reviewer_app().ok().flatten();
+            let trusted_checks = self.tokens.required_checks_policy().ok().flatten();
             if let Err(reason) = crate::github::require_merge_ci(
                 &self.transport,
                 &self.api_root,
@@ -2009,6 +2176,8 @@ where
                 number,
                 &head,
                 &token,
+                reviewer_app.as_ref(),
+                trusted_checks.as_ref(),
             )
             .await
             {
@@ -2230,6 +2399,8 @@ where
         report: &mut Value,
         task_id: Option<&str>,
     ) -> bool {
+        let reviewer_app = self.tokens.reviewer_app().ok().flatten();
+        let trusted_checks = self.tokens.required_checks_policy().ok().flatten();
         if let Err(reason) = crate::github::require_merge_ci(
             &self.transport,
             &self.api_root,
@@ -2237,6 +2408,8 @@ where
             number,
             head,
             token,
+            reviewer_app.as_ref(),
+            trusted_checks.as_ref(),
         )
         .await
         {
@@ -2496,6 +2669,7 @@ where
         }
 
         let repos = self.github.repos()?;
+        let mut accounting_budget = 20usize;
         let mut seen = BTreeSet::new();
         let mut listed = BTreeSet::new();
         for repo in repos {
@@ -2519,6 +2693,26 @@ where
                 "repos",
                 serde_json::json!({"repo": repo, "open": pulls.len()}),
             );
+            // The body PR is closed after merging, so retry from the open accounting PR list.
+            // At most twenty candidates per sweep; never create commits, PRs or approvals here.
+            if !dry_run && accounting_ledger(&repo).is_some() {
+                for pull in &pulls {
+                    if accounting_budget == 0 {
+                        break;
+                    }
+                    if pull["branch"]
+                        .as_str()
+                        .is_some_and(|branch| branch.starts_with("accounting/pr"))
+                        && !pull["draft"].as_bool().unwrap_or(false)
+                    {
+                        if let Some(number) = pull["number"].as_i64() {
+                            accounting_budget -= 1;
+                            self.retry_accounting_pr(&repo, number, &token, &mut report)
+                                .await;
+                        }
+                    }
+                }
+            }
             for raw_pr in pulls {
                 if raw_pr.get("draft").is_some_and(python_truthy) {
                     continue;

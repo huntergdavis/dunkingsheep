@@ -14,6 +14,14 @@ use crate::review::{
 struct BorrowedReviewTokens<'a>(&'a dyn ReviewTokenSource);
 
 impl ReviewTokenSource for BorrowedReviewTokens<'_> {
+    fn required_checks_policy(&self) -> Result<Option<Value>, String> {
+        self.0.required_checks_policy()
+    }
+
+    fn reviewer_app(&self) -> Result<Option<crate::github::StatusApp>, String> {
+        self.0.reviewer_app()
+    }
+
     fn reviewer_token(&self) -> ReviewFuture<'_, Result<String, String>> {
         self.0.reviewer_token()
     }
