@@ -40,6 +40,7 @@ export default function OwnerInbox({ api }) {
   return <div className="owner-inbox">
     <header className="owner-inbox-heading">
       <div><h1>Owner inbox</h1><p>Owner conversation, including owner lane mail. Up to 200 recent messages on opening; earlier history is not loaded yet.</p></div>
+      <a href="/dash/cos?panel=mailboxes">Browse all mailboxes</a>
       <a href="/dash/cos?panel=conversation">Open conversation / send a message</a>
     </header>
     {error && <div className="dash-error" role="alert">{items ? 'Updates unavailable. Showing previously loaded messages. ' : 'Inbox unavailable. '}{error} <button onClick={() => setAttempt(value => value + 1)}>Retry</button></div>}

@@ -498,7 +498,10 @@ where
             || (request.method() == Method::GET
                 && matches!(
                     decoded.as_str(),
-                    "/api/projects" | "/api/mailboxes" | "/api/mailbox-messages"
+                    "/api/projects"
+                        | "/api/mailboxes"
+                        | "/api/mailbox-messages"
+                        | "/api/mailbox-message"
                 ))
             || (request.method() == Method::POST && decoded == "/api/ops-board/question")
             || (request.method() == Method::POST && decoded == "/api/pane-inbox")

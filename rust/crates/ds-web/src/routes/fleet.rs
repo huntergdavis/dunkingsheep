@@ -3,6 +3,7 @@
 use super::response_error::WebResponseError;
 mod inbox_summaries;
 mod mailboxes;
+mod message_view;
 
 use super::{
     auth::{AuthBackend, AuthError, Identity, RequestScheme},
@@ -100,6 +101,10 @@ pub fn router(state: Arc<FleetState>, auth: Arc<dyn AuthBackend>, scheme: Reques
         .route("/api/fleet", get(api_fleet))
         .route("/api/projects", get(api_projects))
         .route("/api/mailboxes", get(mailboxes::api_mailboxes))
+        .route(
+            "/api/mailbox-message",
+            get(message_view::api_mailbox_message),
+        )
         .route(
             "/api/mailbox-messages",
             get(inbox_summaries::api_mailbox_messages),
@@ -1592,5 +1597,117 @@ mod tests {
             run(service.oneshot(req)).unwrap().status(),
             StatusCode::BAD_GATEWAY
         );
+    }
+    fn body_view_reply(audience: Option<&str>) -> Value {
+        json!({"status":"ok","message":{
+            "message_id":"i42","mailbox":"exact box","destination":"Box","sender":"agent","subject":"Subject","state":"read","created_at":100.0,
+            "body_bytes":17,"transport":"inbox","reply_to":null,"body":"body\nkept literal","read_at":11.0,"audience":audience,
+            "attachments":[{"id":"a1","filename":"evidence.txt","media_type":"text/plain","size":5}],"future_private_field":"must not forward"
+        }})
+    }
+    #[test]
+    fn inbox_body_view_route_requires_owner_origin_strict_id_and_boolean_opt_in() {
+        let f = Fake::setup();
+        let path = "/api/mailbox-message?mailbox=exact%20box&message_id=i42";
+        assert_eq!(http(app(f.clone(), false), path, None).0, 401);
+        assert_eq!(http(app(f.clone(), true), path, None).0, 403);
+        let req = Request::builder()
+            .uri(path)
+            .header("host", "desk.test")
+            .header("origin", "http://other.test")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            run(owner_app(f.clone()).oneshot(req)).unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        for invalid in [
+            "/api/mailbox-message?mailbox=a&message_id=i01",
+            "/api/mailbox-message?mailbox=a&message_id=i42&include_agent=1",
+            "/api/mailbox-message?mailbox=%0A&message_id=i42",
+        ] {
+            assert_eq!(http(owner_app(f.clone()), invalid, None).0, 400);
+        }
+        assert!(f.calls().is_empty());
+    }
+    #[test]
+    fn inbox_body_view_route_is_scoped_typed_non_cached_and_only_gets_one_body() {
+        let f = Fake::setup();
+        f.reply("inbox_get", body_view_reply(None));
+        let req = Request::builder()
+            .uri("/api/mailbox-message?mailbox=exact%20box&message_id=i42")
+            .body(Body::empty())
+            .unwrap();
+        let response = run(owner_app(f.clone()).oneshot(req)).unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let value: Value =
+            serde_json::from_slice(&run(to_bytes(response.into_body(), usize::MAX)).unwrap())
+                .unwrap();
+        assert_eq!(value["message"]["body"], "body\nkept literal");
+        assert!(value["message"].get("future_private_field").is_none());
+        assert_eq!(
+            *f.calls.lock().unwrap(),
+            vec![(
+                "inbox_get".into(),
+                json!({"mailbox":"exact box","message_id":"i42","include_agent":false})
+            )]
+        );
+        let mut missing_audience = body_view_reply(None);
+        missing_audience["message"]
+            .as_object_mut()
+            .unwrap()
+            .remove("audience");
+        f.reply("inbox_get", missing_audience);
+        assert_eq!(
+            http(
+                owner_app(f.clone()),
+                "/api/mailbox-message?mailbox=exact%20box&message_id=i42",
+                None
+            )
+            .0,
+            502
+        );
+        let mut wrong = body_view_reply(None);
+        wrong["message"]["mailbox"] = json!("other box");
+        f.reply("inbox_get", wrong);
+        assert_eq!(
+            http(
+                owner_app(f.clone()),
+                "/api/mailbox-message?mailbox=exact%20box&message_id=i42",
+                None
+            )
+            .0,
+            502
+        );
+    }
+    #[test]
+    fn inbox_body_view_route_enforces_agent_opt_in_and_admits_the_production_path() {
+        let f = Fake::setup();
+        let path = "/api/mailbox-message?mailbox=exact%20box&message_id=i42";
+        f.reply(
+            "inbox_get",
+            json!({"status":"agent_opt_in_required","message":null}),
+        );
+        assert_eq!(http(owner_app(f.clone()), path, None).0, 403);
+        f.reply("inbox_get", body_view_reply(Some("agent")));
+        // Defense at both boundaries: an upstream success cannot bypass the browser opt-in.
+        assert_eq!(http(owner_app(f.clone()), path, None).0, 403);
+        assert_eq!(
+            http(
+                owner_app(f.clone()),
+                &(path.to_owned() + "&include_agent=true"),
+                None
+            )
+            .0,
+            200
+        );
+        f.reply("inbox_get", json!({"status":"not_found","message":null}));
+        assert_eq!(http(owner_app(f.clone()), path, None).0, 404);
+        f.reply("inbox_get", body_view_reply(None));
+        let service = crate::web_server::decoded_path_routing(owner_app(f.clone()), false);
+        let req = Request::builder().uri(path).body(Body::empty()).unwrap();
+        assert_eq!(run(service.oneshot(req)).unwrap().status(), StatusCode::OK);
+        assert!(f.calls().iter().all(|command| command == "inbox_get"));
     }
 }

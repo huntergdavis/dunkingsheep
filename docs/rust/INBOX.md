@@ -73,3 +73,55 @@ Rollout: deploy the daemon's opt-in paging support before the desk route. An old
 legacy summary response lacks the required order/page fields and is refused as 502; the desk
 will not silently browse a differently resolved mailbox. Existing desk routes and non-opting
 CLI/MCP/TUI clients continue to work while the two components are rolled out separately.
+
+## One-message body view and mailbox browser: S-D
+
+The internal daemon verb `inbox_get(mailbox, message_id, include_agent=false)` is available only
+to authenticated **owner and web roles**. It is not a new CLI or MCP command. The ID must be a
+canonical positive `iNNN` counter value within i64 range, without leading zeros. The mailbox is
+the exact persisted key returned on the summary row: no pane, substring, reserved-name or
+legacy-alias resolution occurs. A missing ID or mismatched mailbox returns `status=not_found`
+with no message. The handler never calls inbox_read/ack/recover or a notice operation.
+
+Audience metadata is checked before a body is loaded. Agent-only mail returns
+`status=agent_opt_in_required` unless `include_agent` is the actual boolean true; other truthy
+values are refused. Successful results include the exact body, original state/read timestamp,
+audience and attachment metadata. Each valid privileged lookup emits one JSON audit line to
+the daemon journal: event, role, pane (null for the web service), mailbox, ID, opt-in and result.
+No body, subject, sender or credential enters that logging interface. Failed/missing/opt-in-denied
+lookups are also audited, without message text. Invalid inputs and denied roles do not read mail.
+
+`GET /api/mailbox-message?mailbox=<exact key>&message_id=i42&include_agent=true` requires an owner
+session and the existing origin checks. The flag defaults false. API identities are refused.
+A typed response allowlist, exact key/ID checks, explicit audience validation, and `no-store`
+protect the body response. Missing messages return404; missing agent opt-in returns403;
+malformed/upstream failures return502. No message state is changed.
+
+Inbox's **Browse all mailboxes** link opens `/dash/cos?panel=mailboxes`: a paged project/agent
+mailbox directory, summary pages and a reading pane. The pinned Owner inbox makes complete
+available owner-mailbox history reachable without the conversation's 200-row window. Unmapped
+mailboxes stay visible, without claiming a lane is dead. Use Refresh for new mail; directory
+pages and summary history are loaded on demand. The existing owner conversation and composer
+remain reachable.
+
+Agent-only summaries are labelled and collapsed by default, with disabled body-selection
+controls until the browser's explicit opt-in is checked. The opt-in is not saved across visits.
+Turning it off hides an already loaded or late-arriving agent body immediately. Messages use
+the existing sanitized Markdown renderer; attachments are listed as text metadata (downloads
+are not included in this slice). There is no reply action into an agent-only thread.
+
+Release order remains daemon first, desk second. The body API has no fallback to a consuming
+read or to the old daemon. This slice requires independent security review before release.
+
+Deployment note: the queued daemon build3373428a carries S-C but not this new body verb. It
+cannot enable S-D bodies. The browser treats502 as a soft unavailable state, mentions that a
+daemon upgrade may be needed, and keeps Owner conversation reachable; no error fallback reads
+or acknowledges mail. A daemon containing inbox_get must be live before S-D body browsing is
+advertised as available.
+
+Refused inbox_get calls are audited as metadata-only `result=refused`, including caller/role,
+missing/unknown arguments and invalid inputs before body access. Unvalidated metadata is
+bounded and replaced with `<invalid>` when it is not a safe key/ID; raw argument objects and
+credentials are never serialized. Opening a folder/history page automatically previews its
+first eligible message and produces a body-view audit line; this is not a read/ack receipt.
+The owner role includes the authenticated owner seat, whose body access is intentional.

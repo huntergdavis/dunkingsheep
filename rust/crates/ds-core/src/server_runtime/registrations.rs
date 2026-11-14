@@ -750,6 +750,7 @@ os.rename(out_path + ".tmp", out_path)
             "inbox_send_agent_only",
             "inbox_count",
             "inbox_list",
+            "inbox_get",
             "inbox_read",
             "inbox_status",
             "inbox_ack",

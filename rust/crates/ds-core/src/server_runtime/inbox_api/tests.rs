@@ -382,10 +382,10 @@ fn h_inbox_fetch_matches_python() {
 }
 
 #[test]
-fn inbox_registration_inventory_has_exactly_thirteen_unique_handlers() {
+fn inbox_registration_inventory_has_exactly_fourteen_unique_handlers() {
     let h = handlers();
     let names = h.registration_attempts();
-    assert_eq!(names.len(), 13);
+    assert_eq!(names.len(), 14);
     let unique = names
         .iter()
         .copied()
@@ -397,6 +397,7 @@ fn inbox_registration_inventory_has_exactly_thirteen_unique_handlers() {
             "inbox_send_agent_only",
             "inbox_count",
             "inbox_list",
+            "inbox_get",
             "inbox_read",
             "inbox_status",
             "inbox_ack",
@@ -1381,5 +1382,148 @@ fn mailbox_summary_literal_keys_do_not_resolve_live_lanes() {
             "{role}"
         );
     }
+    dispatcher.close();
+}
+
+#[test]
+fn inbox_body_view_is_scoped_opt_in_and_preserves_message_and_notify_bytes() {
+    let (dir, services) = make_services("body-view", factory(None), None);
+    let store = services.flock().stores().inbox.unwrap();
+    let plain = store
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: "exact box",
+            body: Some("plain body\nunchanged"),
+            ..Default::default()
+        })
+        .unwrap();
+    let agent = store
+        .send_snapshot_wire_agent_only(
+            &crate::inbox_store::Outgoing {
+                mailbox: "exact box",
+                body: Some("agent secret body"),
+                ..Default::default()
+            },
+            None,
+            None,
+            true,
+        )
+        .unwrap()
+        .summary
+        .message_id;
+    let db = rusqlite::Connection::open(dir.path().join("body-view-inbox.db")).unwrap();
+    db.execute("UPDATE messages SET notify_state='sent',notify_reason='existing',notify_at=10,notify_transport_id='n1',notify_attempt=2",[]).unwrap();
+    db.execute(
+        "UPDATE messages SET state='acked',read_at=11,acked_at=12 WHERE id=?",
+        [&plain],
+    )
+    .unwrap();
+    let snapshot = || {
+        db.prepare("SELECT quote(state)||'|'||quote(read_at)||'|'||quote(acked_at)||'|'||quote(cancelled_at)||'|'||quote(archived_at)||'|'||quote(notify_state)||'|'||quote(notify_reason)||'|'||quote(notify_at)||'|'||quote(notify_transport_id)||'|'||quote(notify_attempt) FROM messages ORDER BY id")
+            .unwrap().query_map([],|row|row.get::<_,String>(0)).unwrap().collect::<Result<Vec<_>,_>>().unwrap()
+    };
+    let initial = snapshot();
+    let dispatcher = services.dispatcher(handlers());
+    let owner = request("w2:p2");
+    let get = |id: &str, include_agent: bool| {
+        dispatcher
+            .dispatch(
+                "inbox_get",
+                &json!({"mailbox":"exact box","message_id":id,"include_agent":include_agent}),
+                &owner,
+            )
+            .unwrap()
+    };
+    let viewed = get(&plain, false);
+    assert_eq!(viewed["status"], "ok");
+    assert_eq!(viewed["message"]["body"], "plain body\nunchanged");
+    assert_eq!(viewed["message"]["read_at"].as_f64(), Some(11.0));
+    let refused = get(&agent, false);
+    assert_eq!(refused["status"], "agent_opt_in_required");
+    assert!(refused["message"].is_null());
+    let allowed = get(&agent, true);
+    assert_eq!(allowed["message"]["body"], "agent secret body");
+    assert_eq!(allowed["message"]["audience"], "agent");
+    assert_eq!(allowed["message"]["state"], "queued");
+    assert!(allowed["message"]["read_at"].is_null());
+    for key in ["other box", "exact", "self"] {
+        let result = dispatcher
+            .dispatch(
+                "inbox_get",
+                &json!({"mailbox":key,"message_id":plain}),
+                &owner,
+            )
+            .unwrap();
+        assert_eq!(result["status"], "not_found");
+        assert!(result["message"].is_null());
+    }
+    assert_eq!(get("i999999", false)["status"], "not_found");
+    for args in [
+        json!({}),
+        json!({"mailbox":"exact box","message_id":plain,"body":"MUST_NOT_LOG"}),
+        json!({"mailbox":"exact box","message_id":"i01"}),
+        json!({"mailbox":"exact box","message_id":plain,"include_agent":"true"}),
+        json!({"mailbox":"bad\nbox","message_id":plain}),
+    ] {
+        assert!(dispatcher.dispatch("inbox_get", &args, &owner).is_err());
+    }
+    assert_eq!(snapshot(), initial);
+    dispatcher.close();
+}
+
+#[test]
+fn inbox_body_view_only_owner_and_web_can_retrieve_even_with_agent_opt_in() {
+    let (_dir, services) = make_services("body-roles", factory(None), None);
+    let store = services.flock().stores().inbox.unwrap();
+    let id = store
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: "self",
+            body: Some("owner body"),
+            ..Default::default()
+        })
+        .unwrap();
+    let dispatcher = services.dispatcher(handlers());
+    let args = json!({"mailbox":"self","message_id":id,"include_agent":true});
+    for role in ["worker", "reviewer", "planner", "desk"] {
+        services
+            .flock()
+            .with_roles(|roles, _| {
+                roles.register("w1:p1", role, None, None, Some("codex"), None, None, None)
+            })
+            .unwrap();
+        assert!(
+            dispatcher
+                .dispatch("inbox_get", &args, &request("w1:p1"))
+                .is_err(),
+            "{role}"
+        );
+    }
+    assert!(dispatcher
+        .dispatch("inbox_get", &args, &RequestCtx::default())
+        .is_err());
+    let (web, system) = services
+        .flock()
+        .with_roles(|roles, _| {
+            Ok((
+                roles.issue_token("web", Some("body-web"), None)?,
+                roles.issue_token("system", Some("body-system"), None)?,
+            ))
+        })
+        .unwrap();
+    let token_ctx = |token: String| RequestCtx {
+        service_token: Some(token),
+        socket_peer: Some(true),
+        socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
+        ..RequestCtx::default()
+    };
+    assert!(dispatcher
+        .dispatch("inbox_get", &args, &token_ctx(system))
+        .is_err());
+    assert_eq!(
+        dispatcher
+            .dispatch("inbox_get", &args, &token_ctx(web))
+            .unwrap()["message"]["body"],
+        "owner body"
+    );
+    assert!(store.get_message(&id).unwrap().read_at.is_none());
     dispatcher.close();
 }

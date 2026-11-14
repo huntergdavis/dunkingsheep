@@ -194,7 +194,10 @@ mod inbox_tests;
 // `list`, `get` - and they take the pool, so the store half that still waits is the
 // WRITE one (`send`/`ack`/`purge` through `db::SyncWriter`, #187).
 
+mod message_view;
 mod paging;
+pub use message_view::valid_message_id;
+pub(crate) use message_view::{body_view_audit, body_view_refusal_audit, message_view_metadata};
 pub use paging::list_page;
 
 use rusqlite::Connection;

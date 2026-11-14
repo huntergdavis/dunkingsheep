@@ -10,6 +10,7 @@ impl Dispatcher {
             ("inbox_send_agent_only", h_inbox_send_agent_only as Handler),
             ("inbox_count", h_inbox_count),
             ("inbox_list", h_inbox_list),
+            ("inbox_get", h_inbox_get),
             ("inbox_read", h_inbox_read),
             ("inbox_status", h_inbox_status),
             ("inbox_ack", h_inbox_ack),
@@ -146,6 +147,75 @@ pub fn h_inbox_list(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
         Ok(json!({"mailbox":key,"messages":messages}))
     })
 }
+/// Internal body lookup for the owner transport. It never uses inbox_read or resolves labels.
+pub fn h_inbox_get(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let role = match c.flock.caller_role(c.self_pane_id(), c.env) {
+        Ok(role) => role,
+        Err(error) => {
+            audit_inbox_get_refusal(c, "unresolved", Some(&args));
+            return Err(error);
+        }
+    };
+    let refused = |reason: &str| -> Result<Value, DunkError> {
+        audit_inbox_get_refusal(c, &role, Some(&args));
+        Err(DunkError::Refused(reason.into()))
+    };
+    if !matches!(role.as_str(), "owner" | "web") {
+        return refused("message bodies require the owner or web role");
+    }
+    let key = match args.get("mailbox") {
+        Some(Value::String(key))
+            if !key.trim().is_empty()
+                && key.len() <= 1024
+                && !key.chars().any(char::is_control) =>
+        {
+            key
+        }
+        _ => return refused("invalid literal mailbox"),
+    };
+    let id = match args.get("message_id") {
+        Some(Value::String(id)) if crate::inbox::valid_message_id(id) => id,
+        _ => return refused("invalid inbox message id"),
+    };
+    let include_agent = match args.get("include_agent") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+        Some(Value::Bool(true)) => true,
+        _ => return refused("include_agent must be a boolean"),
+    };
+    let result = c.env.with_inbox_env(&mut |env| {
+        let Some(metadata) = crate::inbox::message_view_metadata(env.pool(), key, id)? else {
+            return Ok(json!({"status":"not_found","message":null}));
+        };
+        if metadata
+            .audience
+            .as_deref()
+            .is_some_and(|audience| audience != "agent")
+        {
+            return Err(DunkError::Refused("unsupported message audience".into()));
+        }
+        if metadata.audience.as_deref() == Some("agent") && !include_agent {
+            return Ok(json!({"status":"agent_opt_in_required","message":null}));
+        }
+        let message = env.store().get_message(id)?;
+        if message.summary.mailbox != *key || message.summary.message_id != *id {
+            return Ok(json!({"status":"not_found","message":null}));
+        }
+        let mut value = owner_message_value(&message);
+        value["audience"] = json!(metadata.audience);
+        Ok(json!({"status":"ok","message":value}))
+    });
+    let status = match &result {
+        Ok(value) => value["status"].as_str().unwrap_or("error"),
+        Err(DunkError::Refused(_)) => "refused",
+        Err(_) => "error",
+    };
+    eprintln!(
+        "{}",
+        crate::inbox::body_view_audit(&role, c.self_pane_id(), key, id, include_agent, status)
+    );
+    result
+}
+
 /// The wire shape of one read: messages, and the caller's task queues when they were composed.
 fn inbox_read_out(r: &crate::flock::commands_inbox::ReadResult) -> Value {
     let mut out = json!({"mailbox": r.mailbox, "messages": r.messages.iter().map(owner_message_value).collect::<Vec<_>>()});
