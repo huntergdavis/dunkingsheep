@@ -568,7 +568,7 @@ fn thread_views_use_recorded_kind_and_keep_every_legacy_shape_historical() {
     }
     let read = |filter| {
         OwnerConversations::new(&flock, &NoPanes)
-            .conversation_filtered_cursor(Some(100), None, Some(OWNER), filter)
+            .conversation_filtered_cursor(100, None, Some(OWNER), filter)
             .unwrap()
             .messages
     };
@@ -591,21 +591,21 @@ fn thread_views_use_recorded_kind_and_keep_every_legacy_shape_historical() {
         "missing audience does not imply human"
     );
     let page = OwnerConversations::new(&flock, &NoPanes)
-        .conversation_filtered_cursor(Some(1), None, Some(OWNER), HumanThreads)
+        .conversation_filtered_cursor(1, None, Some(OWNER), HumanThreads)
         .unwrap();
     assert_eq!(vec![reply.clone()], ids(&page.messages));
     let older = OwnerConversations::new(&flock, &NoPanes)
-        .conversation_filtered_cursor(Some(1), Some(&reply), Some(OWNER), HumanThreads)
+        .conversation_filtered_cursor(1, Some(&reply), Some(OWNER), HumanThreads)
         .unwrap();
     assert_eq!(vec![human], ids(&older.messages));
     assert!(
         OwnerConversations::new(&flock, &NoPanes)
-            .conversation_filtered_cursor(Some(1), Some(&vp), Some(OWNER), HumanThreads)
+            .conversation_filtered_cursor(1, Some(&vp), Some(OWNER), HumanThreads)
             .is_err(),
         "cursor cannot cross views"
     );
     assert!(OwnerConversations::new(&flock, &NoPanes)
-        .conversation_filtered_cursor(Some(100), None, Some(WORKER), Historical)
+        .conversation_filtered_cursor(100, None, Some(WORKER), Historical)
         .is_err());
     assert_eq!(
         "queued",
