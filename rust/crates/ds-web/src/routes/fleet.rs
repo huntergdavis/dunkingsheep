@@ -1,6 +1,7 @@
 //! Isolated fleet routes. Production RPC, direct-message transport, local inventory,
 //! and metrics connection ownership must be bound and verified under t1702 before mounting.
 use super::response_error::WebResponseError;
+mod inbox_summaries;
 mod mailboxes;
 
 use super::{
@@ -99,6 +100,10 @@ pub fn router(state: Arc<FleetState>, auth: Arc<dyn AuthBackend>, scheme: Reques
         .route("/api/fleet", get(api_fleet))
         .route("/api/projects", get(api_projects))
         .route("/api/mailboxes", get(mailboxes::api_mailboxes))
+        .route(
+            "/api/mailbox-messages",
+            get(inbox_summaries::api_mailbox_messages),
+        )
         .route("/api/ops-metrics", get(operations_metrics))
         .layer(Extension(state))
         .layer(Extension(auth))
@@ -1476,5 +1481,113 @@ mod tests {
             );
             assert_eq!(value, case["expected"], "{case}");
         }
+    }
+    #[test]
+    fn mailbox_summary_route_requires_owner_and_same_origin_before_rpc() {
+        let f = Fake::setup();
+        assert_eq!(
+            http(
+                app(f.clone(), false),
+                "/api/mailbox-messages?mailbox=owner",
+                None
+            )
+            .0,
+            401
+        );
+        assert_eq!(
+            http(
+                app(f.clone(), true),
+                "/api/mailbox-messages?mailbox=owner",
+                None
+            )
+            .0,
+            403
+        );
+        let request = Request::builder()
+            .uri("/api/mailbox-messages?mailbox=owner")
+            .header("host", "desk.test")
+            .header("origin", "http://elsewhere.test")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            run(owner_app(f.clone()).oneshot(request)).unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        for path in [
+            "/api/mailbox-messages",
+            "/api/mailbox-messages?mailbox=%0A",
+            "/api/mailbox-messages?mailbox=a&limit=101",
+            "/api/mailbox-messages?mailbox=a&before=",
+        ] {
+            assert_eq!(http(owner_app(f.clone()), path, None).0, 400);
+        }
+        assert!(f.calls().is_empty());
+    }
+
+    #[test]
+    fn mailbox_summary_route_uses_literal_paging_and_typed_body_free_allowlist() {
+        let f = Fake::setup();
+        f.reply("inbox_list",json!({"mailbox":"self","order":"newest_first","next_before":"i7","body":"top secret","messages":[{
+            "message_id":"i8","mailbox":"self","destination":"self","sender":"worker","subject":"Review", "state":"read","created_at":100,
+            "body_bytes":42,"transport":"inbox","reply_to":null,"attachment_count":1,"audience":"agent","waiting_s":null,"body":"private body"
+        }]}));
+        let (status, page) = http(
+            owner_app(f.clone()),
+            "/api/mailbox-messages?mailbox=self&limit=2&before=i9",
+            None,
+        );
+        assert_eq!(status, 200);
+        assert_eq!(page["next_before"], "i7");
+        assert_eq!(page["messages"][0]["audience"], "agent");
+        assert_eq!(page["messages"][0]["subject"], "Review");
+        assert!(page.get("body").is_none());
+        assert!(page["messages"][0].get("body").is_none());
+        assert_eq!(
+            *f.calls.lock().unwrap(),
+            vec![(
+                "inbox_list".into(),
+                json!({"mailbox":"self","limit":2,"before":"i9","newest_first":true,"literal_mailbox":true,"unread_only":false})
+            )]
+        );
+        f.reply(
+            "inbox_list",
+            json!({"mailbox":"self","order":"newest_first","next_before":null,"messages":[]}),
+        );
+        assert_eq!(
+            http(
+                owner_app(f.clone()),
+                "/api/mailbox-messages?mailbox=self",
+                None
+            )
+            .1["messages"],
+            json!([])
+        );
+        f.reply(
+            "inbox_list",
+            json!({"mailbox":"self","messages":[{"subject":{"body":"must refuse"}}]}),
+        );
+        assert_eq!(
+            http(
+                owner_app(f.clone()),
+                "/api/mailbox-messages?mailbox=self",
+                None
+            )
+            .0,
+            502
+        );
+    }
+
+    #[test]
+    fn mailbox_summary_production_path_and_rpc_failure_do_not_fall_to_static() {
+        let f = Fake::setup();
+        let service = crate::web_server::decoded_path_routing(owner_app(f), false);
+        let req = Request::builder()
+            .uri("/api/mailbox-messages?mailbox=unknown")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            run(service.oneshot(req)).unwrap().status(),
+            StatusCode::BAD_GATEWAY
+        );
     }
 }

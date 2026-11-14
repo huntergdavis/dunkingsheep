@@ -194,6 +194,9 @@ mod inbox_tests;
 // `list`, `get` - and they take the pool, so the store half that still waits is the
 // WRITE one (`send`/`ack`/`purge` through `db::SyncWriter`, #187).
 
+mod paging;
+pub use paging::list_page;
+
 use rusqlite::Connection;
 
 use crate::db::{map_sqlite, ReadPool};

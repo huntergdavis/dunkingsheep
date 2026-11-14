@@ -84,10 +84,48 @@ pub fn h_inbox_count(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkEr
 pub fn h_inbox_list(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let m = mailbox(&args);
     let n = limit(&args, 50)?;
+    let newest_first = python_bool_arg(&args, "newest_first", false);
+    let literal_mailbox = python_bool_arg(&args, "literal_mailbox", false);
+    if literal_mailbox {
+        let role = c.flock.caller_role(c.self_pane_id(), c.env)?;
+        if !newest_first || !matches!(role.as_str(), "owner" | "web" | "system") {
+            return Err(DunkError::Refused(
+                "literal mailbox history needs newest_first and the owner role".into(),
+            ));
+        }
+        match args.get("mailbox") {
+            Some(Value::String(name))
+                if !name.trim().is_empty()
+                    && name.len() <= 1024
+                    && !name.chars().any(char::is_control) => {}
+            _ => return Err(DunkError::Refused("invalid literal mailbox".into())),
+        }
+    }
     c.env.with_inbox_env(&mut |env| {
-        let key = c
-            .flock
-            .mailbox_or_self(env, m.as_deref(), c.self_pane_id(), false, true)?;
+        let key = if literal_mailbox {
+            m.clone().unwrap()
+        } else {
+            c.flock
+                .mailbox_or_self(env, m.as_deref(), c.self_pane_id(), false, true)?
+        };
+        if newest_first {
+            let before = match args.get("before") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(id)) => Some(id.as_str()),
+                _ => return Err(DunkError::Refused("inbox cursor must be a string".into())),
+            };
+            return crate::inbox::list_page(
+                env.pool(),
+                &key,
+                python_bool_arg(&args, "unread_only", true),
+                bound_limit(&n)?,
+                before,
+                env.now(),
+            );
+        }
+        if args.get("before").is_some_and(|value| !value.is_null()) {
+            return Err(DunkError::Refused("before requires newest_first".into()));
+        }
         let rows = crate::inbox::list_signed(
             env.pool(),
             &key,
