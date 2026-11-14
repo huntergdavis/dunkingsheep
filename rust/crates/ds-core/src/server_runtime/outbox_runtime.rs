@@ -1802,6 +1802,22 @@ mod tests {
                         "nothing typed (owner lane)",
                     ],
                 ),
+                (
+                    // The owner pane is busy: an only_when=idle dunk is still stored as mail.
+                    "owner-busy",
+                    vec![
+                        "dunk d1 -> w1:p1: stored in the inbox as ",
+                        "nothing typed (owner lane)",
+                    ],
+                ),
+                (
+                    // The owner pane's harness is mid-turn (a working marker over the box).
+                    "owner-midturn",
+                    vec![
+                        "dunk d1 -> w1:p1: stored in the inbox as ",
+                        "nothing typed (owner lane)",
+                    ],
+                ),
                 ("clear", vec!["dunk d1 -> w1:p1: typed and submitted"]),
             ] {
                 let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1889,9 +1905,15 @@ mod tests {
                 match case.as_str() {
                     "draft" => DRAFT.to_string(),
                     "owner-unclear" => unclear,
+                    "owner-midturn" => {
+                        format!("\u{2022} Working (12s \u{2022} esc to interrupt)\n\n{EMPTY}")
+                    }
                     _ => EMPTY.to_string(),
                 },
             );
+            if matches!(case.as_str(), "owner-busy" | "owner-midturn") {
+                fake.statuses.insert("w1:p1".into(), "working".into());
+            }
         }
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -1912,6 +1934,8 @@ mod tests {
                     text: Some("WATCH inspect every coordinator".into()),
                     start: true,
                     interval: Some("0.001".into()),
+                    // The live owner dunks are only_when=idle; the gate must not stop the store.
+                    only_when: case.starts_with("owner-").then(|| "idle".to_string()),
                     ..Default::default()
                 },
             )
@@ -1972,6 +1996,15 @@ mod tests {
                     "no key submits the draft: {:?}",
                     fake.keys_sent
                 );
+                assert!(status.starts_with("Stored (inbox) "), "{status}");
+            }
+            "owner-busy" | "owner-midturn" => {
+                assert_eq!(1, rows, "stored although the pane was never idle");
+                assert!(
+                    typed.is_empty(),
+                    "the wake keeps its gates: nothing is typed into a busy pane: {typed:?}"
+                );
+                assert!(fake.keys_sent.is_empty(), "{:?}", fake.keys_sent);
                 assert!(status.starts_with("Stored (inbox) "), "{status}");
             }
             "owner-unclear" => {
