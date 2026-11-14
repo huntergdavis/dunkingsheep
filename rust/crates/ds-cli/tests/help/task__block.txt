@@ -1,8 +1,10 @@
-usage: dunkingsheep task block [-h] [--reason REASON] id
+usage: dunkingsheep task block [-h] [--reason REASON] [--waiting-on WHAT] id
 
 positional arguments:
   id
 
 options:
-  -h, --help       show this help message and exit
+  -h, --help         show this help message and exit
   --reason REASON
+  --waiting-on WHAT  what the task waits for: owner, evidence, release,
+                     numbers, task:<id> or pr:<repo>#<number>

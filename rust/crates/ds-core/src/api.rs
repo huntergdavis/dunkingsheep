@@ -3528,7 +3528,7 @@ pub fn h_task_read(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
             .flock
             .task_read_wire_with_notes(&id, context.self_pane_id()),
     )??;
-    with_task_project(context, task.wire)
+    Ok(with_block_kind(with_task_project(context, task.wire)?))
 }
 
 /// `dunk_api.h_task_update`.
@@ -3847,12 +3847,37 @@ pub fn h_task_note(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
 /// `dunk_api.h_task_block`.
 pub fn h_task_block(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let id = args.get("id").map(python_value_string).unwrap_or_default();
+    // t4704: `waiting_on` makes the block say what the task waits for.
+    if let Some(waiting_on) = task_string_arg(&args, "waiting_on", "task_block")? {
+        let reason = task_string_arg(&args, "reason", "task_block")?;
+        let task = context.block_on(context.flock.task_block_waiting_on_wire(
+            &id,
+            waiting_on,
+            reason,
+            context.self_pane_id(),
+        ))??;
+        return Ok(with_block_kind(task.wire));
+    }
     let task = context.block_on(context.flock.task_block_wire(
         &id,
         args.get("reason"),
         context.self_pane_id(),
     ))??;
-    Ok(task.wire)
+    Ok(with_block_kind(task.wire))
+}
+
+/// t4704: a blocked task's wire carries `block_kind` when its reason is one of the typed
+/// waits. The key is absent for a free-text or empty reason and for a task that is not
+/// blocked, so every other task's wire is unchanged.
+fn with_block_kind(mut wire: Value) -> Value {
+    if wire.get("status").and_then(Value::as_str) == Some("blocked") {
+        let kind =
+            crate::tasks::block_kind::kind_of(wire.get("block_reason").and_then(Value::as_str));
+        if kind != "other" {
+            wire["block_kind"] = json!(kind);
+        }
+    }
+    wire
 }
 
 /// `dunk_api.h_task_unblock`.
@@ -4018,7 +4043,7 @@ pub fn h_task_list(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
     Ok(json!({
         "scope": scope.unwrap_or_else(|| "visible".into()),
         "pane_id": context.self_pane_id(),
-        "tasks": tasks.into_iter().map(|task| task.wire).collect::<Vec<_>>(),
+        "tasks": tasks.into_iter().map(|task| with_block_kind(task.wire)).collect::<Vec<_>>(),
     }))
 }
 

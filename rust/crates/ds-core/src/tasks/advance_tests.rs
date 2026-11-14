@@ -632,3 +632,43 @@ async fn the_owner_service_proof_grants_nothing_to_any_other_actor() {
     assert_eq!("open", store.get(&task.id).await.unwrap().status);
     assert_eq!(0, count(&store, &task.id, "completed").await);
 }
+
+/// t4704: a task blocked with a typed wait is not handed over; the next open one is, and with
+/// nothing else open the handoff skips. (Store half only: `stand_in_plan`, as above.)
+#[tokio::test]
+async fn a_task_blocked_on_a_typed_wait_is_never_the_next_job() {
+    let only_blocked = store("typed-wait-only").await;
+    let store = store("typed-wait-skipped").await;
+    let finished = mine(&store, "A finish me", "urgent").await;
+    let parked = mine(&store, "B waits for the release", "urgent").await;
+    store
+        .block(&parked.id, "waiting-release: ships after the next daemon")
+        .await
+        .unwrap();
+    let dependent = mine(&store, "C waits for a task", "urgent").await;
+    store.block_by(&dependent.id, &parked.id).await.unwrap();
+    let open = mine(&store, "D open work", "low").await;
+    let plan = advance_from(&store, &finished).await;
+    assert_eq!("claim", text(&plan, "action"), "{plan:?}");
+    assert_eq!(
+        open.id,
+        text(&plan, "task_id"),
+        "the blocked urgent tasks are skipped"
+    );
+    for id in [&parked.id, &dependent.id] {
+        assert_eq!("blocked", store.get(id).await.unwrap().status);
+    }
+
+    let finished = mine(&only_blocked, "A finish me", "urgent").await;
+    let parked = mine(&only_blocked, "B waits for numbers", "urgent").await;
+    only_blocked
+        .block(&parked.id, "waiting-numbers: 24 h after deploy")
+        .await
+        .unwrap();
+    let plan = advance_from(&only_blocked, &finished).await;
+    assert_eq!("skip", text(&plan, "action"), "{plan:?}");
+    assert_eq!(
+        "blocked",
+        only_blocked.get(&parked.id).await.unwrap().status
+    );
+}

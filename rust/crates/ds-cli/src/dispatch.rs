@@ -4758,6 +4758,12 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                     "reason".into(),
                     ns.get("reason").cloned().unwrap_or(Value::Null),
                 );
+                // t4704: sent only when given, so a plain block request is unchanged.
+                if sub == "block" {
+                    if let Some(waiting) = ns.get("waiting_on").filter(|value| !value.is_null()) {
+                        args.insert("waiting_on".into(), waiting.clone());
+                    }
+                }
                 let method = if sub == "block" {
                     "task_block"
                 } else {

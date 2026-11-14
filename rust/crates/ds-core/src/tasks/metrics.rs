@@ -219,6 +219,7 @@ impl Tasks {
 
         let mut by_status: BTreeMap<String, i64> =
             STATUSES.iter().map(|s| (s.to_string(), 0)).collect();
+        let mut blocked_waiting_on: BTreeMap<&'static str, i64> = BTreeMap::new();
         let mut by_priority: BTreeMap<String, i64> =
             PRIORITIES.iter().map(|p| (p.to_string(), 0)).collect();
         let (mut global_count, mut pane_count) = (0i64, 0i64);
@@ -227,6 +228,11 @@ impl Tasks {
         for task in &tasks {
             *by_status.entry(task.status.clone()).or_insert(0) += 1;
             *by_priority.entry(task.priority.clone()).or_insert(0) += 1;
+            if task.status == "blocked" {
+                // t4704: blocked tasks by what they wait on.
+                let kind = super::block_kind::kind_of(task.block_reason.as_deref());
+                *blocked_waiting_on.entry(kind).or_insert(0) += 1;
+            }
             if task.scope == "global" {
                 global_count += 1;
             } else {
@@ -304,6 +310,7 @@ impl Tasks {
                 "by_status": by_status,
                 "by_priority": by_priority,
                 "by_scope": {"global": global_count, "pane": pane_count},
+                "blocked_waiting_on": blocked_waiting_on,
                 "blocked_vs_in_progress": {
                     "blocked": by_status.get("blocked").copied().unwrap_or(0),
                     "in_progress": by_status.get("in_progress").copied().unwrap_or(0),

@@ -548,6 +548,13 @@ under a named project instead: your own, or one you hold a planner grant
 for (the owner may name any; any other name is refused). `--no-project`
 files it under none. A lane with global membership files unmapped tasks
 unless it names a project.
+A task that waits for something is BLOCKED with what it waits for, so
+the next-job handoff skips it: `task block <id> --waiting-on owner |
+evidence | release | numbers | task:<id> | pr:<repo>#<number>`
+(`--reason` adds the detail). The kind is shown in `task read`,
+`task list`, `task backlog` and `task_metrics`. `task:<id>` reopens
+the task when that task completes; every other wait is cleared with
+`task unblock`.
 `task_metrics` is the read-only analytics endpoint for a status board or
 the CTO. It reports current queue depth and the status / priority / scope
 mix, per-assignee load, created/claimed/completed/cancelled/requeued

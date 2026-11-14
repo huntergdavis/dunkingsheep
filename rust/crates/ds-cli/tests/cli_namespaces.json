@@ -6514,7 +6514,8 @@
    "reason": null,
    "self_pane": null,
    "socket": null,
-   "task_command": "block"
+   "task_command": "block",
+   "waiting_on": null
   }
  },
  {
@@ -6532,7 +6533,8 @@
    "reason": null,
    "self_pane": null,
    "socket": null,
-   "task_command": "block"
+   "task_command": "block",
+   "waiting_on": null
   }
  },
  {
@@ -6550,7 +6552,8 @@
    "reason": null,
    "self_pane": null,
    "socket": null,
-   "task_command": "block"
+   "task_command": "block",
+   "waiting_on": null
   }
  },
  {
@@ -6569,7 +6572,28 @@
    "reason": "x",
    "self_pane": null,
    "socket": null,
-   "task_command": "block"
+   "task_command": "block",
+   "waiting_on": null
+  }
+ },
+ {
+  "argv": [
+   "task",
+   "block",
+   "x",
+   "--waiting-on",
+   "x"
+  ],
+  "namespace": {
+   "command": "task",
+   "id": "x",
+   "json": false,
+   "no_start_daemon": false,
+   "reason": null,
+   "self_pane": null,
+   "socket": null,
+   "task_command": "block",
+   "waiting_on": "x"
   }
  },
  {
