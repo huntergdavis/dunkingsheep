@@ -320,33 +320,33 @@ impl Flock {
         if let Some(message) = failure {
             return Err(self.respawn_failed(&failure_context, Some(new_pid), message));
         }
-        self.record_launch(
-            &pane_id,
-            &[
-                (
-                    "agent",
-                    old.get("agent")
-                        .filter(|v| truthy(v))
-                        .cloned()
-                        .unwrap_or_else(|| pane_value["agent"].clone()),
-                ),
-                ("argv", json!(request.argv)),
-                (
-                    "command",
-                    json!(super::commands_layout::shlex_join(request.argv)),
-                ),
-                (
-                    "cwd",
-                    old.get("cwd")
-                        .filter(|v| truthy(v))
-                        .cloned()
-                        .unwrap_or_else(|| json!(pane.cwd)),
-                ),
-                ("source", json!("respawn_pane")),
-                ("previous", old),
-                ("reason", json!(reason)),
-            ],
-        );
+        let mut fields = vec![
+            (
+                "agent",
+                old.get("agent")
+                    .filter(|v| truthy(v))
+                    .cloned()
+                    .unwrap_or_else(|| pane_value["agent"].clone()),
+            ),
+            ("argv", json!(request.argv)),
+            (
+                "command",
+                json!(super::commands_layout::shlex_join(request.argv)),
+            ),
+            (
+                "cwd",
+                old.get("cwd")
+                    .filter(|v| truthy(v))
+                    .cloned()
+                    .unwrap_or_else(|| json!(pane.cwd)),
+            ),
+            ("source", json!("respawn_pane")),
+            ("previous", old),
+            ("reason", json!(reason)),
+        ];
+        // t4473: the respawned process is the pane's new root.
+        fields.extend(super::launch_identity(request.argv, Some(new_pid)));
+        self.record_launch(&pane_id, &fields);
         self.respawn_metric("pane.respawn", &pane_id, "ok", Some(&reason));
         *self.last_message.lock().expect("last message lock") =
             format!("Respawned pane {pane_id} ({pane_pid} -> {new_pid})");

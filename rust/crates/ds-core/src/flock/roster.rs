@@ -36,6 +36,9 @@ pub trait RosterEnv {
     fn launch(&self, pane_id: &str) -> Option<Value>;
     /// When the lane's pane root process started (epoch seconds), None when it cannot be read.
     fn pane_started_at(&self, lane: &Value) -> Option<f64>;
+    /// Is the process a launch record names (pid and kernel start time) still running in the
+    /// lane's pane? `None` when that cannot be read.
+    fn launch_process_live(&self, lane: &Value, pid: i64, start: &str) -> Option<bool>;
 }
 
 /// A model sample older than this is not shown as the lane's model (t4473).
@@ -61,6 +64,7 @@ const MODEL_LOOKBACK_S: f64 = 24.0 * 3600.0;
 /// true; a later source that does may say so. A stale sample's value is never carried.
 fn model_cell(
     launch: Option<&Value>,
+    bound: Option<Option<bool>>,
     started: Option<f64>,
     sample: Option<&Value>,
     read_error: Option<&str>,
@@ -94,8 +98,18 @@ fn model_cell(
     };
     if let Some(record) = launch {
         let argv = argv_of(record);
-        let flagged =
-            crate::state::flag(&argv, &crate::state::MODEL_FLAGS).filter(|model| !model.is_empty());
+        // A record written since t4473 slice B names the model itself; an older one only has
+        // the command line.
+        let field = |key: &str| {
+            record
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        };
+        let flagged = field("model").or_else(|| {
+            crate::state::flag(&argv, &crate::state::MODEL_FLAGS).filter(|model| !model.is_empty())
+        });
         if let Some(model) = flagged {
             // A launch record is kept after its process is gone, and the pane may run something
             // else by now. It counts only for the kind of agent the lane runs and only when the
@@ -104,10 +118,11 @@ fn model_cell(
                 .get("recorded_at")
                 .and_then(Value::as_f64)
                 .filter(|at| *at != 0.0);
-            let kind = argv
-                .first()
-                .map(|exe| exe.rsplit('/').next().unwrap_or(exe).to_lowercase())
-                .unwrap_or_default();
+            let kind = field("provider").unwrap_or_else(|| {
+                argv.first()
+                    .map(|exe| exe.rsplit('/').next().unwrap_or(exe).to_lowercase())
+                    .unwrap_or_default()
+            });
             if !crate::state::AGENT_EXES.contains(&kind.as_str()) {
                 return unknown(
                     "the launch record's command is not a known agent".into(),
@@ -120,34 +135,58 @@ fn model_cell(
                     None,
                 );
             }
-            let Some(launched) = launched else {
-                return unknown(
-                    "the launch record has no time, so it cannot be tied to the lane's process"
-                        .into(),
-                    None,
-                );
+            // Tie the record to what runs in the pane now. A record that names its process is
+            // matched exactly; an older record has only its time, and the pane's root process
+            // must have started within `LAUNCH_BIND_S` of it.
+            let bound_by = match bound {
+                Some(Some(true)) => "process",
+                Some(Some(false)) => {
+                    return unknown(
+                        "the launch record is for an earlier process in this pane".into(),
+                        None,
+                    )
+                }
+                Some(None) => {
+                    return unknown(
+                        "the lane's process could not be read, so the launch record cannot be tied to it".into(),
+                        None,
+                    )
+                }
+                None => {
+                    let Some(launched) = launched else {
+                        return unknown(
+                            "the launch record has no time, so it cannot be tied to the lane's process"
+                                .into(),
+                            None,
+                        );
+                    };
+                    let Some(started) = started else {
+                        return unknown(
+                            "the start of the lane's process could not be read, so the launch record cannot be tied to it".into(),
+                            None,
+                        );
+                    };
+                    if (launched - started).abs() > LAUNCH_BIND_S {
+                        return unknown(
+                            "the launch record is for an earlier process in this pane".into(),
+                            None,
+                        );
+                    }
+                    "start time"
+                }
             };
-            let Some(started) = started else {
-                return unknown(
-                    "the start of the lane's process could not be read, so the launch record cannot be tied to it".into(),
-                    None,
-                );
-            };
-            if (launched - started).abs() > LAUNCH_BIND_S {
-                return unknown(
-                    "the launch record is for an earlier process in this pane".into(),
-                    None,
-                );
-            }
             return json!({
                 "value": model,
-                "effort": crate::state::flag(&argv, &crate::state::THINKING_FLAGS)
-                    .filter(|effort| !effort.is_empty()),
+                "effort": field("effort").or_else(|| {
+                    crate::state::flag(&argv, &crate::state::THINKING_FLAGS)
+                        .filter(|effort| !effort.is_empty())
+                }),
                 "source": "launch flag",
+                "bound_by": bound_by,
                 "observed": false,
-                "launched_at": iso_cell(Some(launched)),
-                "as_of": iso_cell(Some(launched)),
-                "age_s": age(Some(launched)),
+                "launched_at": iso_cell(launched),
+                "as_of": iso_cell(launched),
+                "age_s": age(launched),
                 "reason": null,
             });
         }
@@ -332,13 +371,21 @@ pub fn roster(env: &dyn RosterEnv, now: f64) -> Result<Value, String> {
             .get("since")
             .and_then(Value::as_f64)
             .filter(|s| *s != 0.0);
+        let launch = env.launch(pane_id);
+        // `Some` when the record names its process: whether that process still runs here.
+        let launch_bound = launch.as_ref().and_then(|record| {
+            let pid = record.get("process_pid")?.as_i64()?;
+            let start = record.get("process_start")?.as_str()?;
+            Some(env.launch_process_live(lane, pid, start))
+        });
         rows.push(json!({
             "pane_id": pane_id, // internal; the UI drops it
             "membership": lane.get("membership").cloned().unwrap_or_else(|| json!({"scope":"unknown","project":null})),
             "name": name.unwrap_or(pane_id),
             "harness": harness,
             "model": model_cell(
-                env.launch(pane_id).as_ref(),
+                launch.as_ref(),
+                launch_bound,
                 env.pane_started_at(lane),
                 samples.as_ref().ok().and_then(|samples| samples.get(pane_id)),
                 samples.as_ref().err().map(String::as_str),
@@ -382,6 +429,8 @@ mod tests {
         samples_error: Option<String>,
         launches: HashMap<String, Value>,
         started: Option<f64>,
+        /// The process running in the pane, when the process table can be read.
+        live_process: Option<(i64, String)>,
     }
 
     impl RosterEnv for Env {
@@ -414,6 +463,11 @@ mod tests {
         }
         fn pane_started_at(&self, _: &Value) -> Option<f64> {
             self.started
+        }
+        fn launch_process_live(&self, _: &Value, pid: i64, start: &str) -> Option<bool> {
+            self.live_process
+                .as_ref()
+                .map(|(live_pid, live_start)| *live_pid == pid && live_start == start)
         }
         fn model_samples(&self, since: f64) -> Result<HashMap<String, Value>, String> {
             match &self.samples_error {
@@ -709,6 +763,7 @@ mod tests {
             cell,
             json!({
                 "value": "opus-5.5", "effort": "medium", "source": "launch flag",
+                "bound_by": "start time",
                 "observed": false, "launched_at": "1970-01-01T21:00:00Z",
                 "as_of": "1970-01-01T21:00:00Z", "age_s": 10_800, "reason": null,
             })
@@ -915,5 +970,98 @@ mod tests {
             unreadable["reason"],
             "model samples could not be read: database is locked"
         );
+    }
+
+    /// The model cell of a lane whose launch record names process 4242 started at tick "777",
+    /// while `live` runs in the pane.
+    fn model_with_process(
+        record_extra: Value,
+        live: Option<(i64, &str)>,
+        started: Option<f64>,
+    ) -> Value {
+        let mut record = json!({
+            "agent": "writer", "recorded_at": NOW - 10_800.0,
+            "argv": ["codex", "--model", "gpt-sol", "--effort", "high"],
+            "provider": "codex", "model": "gpt-sol", "effort": "high",
+            "process_pid": 4242, "process_start": "777",
+        });
+        for (key, value) in record_extra.as_object().unwrap() {
+            record[key] = value.clone();
+        }
+        let env = Env {
+            lanes: vec![lane("%1", "codex", Some("writer"))],
+            launches: HashMap::from([("%1".to_string(), record)]),
+            started,
+            live_process: live.map(|(pid, start)| (pid, start.to_string())),
+            ..Env::default()
+        };
+        roster(&env, NOW).unwrap()["lanes"][0]["model"].clone()
+    }
+
+    #[test]
+    fn a_record_that_names_its_process_is_matched_exactly_and_needs_no_time_window() {
+        // The pane's root started days before the record: outside the 120 s window, which
+        // does not matter when the recorded process itself still runs here.
+        let cell = model_with_process(json!({}), Some((4242, "777")), Some(NOW - 500_000.0));
+        assert_eq!(
+            cell,
+            json!({
+                "value": "gpt-sol", "effort": "high", "source": "launch flag",
+                "bound_by": "process",
+                "observed": false, "launched_at": "1970-01-01T21:00:00Z",
+                "as_of": "1970-01-01T21:00:00Z", "age_s": 10_800, "reason": null,
+            })
+        );
+        // The recorded fields win over the command line they were taken from.
+        let fields = model_with_process(
+            json!({"argv": ["codex"], "model": "recorded-model", "effort": "low"}),
+            Some((4242, "777")),
+            None,
+        );
+        assert_eq!(
+            (&fields["value"], &fields["effort"]),
+            (&json!("recorded-model"), &json!("low"))
+        );
+    }
+
+    #[test]
+    fn a_record_whose_process_was_replaced_is_unknown_even_inside_the_time_window() {
+        // Same pid reused with another start, another pid, and no process read at all. The
+        // pane root started 10 s after the record, which the old window would have accepted.
+        let inside = Some(NOW - 10_790.0);
+        for live in [Some((4242, "778")), Some((4300, "777"))] {
+            let cell = model_with_process(json!({}), live, inside);
+            assert_eq!(cell["value"], Value::Null, "{cell}");
+            assert_eq!(
+                cell["reason"],
+                "the launch record is for an earlier process in this pane"
+            );
+            assert!(!cell.to_string().contains("gpt-sol"));
+        }
+        let unread = model_with_process(json!({}), None, inside);
+        assert_eq!(unread["value"], Value::Null);
+        assert_eq!(
+            unread["reason"],
+            "the lane's process could not be read, so the launch record cannot be tied to it"
+        );
+    }
+
+    #[test]
+    fn a_record_with_only_half_a_process_identity_falls_back_to_the_time_window() {
+        let inside = model_with_process(
+            json!({"process_start": null}),
+            Some((1, "1")),
+            Some(NOW - 10_790.0),
+        );
+        assert_eq!(
+            (&inside["value"], &inside["bound_by"]),
+            (&json!("gpt-sol"), &json!("start time"))
+        );
+        let outside = model_with_process(
+            json!({"process_pid": null}),
+            Some((4242, "777")),
+            Some(NOW - 500.0),
+        );
+        assert_eq!(outside["value"], Value::Null);
     }
 }
