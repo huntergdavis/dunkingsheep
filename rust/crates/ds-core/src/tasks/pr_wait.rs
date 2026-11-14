@@ -20,6 +20,9 @@ pub struct PrWait {
     pub number: i64,
     /// The exact block reason read, so the outcome is applied only if it is still that block.
     pub reason: String,
+    /// Durable generation of this block, including re-blocks with identical text.
+    /// Legacy rows without a recorded transition use None until their next block.
+    pub block_event_id: Option<i64>,
 }
 
 /// What review-sync saw of the pull request.
@@ -37,24 +40,31 @@ impl Tasks {
             .call(|conn| {
                 let mut stmt = conn
                     .prepare(
-                        "SELECT id, block_reason FROM tasks WHERE status = 'blocked' \
+                        "SELECT id, block_reason, (SELECT MAX(e.id) FROM task_events e \
+                         WHERE e.task_id = tasks.id AND e.status_to = 'blocked') \
+                         FROM tasks WHERE status = 'blocked' \
                          AND block_reason LIKE 'waiting-pr:%' ORDER BY created_at, id",
                     )
                     .map_err(db::map_sqlite)?;
                 let rows = stmt
                     .query_map([], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                        ))
                     })
                     .map_err(db::map_sqlite)?;
                 let mut waits = Vec::new();
                 for row in rows {
-                    let (id, reason) = row.map_err(db::map_sqlite)?;
+                    let (id, reason, block_event_id) = row.map_err(db::map_sqlite)?;
                     if let Some((repo, number)) = pr_wait_ref(&reason) {
                         waits.push(PrWait {
                             id,
                             repo,
                             number,
                             reason,
+                            block_event_id,
                         });
                     }
                 }
@@ -64,7 +74,7 @@ impl Tasks {
     }
 
     /// Apply what review-sync observed. Returns whether anything was written: `false` when
-    /// the task is no longer blocked with exactly `wait.reason` (someone unblocked, re-blocked
+    /// the task is no longer at the same block event with exactly `wait.reason` (someone unblocked, re-blocked
     /// or finished it meanwhile, or an earlier sweep already applied this outcome).
     ///
     /// * merged: the task is opened and an `unblocked` event says which pull request merged;
@@ -83,19 +93,22 @@ impl Tasks {
                 let tx = conn
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(db::map_sqlite)?;
-                type Row = (String, Option<String>, Option<String>, Option<String>);
+                type Row = (String, Option<String>, Option<String>, Option<String>, Option<i64>);
                 let found: Option<Row> = tx
                     .query_row(
-                        "SELECT status, block_reason, scope, priority FROM tasks WHERE id = ?",
+                        "SELECT status, block_reason, scope, priority, \
+                         (SELECT MAX(e.id) FROM task_events e WHERE e.task_id = tasks.id \
+                          AND e.status_to = 'blocked') FROM tasks WHERE id = ?",
                         params![wait.id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
                     )
                     .optional()
                     .map_err(db::map_sqlite)?;
-                let Some((status, reason, scope, priority)) = found else {
+                let Some((status, reason, scope, priority, block_event_id)) = found else {
                     return Ok(false);
                 };
-                if status != "blocked" || reason.as_deref() != Some(wait.reason.as_str()) {
+                if status != "blocked" || reason.as_deref() != Some(wait.reason.as_str())
+                    || block_event_id != wait.block_event_id {
                     return Ok(false);
                 }
                 let pr = format!("{}#{}", wait.repo, wait.number);
@@ -264,6 +277,77 @@ mod tests {
         };
         assert!(!store
             .resolve_pr_wait(&gone, PrOutcome::Merged)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_same_reason_reblock_rejects_stale_outcomes_even_with_identical_timestamps() {
+        async fn freeze_clock(store: &Tasks, id: &str) {
+            let id = id.to_owned();
+            store
+                .writer
+                .call(move |conn| {
+                    conn.execute("UPDATE tasks SET updated_at = 42 WHERE id = ?", [&id])
+                        .map_err(db::map_sqlite)?;
+                    conn.execute("UPDATE task_events SET at = 42 WHERE task_id = ?", [&id])
+                        .map_err(db::map_sqlite)?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        for outcome in [PrOutcome::Merged, PrOutcome::ClosedUnmerged] {
+            let store = store(&format!("same-reason-{outcome:?}")).await;
+            let reason = "waiting-pr:owner/repo#42: review";
+            let id = waiting(&store, "a", reason).await;
+            freeze_clock(&store, &id).await;
+            let wait = store.blocked_pr_waits().await.unwrap().remove(0);
+            let observed = store.get(&id).await.unwrap();
+            // GitHub detail is in flight while the user starts a new, identical block.
+            store.unblock(&id).await.unwrap();
+            store.block(&id, reason).await.unwrap();
+            freeze_clock(&store, &id).await;
+            let fresh = store.blocked_pr_waits().await.unwrap().remove(0);
+            assert_eq!(
+                store.get(&id).await.unwrap(),
+                observed,
+                "row values and timestamps are the same"
+            );
+            assert!(fresh.block_event_id.unwrap() > wait.block_event_id.unwrap());
+            let events = store.events(&id).await;
+            assert!(!store.resolve_pr_wait(&wait, outcome).await.unwrap());
+            assert_eq!(
+                store.events(&id).await,
+                events,
+                "stale result writes no event"
+            );
+            assert_eq!(
+                store.get(&id).await.unwrap(),
+                observed,
+                "new block is untouched"
+            );
+            assert!(
+                store.resolve_pr_wait(&fresh, outcome).await.unwrap(),
+                "a fresh observation still resolves"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_free_form_blocked_note_is_not_a_new_block_generation() {
+        let store = store("note-generation").await;
+        let id = waiting(&store, "a", "waiting-pr:owner/repo#42: review").await;
+        let wait = store.blocked_pr_waits().await.unwrap().remove(0);
+        // Raw note event names are not transitions: their status_to column is NULL.
+        store
+            .note(&id, "blocked", "%311", Some("ordinary coordination note"))
+            .await
+            .unwrap();
+        let after_note = store.blocked_pr_waits().await.unwrap().remove(0);
+        assert_eq!(after_note.block_event_id, wait.block_event_id);
+        assert!(store
+            .resolve_pr_wait(&wait, PrOutcome::Merged)
             .await
             .unwrap());
     }
