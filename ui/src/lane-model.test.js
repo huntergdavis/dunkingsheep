@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { laneModel } from './lane-model.js';
+import { declaredBy, laneModel } from './lane-model.js';
 
 test('a launch flag reads "launched as" with the launch time, however long ago, and never "seen"', () => {
   assert.deepEqual(
@@ -71,4 +71,20 @@ test('a stale record shows "stale" with the reason and never its value', () => {
     laneModel({ value: 'gpt-luna', source: 'declared', stale: true }),
     { known: false, text: 'stale', detail: 'the record is for an earlier process' },
   );
+});
+
+test('the VP agent is never called the owner, and "you" is only the human\'s own session', () => {
+  const cell = extra => laneModel({ value: 'gpt-luna', effort: null, source: 'declared', age_s: 600, ...extra });
+  // A caller with the owner role: the VP seat's pane, or its service token.
+  assert.equal(cell({ declared_by: '%1', declared_by_kind: 'owner-role' }).detail, 'declared by VP of Agentry 10 min ago');
+  assert.equal(cell({ declared_by: 'owner-service', declared_by_kind: 'owner-role' }).detail, 'declared by VP of Agentry 10 min ago');
+  assert.equal(cell({ declared_by: 'web-session', declared_by_kind: 'human' }).detail, 'declared by you 10 min ago');
+  assert.equal(cell({ declared_by: '%12', declared_by_kind: 'lane' }).detail, 'declared by the lane itself 10 min ago');
+  // An older record with no kind shows the recorded caller as it is, and never "owner" or "you".
+  assert.equal(declaredBy({ declared_by: '%12' }), '%12');
+  assert.equal(declaredBy({}), 'an unrecorded caller');
+  for (const kind of ['owner-role', 'lane', undefined]) {
+    const who = declaredBy({ declared_by: '%1', declared_by_kind: kind });
+    assert.ok(who !== 'you' && !/owner/i.test(who), who);
+  }
 });

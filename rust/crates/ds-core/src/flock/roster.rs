@@ -71,6 +71,7 @@ fn declared_cell(
     let withheld = |stale: bool, reason: &str| {
         json!({
             "value": null, "effort": null, "source": null, "declared_by": null,
+            "declared_by_kind": null,
             "stale": stale, "observed": false, "launched_at": null,
             "as_of": iso_cell(at),
             "age_s": at.map(|at| (now - at).max(0.0).floor() as i64),
@@ -92,6 +93,7 @@ fn declared_cell(
             "effort": text("effort"),
             "source": "declared",
             "declared_by": text("by"),
+            "declared_by_kind": text("by_kind"),
             "stale": false,
             "observed": false,
             "launched_at": null,
@@ -1153,7 +1155,8 @@ mod tests {
     fn declaration() -> Value {
         json!({
             "model": "gpt-luna", "effort": "low", "provider": "codex",
-            "at": NOW - 600.0, "by": "%1", "process_pid": 4242, "process_start": "777",
+            "at": NOW - 600.0, "by": "%1", "by_kind": "lane",
+            "process_pid": 4242, "process_start": "777",
         })
     }
 
@@ -1163,14 +1166,16 @@ mod tests {
             model_declared(declaration(), Some((4242, "777"))),
             json!({
                 "value": "gpt-luna", "effort": "low", "source": "declared", "declared_by": "%1",
-                "stale": false, "observed": false, "launched_at": null,
+                "declared_by_kind": "lane", "stale": false, "observed": false, "launched_at": null,
                 "as_of": "1970-01-01T23:50:00Z", "age_s": 600, "reason": null,
             })
         );
         let mut by_owner = declaration();
         by_owner["by"] = json!("owner-service");
+        by_owner["by_kind"] = json!("owner-role");
         by_owner["effort"] = Value::Null;
         let cell = model_declared(by_owner, Some((4242, "777")));
+        assert_eq!(cell["declared_by_kind"], "owner-role");
         assert_eq!(
             (&cell["declared_by"], &cell["effort"]),
             (&json!("owner-service"), &Value::Null)

@@ -4035,6 +4035,7 @@ fn lanes_model_records_a_declaration_for_the_callers_own_pane_only() {
         (&json!("luna"), &json!("low"), &json!("pi"))
     );
     assert_eq!(declared["by"], "w1:p1");
+    assert_eq!(declared["by_kind"], "lane", "its own pane: the lane itself");
     assert_eq!(declared["process_pid"], json!(me));
     assert_eq!(
         declared["process_start"],

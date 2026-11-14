@@ -3077,6 +3077,10 @@ fn lane_model(context: &HandlerContext<'_>, args: &Args) -> Result<Value, DunkEr
         "provider": provider,
         "at": context.env.now_s(),
         "by": declared_by(own),
+        // What kind of caller that is. Only a lane itself and a caller with the owner role
+        // (the VP seat's pane or an owner token) can get here; the human owner's own web
+        // session has no path to this command, so `human` is never recorded today.
+        "by_kind": if by_lane { "lane" } else { "owner-role" },
         "process_pid": pid,
         "process_start": start,
     });

@@ -17,6 +17,17 @@ function agoText(seconds) {
   return `${Math.floor(seconds / 86400)} d ago`;
 }
 
+// Who declared a model, in the desk's words. A caller with the owner ROLE is the VP agent (its
+// pane or its service token), never the human: "you" is used only for a declaration recorded
+// as made from the human's own signed-in session.
+export function declaredBy(model) {
+  const kind = model?.declared_by_kind;
+  if (kind === 'human') return 'you';
+  if (kind === 'owner-role') return 'VP of Agentry';
+  if (kind === 'lane') return 'the lane itself';
+  return typeof model?.declared_by === 'string' && model.declared_by ? model.declared_by : 'an unrecorded caller';
+}
+
 export function laneModel(model) {
   const unknown = detail => ({ known: false, text: 'unknown', detail });
   const value = typeof model?.value === 'string' && model.value ? model.value : null;
@@ -32,7 +43,7 @@ export function laneModel(model) {
     return { known: true, text: `${value}${effort}`, detail: `seen ${agoText(age)}, ${source}` };
   }
   if (source === 'declared') {
-    const by = typeof model.declared_by === 'string' && model.declared_by ? model.declared_by : 'an unrecorded caller';
+    const by = declaredBy(model);
     return {
       known: true,
       text: `${value}${effort}`,
