@@ -803,6 +803,9 @@ async fn run(
     // connection; only then is `%output` forwarded (`live`). See `terminal_stream::Snapshot`.
     let mut snapshot: Option<terminal_stream::Snapshot> = None;
     let mut live = false;
+    // t5007: the pane's size changed under the stream (another client resized the window).
+    // The client must take the new size, so the size and screen are read again, as at startup.
+    let mut resync = false;
     let mut pending = false;
     let mut deadline = Instant::now() + Duration::from_secs(5);
     let mut queue: VecDeque<u8> = VecDeque::new();
@@ -844,10 +847,14 @@ async fn run(
                         match reader.observe(&line) {
                             Ok(None) => {}
                             Ok(Some(frame)) => {
+                                let (cols, rows) = reader.size();
                                 snapshot = None;
                                 live = true;
                                 pending = false;
                                 if !authorized(&state, &name, &token, &binding).await { break 'stream "authorization_changed"; }
+                                // The size first: the client resizes to the pane, then draws the screen.
+                                let size = terminal_stream::size_message(cols, rows);
+                                if !matches!(timeout(Duration::from_secs(2), ws.send(Message::Text(size.into()))).await, Ok(Ok(()))) { break 'stream "websocket_send_failed"; }
                                 if !matches!(timeout(Duration::from_secs(2), ws.send(Message::Binary(frame.into()))).await, Ok(Ok(()))) { break 'stream "websocket_send_failed"; }
                             }
                             Err(_) => break 'stream "tmux_snapshot_invalid",
@@ -859,6 +866,9 @@ async fn run(
                         Ok(Some(true)) if pending => pending = false,
                         Ok(Some(_)) | Err(_) => break 'stream "tmux_reply_invalid",
                         Ok(None) => {}
+                    }
+                    if live && terminal_stream::layout_changed(&line) {
+                        resync = true;
                     }
                     match terminal_stream::pane_output(&line, &binding.0) {
                         Ok(Some(bytes)) if live => {
@@ -876,7 +886,10 @@ async fn run(
                 }
             }
         }
-        if ready && !live && snapshot.is_none() {
+        // A resync waits for an outstanding input reply, so the snapshot reply cannot be
+        // mistaken for it. Output keeps flowing meanwhile; the snapshot frame redraws the screen.
+        if ready && snapshot.is_none() && (!live || (resync && !pending)) {
+            resync = false;
             let Some(command) = terminal_stream::snapshot_command(&binding.0) else {
                 break 'stream "tmux_snapshot_command_invalid";
             };
