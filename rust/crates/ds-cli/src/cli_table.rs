@@ -3126,7 +3126,7 @@ pub static ROOT: Cmd = Cmd {
                 Arg { id: "json", dest: "json", tri: false, default_int: false, flags: &["--json"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: None, hidden: true, metavar: None, version: None },
             ],
             groups: &[],
-            sub_dest: Some("pr_command"), sub_metavar: None, sub_required: true,
+            sub_dest: Some("pr_command"), sub_metavar: Some("<subcommand>"), sub_required: true,
             subs: &[
                 Cmd {
                     name: "wait", aliases: &[],

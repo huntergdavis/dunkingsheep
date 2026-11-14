@@ -66,7 +66,7 @@ def load_parser():
     usage_provider.add_argument("--max-age-s", dest="max_age", type=float,
                                 help="snapshot maximum age in seconds")
     pr = root.add_parser("pr", help="one-shot PR event subscriptions")
-    actions = pr.add_subparsers(dest="pr_command", required=True)
+    actions = pr.add_subparsers(dest="pr_command", metavar="<subcommand>", required=True)
     wait = actions.add_parser("wait", help="register a PR wait, then end the turn")
     wait.add_argument("target", nargs="?", help="owner/repo#PR")
     wait.add_argument("--head", help="full expected head SHA")
