@@ -5,6 +5,55 @@ activate anything. It makes an immutable release layout, launchers and a systemd
 drop-in that point at that layout, and rollback and uninstall for both. Activation
 is a separate, owner-approved cutover step.
 
+## Unit artifact staging (t4699, slice 1)
+
+`tools/rust_rollout.sh` now accepts an explicit `--unit daemon|web|telegram`
+for `plan` and `stage`. It takes an already-built artifact, resolves the named
+commit through the selected Git checkout, and checks an expected SHA256 before
+copying and again before publication. It never executes the artifact or builds it.
+
+```sh
+tools/rust_rollout.sh stage --unit web --sha COMMIT \
+    --artifact /absolute/path/to/ds-desk --artifact-sha256 LOWERCASE_SHA256
+# Operator only, after review of the exact tooling head and artifact:
+tools/rust_rollout.sh stage --unit web --sha COMMIT \
+    --artifact /absolute/path/to/ds-desk --artifact-sha256 LOWERCASE_SHA256 --apply
+```
+
+| Unit | Installed artifact |
+| --- | --- |
+| daemon | `dunkingsheep` |
+| web | `ds-desk` |
+| telegram | `dunkingsheep-telegram` |
+
+The default root is `~/.local/share/dunkingsheep/releases`; `RUST_RELEASES`
+selects an absolute prefix, and `RUST_REPO` selects the checkout containing the
+commit. Each release is `rust-<full-commit>-<unit>/`, containing the executable
+(0555) and a `MANIFEST` (0444); the directory is 0555. The manifest records format
+version 1, unit, full revision, binary name and binary SHA256. Commit/artifact
+provenance is supplied by the operator's build receipt and independent review;
+this command verifies the supplied bytes and Git revision, not their build origin.
+
+Publication uses a private staging directory and one rename, serialized by a
+per-unit lock. An interrupted/failed copy is not published. Reusing the same unit
+and commit checks the manifest, installed bytes and modes; different content is
+refused instead of replacing an immutable release. There is no artifact execution,
+launcher, drop-in, service, timer, API or rollback-state change during this stage.
+
+Dry-run is the default and creates nothing, including no release root or lock.
+`plan --unit ...` stays read-only even with `--apply`. A dry-run validates its
+inputs and any existing release before printing its destination and manifest.
+Only an operator may use `--apply`, after exact-head review and owner approval;
+the author must not apply their own tooling to production. The automated tests
+apply only inside temporary prefixes with fake tools and fake HOME.
+
+This first slice deliberately refuses `--unit` with `activate`, `verify` or
+`rollback`, so a web/Telegram request cannot enter the legacy daemon cutover.
+Without `--unit`, the existing daemon cutover interface is unchanged. Single-drop-in
+migration, state-based switch/rollback, fixed per-unit postchecks, release listing,
+retention, and real operator releases of all three units remain follow-up work on
+t4699; this staging slice alone does not satisfy the full release acceptance gate.
+
 ## Layout
 
 ```
