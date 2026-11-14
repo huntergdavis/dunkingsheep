@@ -269,6 +269,20 @@ so a list of names survives a restart that renumbers panes. An unreadable config
 feeds nothing (it fails closed and says so on stderr) rather than falling back to
 "everyone".
 
+The **next-job handoff** (what a lane is given when its turn ends) is wider than the
+tick: it also serves a pane that has a live `worker` or `reviewer` role registration
+(the registered process is still the pane's process) and a project or global
+membership, without being listed. The owner opts lanes out with an `exclude` key in
+the same file, and **the opt-out wins over every way in**, including `lanes`:
+
+```bash
+{"lanes": ["%4"], "exclude": ["reviewer", "%12", "codex-worker"]}
+```
+
+`exclude` entries are role names, pane ids or lane names. An `exclude` that is not a
+string or a list of strings stops the handoff for everyone (`readiness_unknown`)
+until it is fixed.
+
 The gate is still two conditions on top of this: a lane must be **ready** and have
 **no unread mail**. The allowlist decides *who may ever be considered*; the gate
 decides *whether, right now*.

@@ -51,22 +51,23 @@ impl Flock {
         entry.get("role").and_then(Value::as_str).map(str::to_owned)
     }
 
-    /// Whether the next-job handoff may serve `pane` on its role registration alone.
-    /// `exclude` is the owner's list of role names, pane ids or agent names to leave out.
-    pub(crate) fn handoff_role_eligible(
-        &self,
-        pane: &str,
-        lanes: &[Value],
-        exclude: &[String],
-    ) -> bool {
-        let Some(role) = self.live_role_binding(pane, lanes) else {
-            return false;
-        };
-        if !HANDOFF_ROLES.contains(&role.as_str()) {
-            return false;
-        }
-        let snapshot = Snapshot(lanes);
-        let name = snapshot
+    /// Whether the owner opted `pane` out of the next-job handoff. `exclude` lists role names,
+    /// pane ids or agent names. The opt-out wins over every way in (the hand list, an
+    /// allocation worker row, a role registration), and a role is matched on the pane's
+    /// registration even when that registration is stale.
+    pub(crate) fn handoff_excluded(&self, pane: &str, lanes: &[Value], exclude: &[String]) -> bool {
+        let role = self
+            .with_roles(|roles, _| roles.entry(pane))
+            .ok()
+            .flatten()
+            .and_then(|entry| {
+                entry
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .map(str::to_lowercase)
+            })
+            .unwrap_or_default();
+        let name = Snapshot(lanes)
             .get_pane(pane)
             .and_then(|lane| {
                 lane.get("agent_name")
@@ -74,14 +75,20 @@ impl Flock {
                     .map(str::to_lowercase)
             })
             .unwrap_or_default();
-        let excluded = exclude.iter().any(|entry| {
+        exclude.iter().any(|entry| {
             let entry = entry.trim().to_lowercase();
             !entry.is_empty() && (entry == role || entry == pane.to_lowercase() || entry == name)
-        });
-        if excluded {
+        })
+    }
+
+    /// Whether the next-job handoff may serve `pane` on its role registration alone.
+    /// The owner's opt-out is `handoff_excluded`, checked by the gate before this.
+    pub(crate) fn handoff_role_eligible(&self, pane: &str, lanes: &[Value]) -> bool {
+        let Some(role) = self.live_role_binding(pane, lanes) else {
             return false;
-        }
-        matches!(self.lane_project(&snapshot, pane), Ok(Some(_)))
+        };
+        HANDOFF_ROLES.contains(&role.as_str())
+            && matches!(self.lane_project(&Snapshot(lanes), pane), Ok(Some(_)))
     }
 }
 
@@ -151,8 +158,8 @@ mod tests {
     #[tokio::test]
     async fn a_live_worker_or_reviewer_with_a_membership_is_eligible() {
         let (_dir, flock, lanes) = fixture(&[("%1", "worker"), ("%2", "reviewer")]).await;
-        assert!(flock.handoff_role_eligible("%1", &lanes, &[]));
-        assert!(flock.handoff_role_eligible("%2", &lanes, &[]));
+        assert!(flock.handoff_role_eligible("%1", &lanes));
+        assert!(flock.handoff_role_eligible("%2", &lanes));
         assert_eq!(
             flock.live_role_binding("%2", &lanes).as_deref(),
             Some("reviewer")
@@ -165,7 +172,7 @@ mod tests {
         flock
             .lane_project_set(&Snapshot(&lanes), "%1", ProjectScope::Global)
             .unwrap();
-        assert!(flock.handoff_role_eligible("%1", &lanes, &[]));
+        assert!(flock.handoff_role_eligible("%1", &lanes));
         // A registered worker that was never bound to a project or to global.
         let (pid, start) = me();
         flock
@@ -187,7 +194,7 @@ mod tests {
             flock.live_role_binding("%9", &lanes).as_deref(),
             Some("worker")
         );
-        assert!(!flock.handoff_role_eligible("%9", &lanes, &[]));
+        assert!(!flock.handoff_role_eligible("%9", &lanes));
     }
 
     #[tokio::test]
@@ -196,10 +203,10 @@ mod tests {
             fixture(&[("%1", "planner"), ("%2", "desk"), ("%3", "owner")]).await;
         for pane in ["%1", "%2", "%3"] {
             assert!(flock.live_role_binding(pane, &lanes).is_some());
-            assert!(!flock.handoff_role_eligible(pane, &lanes, &[]), "{pane}");
+            assert!(!flock.handoff_role_eligible(pane, &lanes), "{pane}");
         }
         lanes.push(json!({"pane_id": "%4", "pane_pid": me().0}));
-        assert!(!flock.handoff_role_eligible("%4", &lanes, &[]));
+        assert!(!flock.handoff_role_eligible("%4", &lanes));
     }
 
     #[tokio::test]
@@ -208,9 +215,9 @@ mod tests {
         let (pid, start) = me();
         // The pane id was reused by another process.
         let reused = vec![json!({"pane_id": "%1", "pane_pid": 1})];
-        assert!(!flock.handoff_role_eligible("%1", &reused, &[]));
+        assert!(!flock.handoff_role_eligible("%1", &reused));
         // The pane is gone from the listing.
-        assert!(!flock.handoff_role_eligible("%1", &[], &[]));
+        assert!(!flock.handoff_role_eligible("%1", &[]));
         // Same pid, another start time: the pid was reused.
         flock
             .with_roles(|roles, _| {
@@ -218,14 +225,14 @@ mod tests {
             })
             .unwrap();
         assert!(flock.live_role_binding("%1", &lanes).is_none());
-        assert!(!flock.handoff_role_eligible("%1", &lanes, &[]));
+        assert!(!flock.handoff_role_eligible("%1", &lanes));
         // A registration that recorded no process cannot be verified.
         flock
             .with_roles(|roles, _| {
                 roles.register("%1", "worker", None, None, None, None, None, None)
             })
             .unwrap();
-        assert!(!flock.handoff_role_eligible("%1", &lanes, &[]));
+        assert!(!flock.handoff_role_eligible("%1", &lanes));
         // Re-registered by the running process: eligible again.
         flock
             .with_roles(|roles, _| {
@@ -241,19 +248,26 @@ mod tests {
                 )
             })
             .unwrap();
-        assert!(flock.handoff_role_eligible("%1", &lanes, &[]));
+        assert!(flock.handoff_role_eligible("%1", &lanes));
     }
 
     #[tokio::test]
     async fn the_owner_exclusion_removes_a_role_a_pane_or_a_named_lane() {
         let (_dir, flock, lanes) = fixture(&[("%1", "worker"), ("%2", "reviewer")]).await;
         let list = |entries: &[&str]| entries.iter().map(|e| e.to_string()).collect::<Vec<_>>();
-        assert!(!flock.handoff_role_eligible("%2", &lanes, &list(&["Reviewer"])));
-        assert!(flock.handoff_role_eligible("%1", &lanes, &list(&["reviewer"])));
-        assert!(!flock.handoff_role_eligible("%1", &lanes, &list(&["%1"])));
-        assert!(flock.handoff_role_eligible("%2", &lanes, &list(&["%1"])));
-        assert!(!flock.handoff_role_eligible("%1", &lanes, &list(&["LANE-WORKER"])));
-        assert!(flock.handoff_role_eligible("%1", &lanes, &list(&["", " "])));
+        assert!(flock.handoff_excluded("%2", &lanes, &list(&["Reviewer"])));
+        assert!(!flock.handoff_excluded("%1", &lanes, &list(&["reviewer"])));
+        assert!(flock.handoff_excluded("%1", &lanes, &list(&["%1"])));
+        assert!(!flock.handoff_excluded("%2", &lanes, &list(&["%1"])));
+        assert!(flock.handoff_excluded("%1", &lanes, &list(&["LANE-WORKER"])));
+        assert!(!flock.handoff_excluded("%1", &lanes, &list(&["", " "])));
+        assert!(!flock.handoff_excluded("%1", &lanes, &list(&[])));
+        // A role opt-out still matches when the pane id was reused by another process.
+        let reused = vec![json!({"pane_id": "%2", "pane_pid": 1})];
+        assert!(flock.handoff_excluded("%2", &reused, &list(&["reviewer"])));
+        // A pane with no registration and no name is matched by its id only.
+        assert!(!flock.handoff_excluded("%7", &lanes, &list(&["worker", "reviewer"])));
+        assert!(flock.handoff_excluded("%7", &lanes, &list(&["%7"])));
     }
 
     #[tokio::test]
@@ -265,6 +279,6 @@ mod tests {
             false,
         );
         let lanes = vec![json!({"pane_id": "%1", "pane_pid": me().0})];
-        assert!(!flock.handoff_role_eligible("%1", &lanes, &[]));
+        assert!(!flock.handoff_role_eligible("%1", &lanes));
     }
 }

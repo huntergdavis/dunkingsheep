@@ -1330,24 +1330,26 @@ impl NextJobs {
                 _ => return Some("readiness_unknown".into()),
             };
         let allowed = dispatch_allowlist(&wanted, &lanes);
-        if !allowed.contains(pane) && !registered {
-            // t4697: neither listed by hand nor an allocation worker. A lane with a live
-            // worker or reviewer registration and a project or global membership is served
-            // too, unless the owner excluded it. The file list above stays an override.
-            let flock = Arc::clone(&self.flock);
-            let env_for_exclusions = env.clone();
-            let owned_pane = pane.to_owned();
-            let snapshot = lanes.clone();
-            let eligible = tokio::task::spawn_blocking(move || {
-                let exclude = dispatch_exclusions(&env_for_exclusions)?;
-                Ok::<bool, ()>(flock.handoff_role_eligible(&owned_pane, &snapshot, &exclude))
-            })
-            .await;
-            match eligible {
-                Ok(Ok(true)) => {}
-                Ok(Ok(false)) => return Some("not_allowed".into()),
-                _ => return Some("readiness_unknown".into()),
+        // t4697: the owner's opt-out wins over every way in. Otherwise a pane is served when it
+        // is listed by hand, is an enabled allocation worker, or has a live worker or reviewer
+        // registration with a project or global membership.
+        let listed = allowed.contains(pane) || registered;
+        let flock = Arc::clone(&self.flock);
+        let env_for_exclusions = env.clone();
+        let owned_pane = pane.to_owned();
+        let snapshot = lanes.clone();
+        let served = tokio::task::spawn_blocking(move || {
+            let exclude = dispatch_exclusions(&env_for_exclusions)?;
+            if flock.handoff_excluded(&owned_pane, &snapshot, &exclude) {
+                return Ok::<bool, ()>(false);
             }
+            Ok(listed || flock.handoff_role_eligible(&owned_pane, &snapshot))
+        })
+        .await;
+        match served {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => return Some("not_allowed".into()),
+            _ => return Some("readiness_unknown".into()),
         }
         let mut present = false;
         for lane in &lanes {
@@ -1480,7 +1482,7 @@ pub(crate) fn dispatch_entries(env: &Env) -> Result<Vec<String>, ()> {
     Ok(entries)
 }
 
-/// t4697: the owner's exclusions from role-based handoff, the `exclude` key of
+/// t4697: the owner's opt-outs from the next-job handoff, the `exclude` key of
 /// `dispatch_lanes.json`: role names, pane ids or agent names, as a list or a comma-separated
 /// string. A missing file or key excludes nothing; anything else unreadable is an error, so a
 /// broken exclusion list cannot widen who is served.
@@ -2947,7 +2949,7 @@ mod tests {
     /// plus a membership, and the owner's `exclude` key takes it out again.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn next_jobs_gate_serves_registered_roles_and_honours_the_owner_exclusion() {
-        let (dir, jobs, _tasks) = configured_jobs().await;
+        let (dir, jobs, tasks) = configured_jobs().await;
         let pid = i64::from(std::process::id());
         let start = crate::proc::process_start(pid).unwrap();
         let lanes: Vec<Value> = ["%1", "%2", "%3", "%4"]
@@ -3014,14 +3016,40 @@ mod tests {
         std::fs::write(&config, r#"{"exclude": "%1, planner"}"#).unwrap();
         assert_eq!(gate("%1").await.as_deref(), Some("not_allowed"));
         assert_eq!(gate("%2").await, None);
-        // The hand list is an explicit override: a listed pane is served although excluded.
-        std::fs::write(&config, r#"{"lanes": ["%1"], "exclude": ["%1"]}"#).unwrap();
-        assert_eq!(gate("%1").await, None);
+        // The opt-out wins over the hand list, by pane and by role; a hand-listed pane that is
+        // not opted out is still served.
+        std::fs::write(&config, r#"{"lanes": ["%1", "%4"], "exclude": ["%1"]}"#).unwrap();
+        assert_eq!(gate("%1").await.as_deref(), Some("not_allowed"));
+        assert_eq!(gate("%4").await, None);
+        std::fs::write(
+            &config,
+            r#"{"lanes": ["%2", "%3"], "exclude": ["reviewer"]}"#,
+        )
+        .unwrap();
+        assert_eq!(gate("%2").await.as_deref(), Some("not_allowed"));
+        assert_eq!(gate("%3").await, None, "a hand-listed planner is served");
+        // It also wins over an enabled allocation worker row.
+        tasks
+            .allocation_register(
+                "%2",
+                &json!(["code"]),
+                &json!(["worker"]),
+                &json!([]),
+                "%owner",
+                &json!(true),
+            )
+            .await
+            .unwrap();
+        std::fs::write(&config, r#"{"exclude": ["%2"]}"#).unwrap();
+        assert_eq!(gate("%2").await.as_deref(), Some("not_allowed"));
         // An exclusion list that cannot be understood never widens who is served.
         std::fs::write(&config, r#"{"exclude": {"role": "reviewer"}}"#).unwrap();
         assert_eq!(gate("%1").await.as_deref(), Some("readiness_unknown"));
         std::fs::write(&config, r#"{"exclude": ["reviewer", 7]}"#).unwrap();
         assert_eq!(gate("%2").await.as_deref(), Some("readiness_unknown"));
+        // That holds for a hand-listed pane too: the opt-out is read before any way in.
+        std::fs::write(&config, r#"{"lanes": ["%4"], "exclude": 7}"#).unwrap();
+        assert_eq!(gate("%4").await.as_deref(), Some("readiness_unknown"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
