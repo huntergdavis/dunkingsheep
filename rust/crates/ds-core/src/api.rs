@@ -3456,7 +3456,21 @@ pub fn h_task_add(context: &HandlerContext<'_>, args: Args) -> Result<Value, Dun
     } else {
         None
     };
-    let task = context.block_on(context.flock.task_add_wire_with_planner(
+    // t4701: `project` names the task's project, `no_project` files it under none; with
+    // neither, the task takes its creator lane's project.
+    let named_project = task_add_string(&args, "project")?.filter(|name| !name.is_empty());
+    let no_project = python_bool_arg(&args, "no_project", false);
+    let project = match (named_project, no_project) {
+        (Some(_), true) => {
+            return Err(DunkError::Refused(
+                "task_add: give project or no_project, not both".into(),
+            ))
+        }
+        (Some(name), false) => crate::flock::commands_tasks::TaskProject::Named(name),
+        (None, true) => crate::flock::commands_tasks::TaskProject::None,
+        (None, false) => crate::flock::commands_tasks::TaskProject::Creator,
+    };
+    let task = context.block_on(context.flock.task_add_wire_with_project(
         title,
         scope,
         body,
@@ -3464,8 +3478,24 @@ pub fn h_task_add(context: &HandlerContext<'_>, args: Args) -> Result<Value, Dun
         context.self_pane_id(),
         context.env,
         planner,
+        project,
     ))??;
-    Ok(task.wire)
+    with_task_project(context, task.wire)
+}
+
+/// t4701: a task's wire carries `project` when the task is filed under one. The key is absent
+/// for an unmapped task, so the wire of every task without a project is unchanged.
+fn with_task_project(context: &HandlerContext<'_>, mut wire: Value) -> Result<Value, DunkError> {
+    let Some(id) = wire.get("id").and_then(Value::as_str).map(str::to_owned) else {
+        return Ok(wire);
+    };
+    let Some(tasks) = context.flock.stores().tasks else {
+        return Ok(wire);
+    };
+    if let Some(project) = context.block_on(tasks.task_project(&id))?? {
+        wire["project"] = json!(project);
+    }
+    Ok(wire)
 }
 
 /// `dunk_api.h_task_read`.
@@ -3476,7 +3506,7 @@ pub fn h_task_read(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
             .flock
             .task_read_wire_with_notes(&id, context.self_pane_id()),
     )??;
-    Ok(task.wire)
+    with_task_project(context, task.wire)
 }
 
 /// `dunk_api.h_task_update`.

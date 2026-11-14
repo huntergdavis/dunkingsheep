@@ -221,10 +221,12 @@ async fn flock_task_wire_add_uses_request_environment_roles_defaults_and_full_ro
         )
         .await
         .unwrap();
+    // Two reads select the role registration. t4701 adds one read per task that reaches the
+    // store: the creator's live process identity, for its project membership.
     assert_eq!(
         env.reads.load(Ordering::SeqCst),
-        2,
-        "request pane selects the owner registration"
+        4,
+        "request pane selects the owner registration, plus the creator identity of two adds"
     );
     assert_eq!(delegated.wire["assignees"], json!(["%9"]));
     assert_eq!(delegated.wire["repo"], "fixture/repo");

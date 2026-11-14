@@ -281,8 +281,43 @@ impl Flock {
         env: &dyn PaneInfoEnv,
         planner: Option<crate::tasks::planner_scope::PlannerIdentity>,
     ) -> Result<TaskWire, DunkError> {
+        self.task_add_wire_with_project(
+            title,
+            scope,
+            body,
+            opts,
+            self_pane_id,
+            env,
+            planner,
+            super::commands_tasks::TaskProject::Creator,
+        )
+        .await
+    }
+
+    /// `task_add_wire_with_planner` with the caller's project choice (t4701).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn task_add_wire_with_project(
+        &self,
+        title: &str,
+        scope: Option<&str>,
+        body: Option<&str>,
+        opts: TaskAddArgs<'_>,
+        self_pane_id: Option<&str>,
+        env: &dyn PaneInfoEnv,
+        planner: Option<crate::tasks::planner_scope::PlannerIdentity>,
+        project: super::commands_tasks::TaskProject<'_>,
+    ) -> Result<TaskWire, DunkError> {
         let task = self
-            .task_add_with_planner(title, scope, body, opts, self_pane_id, env, planner)
+            .task_add_with_project(
+                title,
+                scope,
+                body,
+                opts,
+                self_pane_id,
+                env,
+                planner,
+                project,
+            )
             .await?;
         self.task_store()?
             .get_full_wire(&task.id, self_pane_id)
