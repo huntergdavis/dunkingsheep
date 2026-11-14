@@ -7197,3 +7197,71 @@ fn a_remembered_pane_is_forgotten_when_something_is_typed_or_the_box_is_seen_emp
     pane.screens.insert(P.into(), submit_modal_screen());
     assert!(!box_is_empty(&pane, P), "a dialog is not an empty box");
 }
+
+#[test]
+fn an_owner_lane_notice_waits_at_an_unreadable_box_past_the_hold_limit_and_warns_once() {
+    let (_dir, flock) = t4681_notice_flock(true);
+    let mut pane = with_screen(frame(
+        "my unfinished draft",
+        &["  second line", "  third line"],
+    ));
+    // Well past the limit at which an ordinary notice falls back to typing anyway.
+    for attempt in 0..13 {
+        let outcome =
+            flock.deliver_message("m-notice", 1.0 + attempt as f64 * 1000.0, &mut pane, || {
+                None
+            });
+        assert_eq!(DeliveryOutcome::Held, outcome, "attempt {attempt}");
+        assert_eq!(
+            Some("queued".to_string()),
+            t4681_notice_status(&flock),
+            "attempt {attempt}: still queued, never undeliverable"
+        );
+    }
+    assert!(
+        pane.typed.is_empty(),
+        "nothing typed into the unreadable box"
+    );
+    assert!(pane.keys.is_empty());
+
+    // One warning for the whole wait: only the hold that reaches the limit produces it.
+    let warnings: Vec<String> = (1..=13)
+        .filter_map(|holds| owner_notice_wait_warning(holds, P, 2, 5400.0))
+        .collect();
+    assert_eq!(1, warnings.len(), "{warnings:?}");
+    assert!(warnings[0].starts_with(&format!(
+        "WARNING inbox notice for {P} has waited 10 attempts (5400s)"
+    )));
+    assert!(
+        warnings[0].contains("2 notice(s) stay queued"),
+        "{}",
+        warnings[0]
+    );
+}
+
+#[test]
+fn an_agent_lane_notice_still_falls_back_at_an_unreadable_box_after_the_hold_limit() {
+    // The control: for an ordinary lane the max-hold fallback is unchanged. After ten holds
+    // an inconclusive composer no longer blocks, and the notice is typed.
+    let (_dir, flock) = t4681_notice_flock(false);
+    outbox_lock(&flock.outbox)
+        .get_mut(P)
+        .unwrap()
+        .iter_mut()
+        .for_each(|row| row.holds = 10);
+    let mut pane = with_screen(frame(
+        "my unfinished draft",
+        &["  second line", "  third line"],
+    ));
+    pane.receipt_ok = true;
+    let outcome = flock.deliver_message("m-notice", 99_000.0, &mut pane, || None);
+    assert_ne!(
+        DeliveryOutcome::Held,
+        outcome,
+        "the fallback lets it through"
+    );
+    assert_eq!(
+        vec![(P.to_string(), "[inbox] new message for worker".to_string())],
+        pane.typed
+    );
+}

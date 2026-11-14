@@ -2496,6 +2496,24 @@ pub(crate) fn clear_to_send_with_fallback(
     }
 }
 
+/// t4681: the one warning logged when a notice has waited [`HOLD_ATTEMPT_LIMIT`] holds for a
+/// box that a person may be using. `holds` is the count including this hold; only the hold that
+/// reaches the limit warns, so a long wait logs one line, not one per retry. The notice stays
+/// queued and is never marked undeliverable.
+pub(crate) fn owner_notice_wait_warning(
+    holds: i64,
+    pane_id: &str,
+    queued_notices: usize,
+    waited_s: f64,
+) -> Option<String> {
+    (holds == HOLD_ATTEMPT_LIMIT).then(|| {
+        format!(
+            "WARNING inbox notice for {pane_id} has waited {holds} attempts ({}s): the input box holds a draft or cannot be read, so nothing is typed; {queued_notices} notice(s) stay queued and the mail waits in the mailbox",
+            waited_s.max(0.0) as i64
+        )
+    })
+}
+
 /// t4681: the pane's input box was read and is conclusively empty (no text, not ambiguous, no
 /// dialog). An unreadable or ambiguous box is not "empty".
 pub(crate) fn box_is_empty(env: &dyn SendEnv, pane_id: &str) -> bool {
@@ -4430,7 +4448,11 @@ impl Flock {
             // goes in), so an agent lane with stray text cannot go deaf.
             preserve_draft: message.dunk_delivery.is_some()
                 || (message.is_notice && self.notice_preserves_draft(&message.pane_id)),
-            inconclusive_fallback: message.holds >= HOLD_ATTEMPT_LIMIT,
+            // The max-hold fallback types into a composer that could not be read. Never for a
+            // notice to an owner lane: an unreadable box there may be a person's draft, and
+            // the stored row waits in the mailbox whether or not the notice gets in.
+            inconclusive_fallback: message.holds >= HOLD_ATTEMPT_LIMIT
+                && !(message.is_notice && self.is_owner_lane(&message.pane_id)),
         };
         let is_keys = message.kind == "keys";
         let press_enter = message.press_enter;
@@ -4511,9 +4533,34 @@ impl Flock {
             // a pane where a dunk was just refused over one) is a wait, not a refusal. It is
             // retried on the usual schedule and never counted toward `undeliverable`; the row
             // stays in the mailbox meanwhile.
-            let waiting_for_person = reason == Some("human_draft")
-                && message.is_notice
-                && self.notice_preserves_draft(&pane_id);
+            let waiting_for_person = message.is_notice
+                && match reason {
+                    Some("human_draft") => self.notice_preserves_draft(&pane_id),
+                    // An owner lane's box that cannot be read may hold a person's draft: the
+                    // notice waits for it to read clear, however long that takes.
+                    Some("ambiguous-composer") => self.is_owner_lane(&pane_id),
+                    _ => false,
+                };
+            if waiting_for_person {
+                // Waiting is accepted, silence is not: say so once, at the hold limit.
+                let queued = outbox_lock(&self.outbox)
+                    .get(&pane_id)
+                    .map(|queue| {
+                        queue
+                            .iter()
+                            .filter(|row| row.is_notice && row.status == "queued")
+                            .count()
+                    })
+                    .unwrap_or(0);
+                if let Some(warning) = owner_notice_wait_warning(
+                    message.holds.saturating_add(1),
+                    &pane_id,
+                    queued,
+                    now - message.created_at,
+                ) {
+                    eprintln!("{warning}");
+                }
+            }
             self.record_outbox_hold(OutboxHold {
                 message: &message,
                 now,
