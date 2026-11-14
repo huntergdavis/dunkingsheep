@@ -3646,7 +3646,9 @@ async fn run_terminal_status_success_does_not_republish_every_tick() {
         github_response(200, status_pull_detail("head-a", "open")),
         github_response(200, combined_review_status("success")),
         github_response(405, json!({"message": "required check is expected"})),
-    ]);
+    ])
+    .with_green_merge_gate_at(4, "head-a")
+    .with_green_merge_gate_at(13, "head-a");
     let sync = ReviewSync::with_transport(
         store,
         FakeReviewTokens(Ok("test-token".into())),
@@ -3659,7 +3661,7 @@ async fn run_terminal_status_success_does_not_republish_every_tick() {
         assert!(report["errors"].as_array().unwrap().is_empty());
     }
     let requests = sync.transport.requests.lock().unwrap();
-    assert_eq!(10, requests.len());
+    assert_eq!(18, requests.len());
     assert_eq!(
         2,
         requests
