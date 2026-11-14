@@ -486,14 +486,18 @@ fn test_serve_forever_speaks_newline_delimited_json() {
 // ---- cases the Python gets from its stdlib or covers elsewhere -------------------------------
 
 #[test]
-fn instructions_are_pinned_to_the_python_text() {
+fn instructions_pin_the_rust_only_compact_inbox_default() {
+    // The Python oracle is frozen at retirement. Rust intentionally defaults
+    // inbox reads to messages only and documents the explicit task opt-in.
+    assert!(INSTRUCTIONS.contains("inbox_read returns messages without task queues by default"));
+    assert!(INSTRUCTIONS.contains("set include_tasks=true to include them"));
     let digest = Sha256::digest(INSTRUCTIONS.as_bytes());
     let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
     assert_eq!(
-        "4a49d259f4b93d919dab54218cdab4b7982e5147b527a3bb68af8e496887ed76",
+        "c8d89699e639ed9f88dd2803b1a9df1e4a9ba641c0c93f877d596d1a5ef6f335",
         hex
     );
-    assert_eq!(5294, INSTRUCTIONS.len());
+    assert_eq!(5323, INSTRUCTIONS.len());
 }
 
 #[test]
