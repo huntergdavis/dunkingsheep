@@ -1,0 +1,29 @@
+› [inbox] new message for example-lane from %900: a fixture notice. Read it with: the inbox read command
+
+
+• I’ll read the notice and relay any instructions.
+
+• Ran # COMMAND: read the notice …
+  └ --- m1 from %900 | fixture notice
+    A synthetic notice body for a test fixture; nothing here is real. …
+
+    + 1 line (^t to expand)
+
+• Relayed the notice to the writer and the reviewer. The notice asked for replies only for
+  objections.
+
+  Worked for 23s • 11:34 PM
+
+
+› FIXTURE COORDINATOR CHECK (every 10 min): keep the example pipeline moving. Run the task list for work in progress and for the open and blocked example tasks (e1, e2,
+  e3, e4, e5, e6, e7). Read the inbox and answer the writer and the reviewer. Unblock a task only when its block reason is satisfied. Make sure every ready example-
+  project change has a review task for the reviewer. Lane questions come to this lane first. Decide what can be decided here. Raise to the owner in one line only when a
+  human-only decision is needed. Keep routine status and guard notices in task notes. STANDING RULE: a change may be merged at its exact head when the review gate is
+  green (two distinct accepts) and the checks pass. Never merge a red or unreviewed head. Do not wait for anyone on routine merges. Put one line on the task note for each
+  merge. STALL RULE: if the same blocker or unchanged status appears on consecutive sweeps, do more than repeat it: inspect the lane, the task and the available evidence,
+  decide and assign a concrete next action, and use the inbox for allocations that cannot be performed here. Escalate only for decisions that truly require a person. Keep
+  routine messages short; prefer useful deliverables and at most two repeated test runs.
+
+
+  GPT-6.1 Terra low · ~/work/example · Coordinate the example pipeline
+                                                                                                                                                      ⚠ 1 warning · f2 to view
