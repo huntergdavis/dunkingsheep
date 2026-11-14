@@ -7,7 +7,20 @@ use crate::github::{
 use crate::inbox_store::Store;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+/// SyncWriter owns a separate runtime. Its calls must run on a blocking thread,
+/// with owned arguments, rather than nesting that runtime inside the network future.
+async fn db<T: Send + 'static>(
+    store: &Arc<Store>,
+    work: impl FnOnce(&Store) -> Result<T, crate::error::DunkError> + Send + 'static,
+) -> Result<T, String> {
+    let store = Arc::clone(store);
+    tokio::task::spawn_blocking(move || work(&store))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
 
 pub struct SweepTransport<'a> {
     inner: &'a dyn GitHubTransport,
@@ -24,7 +37,7 @@ impl<'a> SweepTransport<'a> {
     }
     async fn get(
         &self,
-        store: &Store,
+        store: &Arc<Store>,
         root: &str,
         path: &str,
         token: &str,
@@ -77,7 +90,7 @@ impl GitHubTransport for SweepTransport<'_> {
 
 struct Conditional<'a> {
     inner: &'a dyn GitHubTransport,
-    store: &'a Store,
+    store: &'a Arc<Store>,
     gets: &'a std::sync::atomic::AtomicUsize,
 }
 impl GitHubTransport for Conditional<'_> {
@@ -87,10 +100,8 @@ impl GitHubTransport for Conditional<'_> {
     ) -> PinBoxFuture<'a, Result<GitHubResponse, String>> {
         Box::pin(async move {
             let url = request.url.clone();
-            let cached = self
-                .store
-                .pr_wait_http_get(&url)
-                .map_err(|e| e.to_string())?;
+            let cache_url = url.clone();
+            let cached = db(self.store, move |s| s.pr_wait_http_get(&cache_url)).await?;
             if let Some((etag, _)) = &cached {
                 request.headers.insert("If-None-Match".into(), etag.clone());
             }
@@ -106,9 +117,8 @@ impl GitHubTransport for Conditional<'_> {
             }
             if response.status == 200 {
                 if let Some(etag) = etag {
-                    self.store
-                        .pr_wait_http_put(url, etag, response.body.clone())
-                        .map_err(|e| e.to_string())?;
+                    let body = response.body.clone();
+                    db(self.store, move |s| s.pr_wait_http_put(url, etag, body)).await?;
                 }
             }
             Ok(response)
@@ -207,7 +217,7 @@ fn checks_result(
 impl SweepTransport<'_> {
     async fn observe(
         &self,
-        store: &Store,
+        store: &Arc<Store>,
         root: &str,
         repo: &str,
         pr: i64,
@@ -219,9 +229,9 @@ impl SweepTransport<'_> {
             .await?;
         let head = string(&pull["head"], "sha")?.to_owned();
         for wait in waits {
-            store
-                .pr_wait_head(wait.id, &head)
-                .map_err(|e| e.to_string())?;
+            let id = wait.id;
+            let head = head.clone();
+            db(store, move |s| s.pr_wait_head(id, &head)).await?;
         }
         let terminal = if pull.get("merged").and_then(Value::as_bool) == Some(true) {
             Some("PR merged".into())
@@ -314,19 +324,19 @@ impl SweepTransport<'_> {
     }
     pub(crate) async fn poll(
         &self,
-        store: &Store,
+        store: &Arc<Store>,
         root: &str,
         token: Result<String, String>,
         now: f64,
     ) -> Result<Value, String> {
         // Expire before making any GitHub reads, even if the timer was stopped for a day.
-        store.pr_wait_pending(now).map_err(|e| e.to_string())?;
-        let watches = store.pr_wait_due(now).map_err(|e| e.to_string())?;
+        db(store, move |s| s.pr_wait_pending(now)).await?;
+        let watches = db(store, move |s| s.pr_wait_due(now)).await?;
         let mut completed = 0;
         for watch in watches {
-            let waits = store
-                .pr_wait_rows(&watch.repo, watch.pr)
-                .map_err(|e| e.to_string())?;
+            let repo = watch.repo.clone();
+            let pr = watch.pr;
+            let waits = db(store, move |s| s.pr_wait_rows(&repo, pr)).await?;
             let observed = match &token {
                 Ok(token) => {
                     self.observe(store, root, &watch.repo, watch.pr, token, &waits)
@@ -347,37 +357,32 @@ impl SweepTransport<'_> {
                                 .or(observation.checks.clone())
                         };
                         if let Some(event) = event {
-                            store
-                                .pr_wait_finish(
-                                    wait.id,
-                                    &format!(
-                                        "{}#{} {}: {event}",
-                                        watch.repo, watch.pr, observation.head
-                                    ),
-                                )
-                                .map_err(|e| e.to_string())?;
+                            let id = wait.id;
+                            let body = format!(
+                                "{}#{} {}: {event}",
+                                watch.repo, watch.pr, observation.head
+                            );
+                            db(store, move |s| s.pr_wait_finish(id, &body)).await?;
                             completed += 1;
                         } else {
-                            store
-                                .pr_wait_head(wait.id, &observation.head)
-                                .map_err(|e| e.to_string())?;
+                            let id = wait.id;
+                            let head = observation.head.clone();
+                            db(store, move |s| s.pr_wait_head(id, &head)).await?;
                         }
                     }
-                    store
-                        .pr_wait_retry(&watch, now, false)
-                        .map_err(|e| e.to_string())?;
+                    db(store, move |s| s.pr_wait_retry(&watch, now, false)).await?;
                 }
                 Err(_) => {
                     // Four attempts, at >= 120/240/480/960 seconds, then one notice.
                     if watch.failures >= 3 {
                         for wait in waits {
-                            store.pr_wait_finish(wait.id,&format!("{}#{}: could not watch after 4 failed attempts; register again to retry",watch.repo,watch.pr)).map_err(|e|e.to_string())?;
+                            let id = wait.id;
+                            let body=format!("{}#{}: could not watch after 4 failed attempts; register again to retry",watch.repo,watch.pr);
+                            db(store, move |s| s.pr_wait_finish(id, &body)).await?;
                             completed += 1;
                         }
                     } else {
-                        store
-                            .pr_wait_retry(&watch, now, true)
-                            .map_err(|e| e.to_string())?;
+                        db(store, move |s| s.pr_wait_retry(&watch, now, true)).await?;
                     }
                 }
             }
@@ -441,9 +446,9 @@ mod tests {
             })
         }
     }
-    fn store(label: &str) -> (tempfile::TempDir, Store) {
+    fn store(label: &str) -> (tempfile::TempDir, Arc<Store>) {
         let d = dir(label);
-        let s = Store::open(d.path().join("inbox.db"), d.path().join("blobs")).unwrap();
+        let s = Arc::new(Store::open(d.path().join("inbox.db"), d.path().join("blobs")).unwrap());
         (d, s)
     }
     fn register(s: &Store, mailbox: &str, head: Option<&str>) -> i64 {
@@ -451,7 +456,7 @@ mod tests {
             .as_i64()
             .unwrap()
     }
-    fn poll(s: &Store, f: &Fake, now: f64) -> Value {
+    fn poll(s: &Arc<Store>, f: &Fake, now: f64) -> Value {
         tokio::runtime::Runtime::new()
             .unwrap()
             .block_on(SweepTransport::new(f).poll(s, "https://api.test", Ok("fixture".into()), now))
@@ -518,14 +523,14 @@ mod tests {
         poll(&s, &f, 820.);
         assert!(s.pr_wait_pending(100.).unwrap().is_empty());
         drop(s);
-        let s = Store::open(d.path().join("inbox.db"), d.path().join("blobs")).unwrap();
+        let s = Arc::new(Store::open(d.path().join("inbox.db"), d.path().join("blobs")).unwrap());
         poll(&s, &f, 1780.);
         let pending = s.pr_wait_pending(1780.).unwrap();
         assert_eq!(pending.len(), 1);
         assert!(pending[0].2.contains("could not watch"));
         s.pr_wait_delivered(pending[0].0).unwrap();
         drop(s);
-        let s = Store::open(d.path().join("inbox.db"), d.path().join("blobs")).unwrap();
+        let s = Arc::new(Store::open(d.path().join("inbox.db"), d.path().join("blobs")).unwrap());
         poll(&s, &f, 5000.);
         assert!(s.pr_wait_pending(5000.).unwrap().is_empty());
         assert_eq!(f.calls.load(Ordering::Relaxed), 4);
@@ -610,7 +615,8 @@ mod etag_tests {
         let endpoint = Endpoint(Mutex::new(Vec::new()));
         let runtime = tokio::runtime::Runtime::new().unwrap();
         for _ in 0..2 {
-            let store = Store::open(d.path().join("inbox.db"), d.path().join("blobs")).unwrap();
+            let store =
+                Arc::new(Store::open(d.path().join("inbox.db"), d.path().join("blobs")).unwrap());
             let sweep = SweepTransport::new(&endpoint);
             let result = runtime
                 .block_on(sweep.get(&store, "https://fake.invalid", "o/r/pulls/1", "fixture"))
