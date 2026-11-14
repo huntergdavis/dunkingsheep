@@ -232,7 +232,14 @@ impl<'a> OwnerConversations<'a> {
         before: Option<f64>,
         self_pane_id: Option<&str>,
     ) -> Result<Conversation, DunkError> {
-        self.conversation_window(limit, before, None, self_pane_id, ConversationFilter::All)
+        self.conversation_window(
+            limit,
+            before,
+            None,
+            self_pane_id,
+            ConversationFilter::All,
+            None,
+        )
     }
 
     pub fn conversation_cursor(
@@ -264,37 +271,33 @@ impl<'a> OwnerConversations<'a> {
                 Some(before_id),
                 self_pane_id,
                 filter,
+                None,
             );
         }
-        let role = self.flock.caller_role(self_pane_id, self.env)?;
+        let role = self.flock.caller_role(self_pane_id, self.pane_env)?;
         let result = if matches!(role.as_str(), "owner" | "web") {
-            self.conversation_window(Some(limit), None, Some(before_id), self_pane_id, filter)
+            self.conversation_window(
+                Some(limit),
+                None,
+                Some(before_id),
+                self_pane_id,
+                filter,
+                Some(&role),
+            )
         } else {
             Err(DunkError::Refused(
                 "filtered history requires the owner or web role".into(),
             ))
         };
-        match &result {
-            Ok(conversation) => {
-                // Includes the desk's lookahead row: every body loaded is audited, not acknowledged.
-                for row in &conversation.messages {
-                    eprintln!(
-                        "{}",
-                        crate::inbox::body_view_audit(
-                            &role,
-                            self_pane_id,
-                            row["mailbox"].as_str().unwrap_or("<unknown>"),
-                            row["id"].as_str().unwrap_or("<unknown>"),
-                            filter.include_internal(),
-                            "ok"
-                        )
-                    );
-                }
-            }
-            Err(_) => eprintln!(
+        if result.is_err() {
+            eprintln!(
                 "{}",
-                serde_json::json!({"event":"owner_history_filter","role":role,"pane":self_pane_id,"source_filter":filter.name(),"include_internal":filter.include_internal(),"result":"refused_or_error"})
-            ),
+                serde_json::json!({
+                    "event":"owner_history_filter", "role":role, "pane":self_pane_id,
+                    "source_filter":filter.name(), "include_internal":filter.include_internal(),
+                    "before_id":before_id, "result":"refused_or_error"
+                })
+            );
         }
         result
     }
@@ -306,6 +309,7 @@ impl<'a> OwnerConversations<'a> {
         cursor: Option<Option<&str>>,
         self_pane_id: Option<&str>,
         filter: ConversationFilter,
+        audit_role: Option<&str>,
     ) -> Result<Conversation, DunkError> {
         let store = self.authorised_store(self_pane_id)?;
         let limit = limit.filter(|limit| *limit != 0).unwrap_or(50);
@@ -341,6 +345,19 @@ impl<'a> OwnerConversations<'a> {
             .filter_map(|row| row.get("id").and_then(Value::as_str).map(str::to_string))
             .collect();
         let count = messages.len();
+        if let Some(role) = audit_role {
+            // One metadata-only record per request, including the lookahead row in count.
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event":"owner_history_filter", "role":role, "pane":self_pane_id,
+                    "source_filter":filter.name(), "include_internal":filter.include_internal(),
+                    "mailboxes":mailboxes, "before_id":cursor.flatten(), "count":count,
+                    "first_id":messages.first().and_then(|row| row.get("id")),
+                    "last_id":messages.last().and_then(|row| row.get("id")), "result":"ok"
+                })
+            );
+        }
         Ok(Conversation {
             mailbox: OWNER_MAILBOX.to_string(),
             messages: std::mem::take(&mut messages),

@@ -221,8 +221,9 @@ Mailbox partition and audience constraints apply before cursor lookup, ordering 
 A cursor outside the requested filter, hidden by audience, or excluded by changed registration refuses rather than
 crossing scope. Unknown audience classifications are excluded. There is no schema migration.
 
-Each body returned by an explicit source-filter query is logged with the existing metadata-only
-inbox_body_view audit helper, including the lookahead row; opt-in is recorded as include_agent.
-No body, subject or sender enters that logger. Refused/failed query execution after role resolution emits a separate
-metadata-only owner_history_filter result; browsing never changes inbox state or sends notices.
+Each explicit source-filter request emits one metadata-only `owner_history_filter` audit record:
+role, pane, source filter, internal opt-in, queried mailbox set, cursor, row count (including
+lookahead), first/last message IDs and result. No body, subject or sender enters that logger.
+Refused/failed query execution after role resolution emits one failure record with the filter
+and cursor; browsing never changes inbox state or sends notices.
 Deploy daemon support before the matching desk. Neither S-F nor S-G is in the S5-only live UI.
