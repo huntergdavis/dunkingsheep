@@ -136,6 +136,23 @@ impl crate::flock::roster::RosterEnv for RequestRuntimeAdapter<'_> {
     fn cpu_sample(&self, caller: &Value, now: f64) -> Result<Option<Value>, String> {
         self.helper_rosterenv_cpu_sample(caller, now)
     }
+    fn model_samples(
+        &self,
+        since: f64,
+    ) -> Result<std::collections::HashMap<String, Value>, String> {
+        // Read-only (t4473): the samples are the ones the capture already writes. A state
+        // directory that has no store yet has no samples; the roster does not create one.
+        let (_, directory) = self
+            .health_state_paths(false)
+            .map_err(|error| error.to_string())?;
+        let path = directory.join("agent-state.db");
+        if !path.exists() {
+            return Ok(std::collections::HashMap::new());
+        }
+        crate::state::StateStore::open(&path)
+            .and_then(|store| store.latest_model_samples(since))
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[cfg(test)]

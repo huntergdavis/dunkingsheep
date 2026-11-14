@@ -1055,6 +1055,9 @@ impl RosterEnv for ParityEnv {
     fn cpu_sample(&self, _: &Value, _: f64) -> Result<Option<Value>, String> {
         Ok(None)
     }
+    fn model_samples(&self, _: f64) -> Result<std::collections::HashMap<String, Value>, String> {
+        Ok(std::collections::HashMap::new())
+    }
 }
 
 fn dispatch<G: CallerGate + ?Sized>(

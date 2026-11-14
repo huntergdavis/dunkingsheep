@@ -142,7 +142,7 @@ impl RequestRuntimeAdapter<'_> {
         }).collect()
     }
 
-    fn health_state_paths(&self, health: bool) -> Result<(PathBuf, PathBuf), DunkError> {
+    pub(super) fn health_state_paths(&self, health: bool) -> Result<(PathBuf, PathBuf), DunkError> {
         let state = self.terminal.flock.status_state()?;
         // Both Python modules expand HOME eagerly at import; override selection differs.
         let home = state
