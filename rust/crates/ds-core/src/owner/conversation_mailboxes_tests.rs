@@ -516,7 +516,7 @@ fn inbox_source_filters_use_metadata_scope_and_opt_in_without_consuming() {
 }
 
 #[test]
-fn versioned_views_use_recorded_kind_and_keep_every_legacy_shape_historical() {
+fn thread_views_use_recorded_kind_and_keep_every_legacy_shape_historical() {
     use crate::owner::ConversationFilter::{Historical, HumanThreads, VpThreads};
     let (_dir, flock, store) = fixture("thread-views");
     let db = rusqlite::Connection::open(store.path()).unwrap();

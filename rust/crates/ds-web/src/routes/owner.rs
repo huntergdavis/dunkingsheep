@@ -2123,7 +2123,7 @@ mod tests {
         assert_eq!(backend.calls.lock().unwrap()[0].1, json!({"limit": 1}));
     }
     #[test]
-    fn versioned_inbox_views_require_confirmed_lineage_and_scope() {
+    fn thread_views_require_confirmed_lineage_and_scope() {
         for (filter, kind) in [
             ("human_threads", "human"),
             ("vp_threads", "vp"),
