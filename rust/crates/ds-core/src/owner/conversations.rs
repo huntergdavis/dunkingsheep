@@ -39,6 +39,44 @@ pub struct Conversation {
     pub waiting: Vec<String>,
 }
 
+/// Metadata partition for the explicit owner Inbox filters. All preserves legacy visibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationFilter {
+    All,
+    Human,
+    OwnerLane { include_internal: bool },
+}
+impl ConversationFilter {
+    pub fn parse(name: &str, include_internal: bool) -> Result<Self, DunkError> {
+        match (name, include_internal) {
+            ("all", false) => Ok(Self::All),
+            ("human", false) => Ok(Self::Human),
+            ("owner_lane", include_internal) => Ok(Self::OwnerLane { include_internal }),
+            ("all" | "human", true) => Err(DunkError::Refused(
+                "include_internal requires the owner_lane filter".into(),
+            )),
+            _ => Err(DunkError::Refused(
+                "invalid conversation source filter".into(),
+            )),
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Human => "human",
+            Self::OwnerLane { .. } => "owner_lane",
+        }
+    }
+    pub fn include_internal(self) -> bool {
+        matches!(
+            self,
+            Self::OwnerLane {
+                include_internal: true
+            }
+        )
+    }
+}
+
 /// A page is an outbound notice for the owner's phone (t665, FLAT_FLEET 7.2), not a question:
 /// it carries this sender and subject and no reply_to, so no desk answers it, and owner_outbox
 /// returns it to the telegram transport only.
@@ -194,7 +232,14 @@ impl<'a> OwnerConversations<'a> {
         before: Option<f64>,
         self_pane_id: Option<&str>,
     ) -> Result<Conversation, DunkError> {
-        self.conversation_window(limit, before, None, self_pane_id)
+        self.conversation_window(
+            limit,
+            before,
+            None,
+            self_pane_id,
+            ConversationFilter::All,
+            None,
+        )
     }
 
     pub fn conversation_cursor(
@@ -203,12 +248,58 @@ impl<'a> OwnerConversations<'a> {
         before_id: Option<&str>,
         self_pane_id: Option<&str>,
     ) -> Result<Conversation, DunkError> {
+        self.conversation_filtered_cursor(limit, before_id, self_pane_id, ConversationFilter::All)
+    }
+
+    /// Explicit source filters are owner/web-only, including the raw internal lane view.
+    pub fn conversation_filtered_cursor(
+        &self,
+        limit: i64,
+        before_id: Option<&str>,
+        self_pane_id: Option<&str>,
+        filter: ConversationFilter,
+    ) -> Result<Conversation, DunkError> {
         if !(1..=201).contains(&limit) {
             return Err(DunkError::Refused(
                 "history page limit must be 1..201".into(),
             ));
         }
-        self.conversation_window(Some(limit), None, Some(before_id), self_pane_id)
+        if filter == ConversationFilter::All {
+            return self.conversation_window(
+                Some(limit),
+                None,
+                Some(before_id),
+                self_pane_id,
+                filter,
+                None,
+            );
+        }
+        let role = self.flock.caller_role(self_pane_id, self.pane_env)?;
+        let result = if matches!(role.as_str(), "owner" | "web") {
+            self.conversation_window(
+                Some(limit),
+                None,
+                Some(before_id),
+                self_pane_id,
+                filter,
+                Some(&role),
+            )
+        } else {
+            Err(DunkError::Refused(
+                "filtered history requires the owner or web role".into(),
+            ))
+        };
+        if result.is_err() {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event":"owner_history_filter", "role":role, "pane":self_pane_id,
+                    "source_filter":filter.name(), "include_internal":filter.include_internal(),
+                    "before_id":before_id, "result":"refused_or_error"
+                })
+            );
+        }
+        result
     }
 
     fn conversation_window(
@@ -217,14 +308,24 @@ impl<'a> OwnerConversations<'a> {
         before: Option<f64>,
         cursor: Option<Option<&str>>,
         self_pane_id: Option<&str>,
+        filter: ConversationFilter,
+        audit_role: Option<&str>,
     ) -> Result<Conversation, DunkError> {
         let store = self.authorised_store(self_pane_id)?;
         let limit = limit.filter(|limit| *limit != 0).unwrap_or(50);
-        let mailboxes = self.conversation_mailboxes(&store)?;
+        let mailboxes = match filter {
+            ConversationFilter::Human => vec![OWNER_MAILBOX.to_owned()],
+            ConversationFilter::OwnerLane { .. } => self
+                .conversation_mailboxes(&store)?
+                .into_iter()
+                .filter(|key| normalise_mailbox(key) != OWNER_MAILBOX)
+                .collect(),
+            ConversationFilter::All => self.conversation_mailboxes(&store)?,
+        };
         // Routine lane mail (review verdicts and notes, marked by subject) is kept in storage and listed nowhere
         // here (t3592). Owner decisions, owner blockers, owner replies and unmarked legacy mail stay listed.
         let mut messages: Vec<Value> = if let Some(before_id) = cursor {
-            store.conversation_visible_cursor(&mailboxes, limit, before_id)?
+            store.conversation_filtered_cursor(&mailboxes, limit, before_id, filter)?
         } else {
             store.conversation_across_visible(&mailboxes, Some(limit), before)?
         };
@@ -244,6 +345,19 @@ impl<'a> OwnerConversations<'a> {
             .filter_map(|row| row.get("id").and_then(Value::as_str).map(str::to_string))
             .collect();
         let count = messages.len();
+        if let Some(role) = audit_role {
+            // One metadata-only record per request, including the lookahead row in count.
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event":"owner_history_filter", "role":role, "pane":self_pane_id,
+                    "source_filter":filter.name(), "include_internal":filter.include_internal(),
+                    "mailboxes":mailboxes, "before_id":cursor.flatten(), "count":count,
+                    "first_id":messages.first().and_then(|row| row.get("id")),
+                    "last_id":messages.last().and_then(|row| row.get("id")), "result":"ok"
+                })
+            );
+        }
         Ok(Conversation {
             mailbox: OWNER_MAILBOX.to_string(),
             messages: std::mem::take(&mut messages),

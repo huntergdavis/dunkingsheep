@@ -22,3 +22,8 @@
   .owner-inbox-list { max-height: 35vh; border-right: 0; border-bottom: 1px solid var(--dash-border); }
   .owner-inbox-reader { overflow: visible; padding: 14px; }
 }
+
+.owner-inbox-filters { display: grid; gap: 8px; min-width: 0; padding: 10px; border: 1px solid var(--dash-border); }
+.owner-inbox-filters label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.owner-inbox-filters select { min-width: 0; max-width: 100%; }
+.owner-inbox-filters p { color: var(--dash-muted); margin: 0; }

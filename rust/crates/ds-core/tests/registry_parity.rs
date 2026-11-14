@@ -74,11 +74,13 @@ fn every_input_schema_equals_the_pythons() {
         }
         if name == "owner_conversation" {
             // Rust-only opt-in ID paging; the retired Python timestamp API stays frozen.
-            assert!(got["properties"]
-                .as_object_mut()
-                .unwrap()
-                .remove("before_id")
-                .is_some());
+            for key in ["before_id", "source_filter", "include_internal"] {
+                assert!(got["properties"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(key)
+                    .is_some());
+            }
         }
         if name == "inbox_list" {
             // t4684 summary paging is opt-in and Rust-only; preserve the frozen legacy schema.

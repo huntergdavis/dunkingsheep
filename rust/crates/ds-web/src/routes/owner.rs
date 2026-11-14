@@ -21,7 +21,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use ds_core::owner::{owner_thread_role, OwnerThreadRole};
+use ds_core::owner::{owner_thread_role, ConversationFilter, OwnerThreadRole};
 use serde_json::{json, Map, Value};
 
 use super::auth::{AuthBackend, AuthError, Identity, RequestScheme};
@@ -359,7 +359,30 @@ async fn api_owner_thread(
     {
         return detail_response(StatusCode::BAD_REQUEST, "invalid history cursor".into());
     }
-    match owner_thread(state.as_ref(), limit, paged.then_some(before)).await {
+    let include_internal = match query.get("include_internal").map(String::as_str) {
+        None | Some("false") => false,
+        Some("true") => true,
+        _ => {
+            return detail_response(
+                StatusCode::BAD_REQUEST,
+                "invalid include_internal flag".into(),
+            )
+        }
+    };
+    let filter = match ConversationFilter::parse(
+        query.get("filter").map(String::as_str).unwrap_or("all"),
+        include_internal,
+    ) {
+        Ok(filter) => filter,
+        Err(_) => return detail_response(StatusCode::BAD_REQUEST, "invalid Inbox filter".into()),
+    };
+    if !paged && (query.contains_key("filter") || query.contains_key("include_internal")) {
+        return detail_response(
+            StatusCode::BAD_REQUEST,
+            "Inbox filters require paging".into(),
+        );
+    }
+    match owner_thread(state.as_ref(), limit, paged.then_some(before), filter).await {
         Ok(result) if paged => {
             ([(header::CACHE_CONTROL, "no-store")], Json(result)).into_response()
         }
@@ -514,10 +537,15 @@ async fn owner_thread(
     state: &OwnerWebState,
     limit: i64,
     cursor: Option<Option<&str>>,
+    filter: ConversationFilter,
 ) -> Result<Value, OwnerWebError> {
     let mut args = json!({"limit": if cursor.is_some() { limit + 1 } else { limit }});
     if let Some(before_id) = cursor {
         args["before_id"] = json!(before_id);
+    }
+    if filter != ConversationFilter::All {
+        args["source_filter"] = json!(filter.name());
+        args["include_internal"] = json!(filter.include_internal());
     }
     let data = match state.backend.rpc("owner_conversation", args).await {
         Ok(data) => data,
@@ -538,6 +566,30 @@ async fn owner_thread(
             })
         }
     };
+    if filter != ConversationFilter::All {
+        let invalid = || OwnerWebError::Http {
+            status: StatusCode::BAD_GATEWAY,
+            detail: "Inbox filter unavailable; response scope was not confirmed".into(),
+        };
+        if data["source_filter"].as_str() != Some(filter.name())
+            || data["include_internal"].as_bool() != Some(filter.include_internal())
+        {
+            return Err(invalid());
+        }
+        for row in data["messages"].as_array().ok_or_else(invalid)? {
+            let key = row["mailbox"].as_str().ok_or_else(invalid)?;
+            let root = ds_core::inbox::normalise_mailbox(key) == "owner";
+            if root != (filter == ConversationFilter::Human) {
+                return Err(invalid());
+            }
+            match row.get("audience") {
+                Some(Value::Null) => {}
+                Some(Value::String(audience))
+                    if audience == "agent" && filter.include_internal() => {}
+                _ => return Err(invalid()),
+            }
+        }
+    }
     let mut next_before = None;
     let mut data = data;
     if cursor.is_some() {
@@ -565,7 +617,19 @@ async fn owner_thread(
     let messages = data
         .get("messages")
         .and_then(Value::as_array)
-        .map(|rows| rows.iter().map(owner_thread_item).collect::<Vec<_>>())
+        .map(|rows| {
+            rows.iter()
+                .map(|row| {
+                    let mut item = owner_thread_item(row);
+                    if filter != ConversationFilter::All {
+                        item["mailbox"] = row["mailbox"].clone();
+                        item["audience"] = row["audience"].clone();
+                        item["conversation_source"] = json!(filter.name());
+                    }
+                    item
+                })
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     let waiting = data
         .get("waiting")
@@ -584,6 +648,8 @@ async fn owner_thread(
                 .collect::<Vec<_>>());
         }
         result["next_before"] = json!(next_before);
+        result["source_filter"] = json!(filter.name());
+        result["include_internal"] = json!(filter.include_internal());
     }
     Ok(result)
 }
@@ -1647,6 +1713,105 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["notify"]["state"], "sent");
         assert_eq!(backend.methods()[1], "list_panes");
+    }
+
+    #[test]
+    fn owner_history_filters_forward_confirmed_scope_and_reject_unsafe_rows() {
+        let backend = Arc::new(FakeOwner::new());
+        backend.reply("owner_conversation", json!({"source_filter":"human","include_internal":false,"messages":[{"id":"i7","mailbox":"owner","audience":null,"created_at":100,"body":"any transport"}],"waiting":[]}));
+        let response = block_on(app(authorized(), backend.clone()).oneshot(request(
+            "GET",
+            "/api/owner-thread?paged=true&filter=human&before=i9",
+            None,
+        )))
+        .unwrap();
+        let (status, body, _) = response_json(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["source_filter"], "human");
+        assert_eq!(body["items"][0]["mailbox"], "owner");
+        assert_eq!(body["items"][0]["audience"], Value::Null);
+        assert_eq!(body["items"][0]["conversation_source"], "human");
+        assert_eq!(
+            backend.calls.lock().unwrap()[0].1,
+            json!({"limit":51,"before_id":"i9","source_filter":"human","include_internal":false})
+        );
+        backend.reply("owner_conversation", json!({"source_filter":"owner_lane","include_internal":true,"messages":[{"id":"i8","mailbox":"codex-rust-owner","audience":"agent","created_at":100,"body":"internal"}],"waiting":[]}));
+        let response = block_on(app(authorized(), backend.clone()).oneshot(request(
+            "GET",
+            "/api/owner-thread?paged=true&filter=owner_lane&include_internal=true",
+            None,
+        )))
+        .unwrap();
+        let (status, body, _) = response_json(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["items"][0]["audience"], "agent");
+        for payload in [
+            json!({"messages":[]}),
+            json!({"source_filter":"human","include_internal":false,"messages":[{"id":"i7","mailbox":"owner","audience":"agent","body":"DO_NOT_FORWARD"}]}),
+            json!({"source_filter":"human","include_internal":false,"messages":[{"id":"i7","mailbox":"lane","audience":null,"body":"DO_NOT_FORWARD"}]}),
+            json!({"source_filter":"human","include_internal":false,"messages":[{"id":"i7","mailbox":"owner","body":"DO_NOT_FORWARD"}]}),
+        ] {
+            backend.reply("owner_conversation", payload);
+            let response = block_on(app(authorized(), backend.clone()).oneshot(request(
+                "GET",
+                "/api/owner-thread?paged=true&filter=human",
+                None,
+            )))
+            .unwrap();
+            let (status, body, _) = response_json(response);
+            assert_eq!(status, StatusCode::BAD_GATEWAY);
+            assert!(!body.to_string().contains("DO_NOT_FORWARD"));
+        }
+    }
+
+    #[test]
+    fn owner_lane_filter_cannot_forward_agent_rows_without_opt_in_or_root_rows() {
+        let backend = Arc::new(FakeOwner::new());
+        for (internal, mailbox, audience) in [(false, "lane", Some("agent")), (true, "owner", None)]
+        {
+            backend.reply("owner_conversation", json!({"source_filter":"owner_lane","include_internal":internal,"messages":[{"id":"i7","mailbox":mailbox,"audience":audience,"body":"DO_NOT_FORWARD"}]}));
+            let uri = if internal {
+                "/api/owner-thread?paged=true&filter=owner_lane&include_internal=true"
+            } else {
+                "/api/owner-thread?paged=true&filter=owner_lane"
+            };
+            let response =
+                block_on(app(authorized(), backend.clone()).oneshot(request("GET", uri, None)))
+                    .unwrap();
+            let (status, body, _) = response_json(response);
+            assert_eq!(status, StatusCode::BAD_GATEWAY);
+            assert!(!body.to_string().contains("DO_NOT_FORWARD"));
+        }
+    }
+
+    #[test]
+    fn owner_history_filters_reject_invalid_flags_before_rpc() {
+        let backend = Arc::new(FakeOwner::new());
+        for path in [
+            "/api/owner-thread?filter=human",
+            "/api/owner-thread?paged=true&filter=other",
+            "/api/owner-thread?paged=true&filter=human&include_internal=true",
+            "/api/owner-thread?paged=true&filter=owner_lane&include_internal=yes",
+        ] {
+            let response =
+                block_on(app(authorized(), backend.clone()).oneshot(request("GET", path, None)))
+                    .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        let response = block_on(
+            app(
+                Arc::new(FakeAuth::accepting(Identity::Api)),
+                backend.clone(),
+            )
+            .oneshot(request(
+                "GET",
+                "/api/owner-thread?paged=true&filter=owner_lane&include_internal=true",
+                None,
+            )),
+        )
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(backend.methods().is_empty());
     }
 
     #[test]
