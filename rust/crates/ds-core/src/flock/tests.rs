@@ -180,3 +180,73 @@ fn test_snapshot_launches_empty_pane_agent_falls_back_to_the_session_agent() {
     assert_eq!(entry["agent"], json!("codex"));
     assert_eq!(entry["session"], json!("s9"));
 }
+
+#[test]
+fn launch_identity_names_the_agent_kind_the_flags_and_the_started_process() {
+    let argv: Vec<String> = ["/opt/bin/Codex", "--model", "gpt-sol", "--effort=high"]
+        .iter()
+        .map(|part| part.to_string())
+        .collect();
+    let me = i64::from(std::process::id());
+    let fields: BTreeMap<_, _> = launch_identity(&argv, Some(me)).into_iter().collect();
+    assert_eq!(fields["provider"], json!("codex"));
+    assert_eq!(fields["model"], json!("gpt-sol"));
+    assert_eq!(fields["effort"], json!("high"));
+    assert_eq!(fields["process_pid"], json!(me));
+    assert_eq!(
+        fields["process_start"],
+        json!(crate::proc::process_start(me).unwrap())
+    );
+
+    // Nothing known is null: not an agent, no flags, no process, or a process that is gone.
+    let shell = vec!["bash".to_string(), "-l".to_string()];
+    for process in [None, Some(i64::from(i32::MAX))] {
+        for (key, value) in launch_identity(&shell, process) {
+            assert_eq!(value, Value::Null, "{key}");
+        }
+    }
+}
+
+#[test]
+fn a_new_launch_drops_the_previous_launchs_identity() {
+    let dir = crate::testsupport::dir("flock-launch-identity");
+    let flock = Flock::new(
+        dir.path().join("launches.json"),
+        dir.path().join("lanes.json"),
+        false,
+    );
+    flock.record_launch(
+        "%7",
+        &[
+            ("argv", json!(["claude", "--model", "opus"])),
+            ("cwd", json!("/work")),
+            ("provider", json!("claude")),
+            ("model", json!("opus")),
+            ("effort", json!("high")),
+            ("process_pid", json!(41)),
+            ("process_start", json!("900")),
+        ],
+    );
+    assert_eq!(flock.launch("%7").unwrap()["model"], json!("opus"));
+
+    // Respawned without a model flag and with no process read: none of the old identity stays.
+    flock.record_launch(
+        "%7",
+        &[
+            ("argv", json!(["claude"])),
+            ("provider", json!("claude")),
+            ("model", Value::Null),
+            ("process_pid", Value::Null),
+        ],
+    );
+    let entry = flock.launch("%7").unwrap();
+    assert_eq!(entry["provider"], json!("claude"));
+    for key in ["model", "effort", "process_pid", "process_start"] {
+        assert!(!entry.contains_key(key), "{key} survived the new launch");
+    }
+    assert_eq!(entry["cwd"], json!("/work"), "other fields still merge");
+
+    // A call without a command line is not a new launch and keeps the identity.
+    flock.record_launch("%7", &[("session", json!("s2"))]);
+    assert_eq!(flock.launch("%7").unwrap()["provider"], json!("claude"));
+}

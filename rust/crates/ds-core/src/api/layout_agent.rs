@@ -140,11 +140,14 @@ pub fn h_start_agent(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         let child_pid=agent_verify::verify_agent_started(verifier,&name,pane_id.as_deref(),Some(kind),verify_s)?;
         if let Some(id)=pane_id.as_deref() {
             let session=agent.get("agent_session").filter(|v|truthy(v)).cloned().unwrap_or_else(||json!({}));
-            context.flock.record_launch(id,&[
+            let mut fields=vec![
                 ("agent",json!(name)),("argv",json!(argv)),("command",json!(crate::flock::commands_layout::shlex_join(&argv))),
                 ("cwd",if truthy(cwd) {cwd.clone()} else {agent["cwd"].clone()}),
                 ("session",session["value"].clone()),("session_kind",session["kind"].clone()),("name",json!(name)),("source",json!("start_agent")),
-            ]);
+            ];
+            // t4473: what was launched and which process it is.
+            fields.extend(crate::flock::launch_identity(&argv,child_pid));
+            context.flock.record_launch(id,&fields);
         }
         let mut role=Value::Null;
         if truthy(arg(&args,"role")) && pane_id.is_some() {

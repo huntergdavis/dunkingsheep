@@ -139,6 +139,25 @@ impl crate::flock::roster::RosterEnv for RequestRuntimeAdapter<'_> {
     fn launch(&self, pane_id: &str) -> Option<Value> {
         self.terminal.flock.launch(pane_id).map(Value::Object)
     }
+    fn launch_process_live(&self, lane: &Value, pid: i64, start: &str) -> Option<bool> {
+        let pane_pid = lane.get("pane_pid").and_then(Value::as_i64)?;
+        // The same process (a reused pid has another start time), alive, and the pane's root
+        // or one of its descendants.
+        if !crate::proc::process_alive(pid, Some(start)) {
+            return Some(false);
+        }
+        let mut current = pid;
+        for _ in 0..64 {
+            if current == pane_pid {
+                return Some(true);
+            }
+            match crate::proc::stat(current) {
+                Some(info) if info.ppid > 1 => current = info.ppid,
+                _ => return Some(false),
+            }
+        }
+        Some(false)
+    }
     fn pane_started_at(&self, lane: &Value) -> Option<f64> {
         use crate::state::proc::ProcReader;
         let pid = lane.get("pane_pid").and_then(Value::as_i64)?;

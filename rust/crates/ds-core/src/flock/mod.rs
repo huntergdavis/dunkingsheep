@@ -203,6 +203,47 @@ pub struct Flock {
     quarantined_mailboxes: Mutex<Vec<Value>>,
 }
 
+/// What a launch record says about the launch itself (t4473): the agent kind, the model and
+/// effort named on the command line, and the process that was started.
+pub const LAUNCH_IDENTITY_KEYS: [&str; 5] = [
+    "provider",
+    "model",
+    "effort",
+    "process_pid",
+    "process_start",
+];
+
+/// The identity fields of one launch, for `record_launch`. `provider` is the command's
+/// executable when it is a known agent; `model` and `effort` are the command line's flags;
+/// `process_pid` and `process_start` name the started process (its pid and kernel start time,
+/// both or neither), so a reader can tell whether the record still describes what runs in the
+/// pane. A value that is not known is null, which `record_launch` does not store.
+pub fn launch_identity(argv: &[String], process: Option<i64>) -> Vec<(&'static str, Value)> {
+    let kind = argv
+        .first()
+        .map(|exe| exe.rsplit('/').next().unwrap_or(exe).to_lowercase())
+        .filter(|kind| crate::state::AGENT_EXES.contains(&kind.as_str()));
+    let flag = |names: &[&str]| {
+        crate::state::flag(argv, names)
+            .filter(|value| !value.is_empty())
+            .map_or(Value::Null, Value::String)
+    };
+    let started = process.and_then(|pid| Some((pid, crate::proc::process_start(pid)?)));
+    vec![
+        ("provider", kind.map_or(Value::Null, Value::String)),
+        ("model", flag(&crate::state::MODEL_FLAGS)),
+        ("effort", flag(&crate::state::THINKING_FLAGS)),
+        (
+            "process_pid",
+            started.as_ref().map_or(Value::Null, |(pid, _)| json!(pid)),
+        ),
+        (
+            "process_start",
+            started.map_or(Value::Null, |(_, start)| Value::String(start)),
+        ),
+    ]
+}
+
 impl Flock {
     /// `Flock.__init__` (the launches part): `_load_launches` runs when persisting.
     pub fn new(
@@ -616,6 +657,10 @@ impl Flock {
     }
 
     /// `_record_launch`: merge the non-null fields and stamp `recorded_at`.
+    ///
+    /// A call that carries a command line (`argv`) records a NEW launch, so what the entry said
+    /// about the previous launch's identity (`LAUNCH_IDENTITY_KEYS`) is dropped first: a
+    /// respawn without a model flag must not keep the model of the launch before it.
     pub fn record_launch(&self, pane_id: &str, fields: &[(&str, Value)]) {
         if pane_id.is_empty() {
             return;
@@ -623,6 +668,14 @@ impl Flock {
         {
             let mut launches = self.launches.lock().expect("launches lock");
             let entry = launches.entry(pane_id.to_string()).or_default();
+            if fields
+                .iter()
+                .any(|(key, value)| *key == "argv" && !value.is_null())
+            {
+                for key in LAUNCH_IDENTITY_KEYS {
+                    entry.remove(key);
+                }
+            }
             for (key, value) in fields {
                 if !value.is_null() {
                     entry.insert((*key).to_string(), value.clone());

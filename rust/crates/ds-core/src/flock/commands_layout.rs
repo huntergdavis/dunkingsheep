@@ -566,25 +566,26 @@ pub fn start_agent(
         None => agent.get("cwd").cloned().unwrap_or(Value::Null),
     };
     if let Some(id) = pane_id.as_deref() {
-        flock.record_launch(
-            id,
-            &[
-                ("agent", json!(name)),
-                ("argv", json!(argv)),
-                ("command", json!(shlex_join(&argv))),
-                ("cwd", cwd_value),
-                (
-                    "session",
-                    session.get("value").cloned().unwrap_or(Value::Null),
-                ),
-                (
-                    "session_kind",
-                    session.get("kind").cloned().unwrap_or(Value::Null),
-                ),
-                ("name", json!(name)),
-                ("source", json!("start_agent")),
-            ],
-        );
+        let mut fields = vec![
+            ("agent", json!(name)),
+            ("argv", json!(argv)),
+            ("command", json!(shlex_join(&argv))),
+            ("cwd", cwd_value),
+            (
+                "session",
+                session.get("value").cloned().unwrap_or(Value::Null),
+            ),
+            (
+                "session_kind",
+                session.get("kind").cloned().unwrap_or(Value::Null),
+            ),
+            ("name", json!(name)),
+            ("source", json!("start_agent")),
+        ];
+        // t4473: what was launched and which process it is, so a reader can tie the record to
+        // the pane's current process exactly.
+        fields.extend(super::launch_identity(&argv, child_pid));
+        flock.record_launch(id, &fields);
     }
     let mut registered = Value::Null;
     if let (Some(role), Some(id)) = (role.filter(|r| !r.is_empty()), pane_id.as_deref()) {
