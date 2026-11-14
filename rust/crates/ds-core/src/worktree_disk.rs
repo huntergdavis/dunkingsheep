@@ -328,7 +328,7 @@ pub fn busy_paths(proc_root: &Path, root: &Path, uid: u32) -> Result<ProcessScan
     Ok(scan)
 }
 
-fn real(path: &Path) -> PathBuf {
+pub(crate) fn real(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
