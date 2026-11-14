@@ -215,6 +215,10 @@ pub fn h_metrics(context: &HandlerContext<'_>, args: Args) -> Result<Value, Dunk
     coverage.insert("retention_s".into(), json!(metrics.retention_s));
     coverage.insert("notes".into(), Value::String(notes.to_string()));
     output.insert("coverage".into(), Value::Object(coverage));
+    let mut commands =
+        crate::command_stats::summarize(metrics.command_cells(start, end)?, start, end);
+    commands["dropped_cells"] = json!(metrics.commands_dropped());
+    output.insert("commands".into(), commands);
     Ok(Value::Object(output))
 }
 
@@ -449,6 +453,45 @@ mod tests {
             "no events recorded yet; durable telemetry began with this daemon and records as traffic happens",
             report["coverage"]["notes"]
         );
+    }
+
+    #[test]
+    fn every_dispatched_command_is_counted_per_minute_with_role_duration_and_bytes() {
+        let (dir, flock) = flock("api-metrics-commands");
+        attach_inbox(&flock, dir.path());
+
+        // Minute 16: one answered request and one refused one, from two roles.
+        let first = dispatch(&flock, None, "worker", 1000.0).unwrap();
+        assert_eq!(json!({}), first["commands"]["by_command"]);
+        dispatch(&flock, Some(args(json!({"nope": 1}))), "owner", 1010.0).unwrap_err();
+
+        // Minute 18: the earlier minute is complete, so it is written, and still reported.
+        let report = dispatch(&flock, None, "worker", 1100.0).unwrap();
+        let counted = &report["commands"]["by_command"]["metrics"];
+        assert_eq!(2, counted["count"], "{report}");
+        assert_eq!(1, counted["errors"]);
+        assert_eq!(json!({"owner": 1, "worker": 1}), counted["by_role"]);
+        assert!(counted["bytes"].as_i64().unwrap() > 0);
+        assert!(counted["p50_ms"].is_i64() && counted["p95_ms"].is_i64());
+        let metrics = flock.stores().metrics.unwrap();
+        let written: Vec<i64> = metrics
+            .command_cells(0.0, 1080.0)
+            .unwrap()
+            .into_iter()
+            .filter(|((minute, _, _), _)| *minute == 16)
+            .map(|((minute, _, _), cell)| minute * 100 + cell.count)
+            .collect();
+        assert_eq!(vec![1601, 1601], written, "one row per minute and role");
+
+        // A window that starts after minute 16 leaves it out.
+        let later = dispatch(
+            &flock,
+            Some(args(json!({"since": 1080, "until": 1300}))),
+            "worker",
+            1200.0,
+        )
+        .unwrap();
+        assert_eq!(1, later["commands"]["by_command"]["metrics"]["count"]);
     }
 
     #[test]
