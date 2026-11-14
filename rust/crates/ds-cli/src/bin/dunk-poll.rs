@@ -333,6 +333,10 @@ fn render_text(result: &Value) -> String {
             ));
         }
     }
+    // The header counts the whole fleet; say so when the list under it is only this pane's.
+    if let Some(note) = dunks.get("note").and_then(Value::as_str) {
+        lines.push(format!("  dunks: {note}"));
+    }
     if let Some(rows) = dunks.get("dunks").and_then(Value::as_array) {
         for d in rows.iter().take(10) {
             let target = d

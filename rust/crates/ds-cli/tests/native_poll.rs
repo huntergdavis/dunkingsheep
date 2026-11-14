@@ -258,3 +258,34 @@ fn tasks_are_compact_rows_by_default_and_complete_with_full() {
     let full: Value = serde_json::from_str(&full).unwrap();
     assert!(full["tasks"]["tasks"][0]["body"].as_str().unwrap().len() > 1000);
 }
+
+#[test]
+fn text_output_says_when_the_dunk_list_is_only_this_panes() {
+    let mut reply = fleet_reply();
+    reply.as_object_mut().unwrap().remove("tasks");
+    let (_, text) = poll_with(reply.clone(), &["--text"]);
+    // The header still counts the fleet (12 of 24 running), so the list is labelled.
+    assert!(text.contains("dunks 12/24 running"), "{text}");
+    assert!(
+        text.contains("  dunks: 2 of 24 fleet dunks target this pane; --all lists every dunk"),
+        "{text}"
+    );
+    assert_eq!(
+        2,
+        text.lines()
+            .filter(|line| line.contains(" every 15.0m -> "))
+            .count(),
+        "{text}"
+    );
+
+    let (_, all) = poll_with(reply, &["--text", "--all"]);
+    assert!(!all.contains("fleet dunks target this pane"), "{all}");
+    // --text prints at most ten rows, as before.
+    assert_eq!(
+        10,
+        all.lines()
+            .filter(|line| line.contains(" every 15.0m -> "))
+            .count(),
+        "{all}"
+    );
+}
