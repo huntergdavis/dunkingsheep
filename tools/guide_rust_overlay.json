@@ -1,0 +1,20 @@
+{
+ "replacements": [
+  {
+   "old": "your pane idle, so you do not poll. An empty task_next subscribes you\nautomatically. `inbox_read` includes global and pane task queues by default;\nuse `dunkingsheep inbox read --messages-only` or\n`inbox_read(include_tasks=false)` to omit them.\n",
+   "new": "your pane idle, so you do not poll. An empty task_next subscribes you\nautomatically. `inbox_read` returns messages without task queues by default;\nuse `dunkingsheep inbox read --with-tasks` or\n`inbox_read(include_tasks=true)` to include the queues. The existing\n`--messages-only` option remains supported and overrides `--with-tasks`.\n"
+  },
+  {
+   "old": "than left ownerless.\n`task_metrics` is the read-only analytics endpoint for a status board or",
+   "new": "than left ownerless.\nA new global task is filed under its creator lane's project (the lane's\nproject membership, when it still belongs to the pane's running\nprocess); a lane with no membership takes the `--parent` task's project\nwhen it could have named that project itself. `--project NAME` files it\nunder a named project instead: your own, or one you hold a planner grant\nfor (the owner may name any; any other name is refused). `--no-project`\nfiles it under none. A lane with global membership files unmapped tasks\nunless it names a project.\n`task_metrics` is the read-only analytics endpoint for a status board or"
+  },
+  {
+   "old": "\n`dunk-poll` is a stdlib-only client: one socket request returns status +\ninbox count + unread messages + dunks (optionally panes/tasks). It\nreplaces three full CLI startups per sidebar poll (the owner's CPU note)",
+   "new": "\n`dunk-poll` is a small native client: one socket request returns status +\ninbox count + unread messages + dunks (optionally panes/tasks). By default\nthe answer is compact: only the dunks that target the caller's pane (a\ndunk records its target, not who created it), each without the text it\ntypes, and `--tasks` rows reduced to id, status,\npriority, scope, assignees and title. `--all` lists every dunk in the\nfleet (still without text); `--full` returns everything the daemon sent.\nA caller that shows the fleet's dunks (a sidebar, a status board) must\npass `--all`. It\nreplaces three full CLI startups per sidebar poll (the owner's CPU note)"
+  },
+  {
+   "old": "TMUX_PANE (HERDR_PANE_ID on the herdr rollback). `dunkingsheep poll` is\nthe same batch for a human, and `dunkingsheep install` writes\n`~/.local/bin/dunk-poll`. The status half skips the terminal probe",
+   "new": "TMUX_PANE (HERDR_PANE_ID on the herdr rollback). `dunkingsheep poll` is\nthe daemon's full batch for a human (the same as `dunk-poll --full`), and\n`dunkingsheep install` writes\n`~/.local/bin/dunk-poll`. The status half skips the terminal probe"
+  }
+ ]
+}

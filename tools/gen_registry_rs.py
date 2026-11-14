@@ -5,7 +5,9 @@ The registry is the single source of truth in Python (`dunk_api.COMMANDS`), so t
 Rust table is GENERATED from it rather than typed by hand: a hand-typed 124-row
 table is the thing that drifts, and T04's acceptance is "every MANIFEST command
 present with identical params" plus "input_schema() equals the Python's". Explicit
-Rust-only extensions are listed here so they do not change Python runtime behavior.
+Rust-only extensions are listed here, and in tools/registry_rust_overlay.json (new verbs, added
+params, changed descriptions and role lists), so they do not change Python runtime behavior.
+To change the Rust registry: edit the overlay, then run --write. Never edit registry.rs.
 
     python3 tools/gen_registry_rs.py --write    # rewrite registry.rs + the fixture
     python3 tools/gen_registry_rs.py --check    # exit 1 and print the difference
@@ -18,6 +20,20 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 REGISTRY = ROOT / "rust/crates/ds-core/src/registry.rs"
 FIXTURE = ROOT / "rust/crates/ds-core/tests/registry_expected.json"
+OVERLAY = ROOT / "tools/registry_rust_overlay.json"
+
+
+class OverlayCommand:
+    """A Rust-only verb that exists only in the overlay."""
+
+    def __init__(self, name):
+        self.name = name
+        self.description = ""
+        self.params = {}
+        self.required = []
+        self.mcp_required = []
+        self.mcp = False
+        self.owner_only = False
 # Rust-only verbs that are emitted into registry.rs but kept OUT of the Python-registry
 # fixture (see registry_parity.rs, rust_only). owner_page is t665; the two task_owner verbs
 # were hand-added before this generator knew them.
@@ -273,6 +289,40 @@ def build():
     commands.append(pr_wait)
 
 
+    # The Python registry is frozen at retirement. Everything the Rust daemon serves beyond it
+    # (new verbs, new params, changed descriptions, changed role lists) is DATA in
+    # tools/registry_rust_overlay.json, applied here, so a regeneration keeps it. The fixture
+    # stays the Python registry: it is taken from this snapshot, before the overlay.
+    python_schema = {c.name: c.input_schema() for c in commands}
+    python_required = {c.name: {"dispatch_required": list(c.required),
+                                "mcp_required": list(c.mcp_required)} for c in commands}
+    overlay = json.loads(OVERLAY.read_text())
+    by_name = {c.name: c for c in commands}
+    overlay_roles = {}
+    for name, entry in overlay["commands"].items():
+        command = by_name.get(name)
+        if command is None:
+            command = OverlayCommand(name)
+            commands.append(command)
+            by_name[name] = command
+        elif entry.get("new"):
+            raise SystemExit(f"overlay marks {name} as new but the registry already has it")
+        for key in ("description", "required", "mcp_required", "mcp", "owner_only"):
+            if key in entry:
+                setattr(command, key, entry[key])
+        if "params" in entry:
+            command.params = {param: schema for param, schema in entry["params"]}
+        if "roles" in entry:
+            overlay_roles[name] = entry["roles"]
+    python_groups = list(groups)
+    groups = list(groups)
+    for index, (name, description, actions) in enumerate(groups):
+        entry = overlay["groups"].get(name)
+        if entry:
+            groups[index] = (name, entry.get("description", description),
+                             [tuple(pair) for pair in entry["actions"]]
+                             if "actions" in entry else actions)
+
     def permitted(role, name):
         if role == "web" and name in web_denied:
             return False
@@ -326,12 +376,21 @@ def build():
         f"/// Every command the daemon serves ({len(commands)} at generation time).",
         f"pub static COMMANDS: &[Command] = &[",
     ]
-    for c in sorted(commands, key=lambda c: c.name):
+    ordered = sorted(commands, key=lambda c: c.name)
+    # A verb the checked-in table keeps out of alphabetical order names its predecessor.
+    for name, entry in overlay["commands"].items():
+        if "after" in entry:
+            moved = next(c for c in ordered if c.name == name)
+            ordered.remove(moved)
+            ordered.insert(next(i for i, c in enumerate(ordered)
+                                if c.name == entry["after"]) + 1, moved)
+    for c in ordered:
         params = ", ".join(
             "Param { name: %s, schema: %s }"
             % (json.dumps(k), json.dumps(json.dumps(v, separators=(",", ":")), ensure_ascii=False))
             for k, v in c.params.items())
-        allowed = (["owner", "desk"] if c.name == "project_spawn"
+        allowed = (overlay_roles[c.name] if c.name in overlay_roles
+                   else ["owner", "desk"] if c.name == "project_spawn"
                    else ["owner", "system"] if c.name in ("owner_page", "owner_page_confirmed")
                    else ["owner", "worker"] if c.name == "task_batch_claim"
                    else ["owner", "planner", "worker", "reviewer"] if c.name == "pr_wait"
@@ -344,18 +403,17 @@ def build():
         lines.append("        dispatch_required: &[%s]," % ", ".join(json.dumps(r) for r in c.required))
         lines.append("        required: &[%s]," % ", ".join(json.dumps(r) for r in c.mcp_required))
         lines.append(f"        mcp: {'true' if c.mcp else 'false'},")
-        is_owner_only = c.name in superuser_only or getattr(c, "owner_only", False)
+        is_owner_only = (c.owner_only if c.name in overlay["commands"]
+                         and "owner_only" in overlay["commands"][c.name]
+                         else c.name in superuser_only or getattr(c, "owner_only", False))
         lines.append(f"        owner_only: {'true' if is_owner_only else 'false'},")
         lines.append("        roles: &[%s]," % ", ".join(json.dumps(r) for r in allowed))
         lines.append("    },")
         # The fixture is the PYTHON registry: a Rust-only verb is not in it, so the
         # parity test (rust/crates/ds-core/tests/registry_parity.rs) counts it as an extra.
-        if c.name not in RUST_ONLY_OUTSIDE_FIXTURE:
-            expected[c.name] = c.input_schema()
-            required_metadata[c.name] = {
-                "dispatch_required": list(c.required),
-                "mcp_required": list(c.mcp_required),
-            }
+        if c.name not in RUST_ONLY_OUTSIDE_FIXTURE and c.name in python_schema:
+            expected[c.name] = python_schema[c.name]
+            required_metadata[c.name] = python_required[c.name]
     lines += [
         "];",
         "",
@@ -445,8 +503,16 @@ def build():
         "required_metadata": required_metadata,
         "groups": {name: {"actions": {a: b for a, b in actions},
                           "description": " ".join(description.split())}
-                   for name, description, actions in groups},
+                   for name, description, actions in python_groups},
     }
+    # The few places where the fixture was deliberately moved off the Python text.
+    for path, value in overlay["fixture"]:
+        node = fixture
+        for key in path[:-1]:
+            node = node[key]
+        if path[-1] not in node:
+            raise SystemExit("overlay fixture path does not exist: " + "/".join(path))
+        node[path[-1]] = value
     return "\n".join(lines), json.dumps(fixture, indent=1, sort_keys=True) + "\n"
 
 

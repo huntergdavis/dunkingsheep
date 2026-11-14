@@ -9,18 +9,23 @@ the three renderings the Python produces and substitutes the version at run time
     rust/crates/ds-core/src/help/guide.md    guide(markdown=True)   (== docs/GUIDE.md at VERSION)
     rust/crates/ds-core/src/help/short.txt   SHORT
 
+Paragraphs the Rust guide changed or added are in tools/guide_rust_overlay.json; edit that file
+(and docs/GUIDE.md, which a test keeps equal to guide.md), then run --write.
+
 The version is rendered as the placeholder @VERSION@ (the one f-string in guide()'s heading).
 
     python3 tools/gen_help_rs.py --write
     python3 tools/gen_help_rs.py --check     # exit 1 and name the stale file
 """
 import argparse
+import json
 import pathlib
 import sys
 import types
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 OUT = ROOT / "rust/crates/ds-core/src/help"
+OVERLAY = ROOT / "tools/guide_rust_overlay.json"
 PLACEHOLDER = "@VERSION@"
 # The plain guide underlines its heading with `=` * len(heading), so the underline depends on the
 # version's length. The first heading + underline are therefore stored as this marker, and the
@@ -43,10 +48,23 @@ def render():
         raise SystemExit("guide() no longer opens with the underlined version heading; update this tool")
     plain = HEADING_MARKER + plain[len(expected):]
     return {
-        "guide.txt": plain,
-        "guide.md": dunk_help.guide(markdown=True),
+        "guide.txt": rust_only(plain, "guide.txt"),
+        "guide.md": rust_only(dunk_help.guide(markdown=True), "guide.md"),
         "short.txt": dunk_help.SHORT,
     }
+
+
+def rust_only(text, name):
+    """Apply the Rust-only guide changes. dunk_help.py is frozen at retirement, so every
+    paragraph the Rust guide changed or added is DATA in tools/guide_rust_overlay.json: an
+    `old` passage of the Python rendering and the `new` passage that replaces it. Each `old`
+    must occur exactly once, so a stale entry fails here instead of being skipped."""
+    for entry in json.loads(OVERLAY.read_text(encoding="utf-8"))["replacements"]:
+        if text.count(entry["old"]) != 1:
+            raise SystemExit(f"{name}: a guide overlay passage occurs {text.count(entry['old'])} "
+                             f"times in the Python rendering, expected once: {entry['old'][:60]!r}")
+        text = text.replace(entry["old"], entry["new"])
+    return text
 
 
 def main():
