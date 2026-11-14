@@ -63,6 +63,9 @@ pub struct DigestUpsert<'a> {
     pub sender: Option<&'a str>,
     pub mailbox_label: Option<&'a str>,
     pub pane_id: Option<&'a str>,
+    /// Store the row with the agent audience, so it stays out of the human owner's
+    /// conversation view when the mailbox is an owner lane's (t4681).
+    pub agent_only: bool,
 }
 
 impl<'a> DigestUpsert<'a> {
@@ -75,6 +78,7 @@ impl<'a> DigestUpsert<'a> {
             sender: None,
             mailbox_label: None,
             pane_id: None,
+            agent_only: false,
         }
     }
 }
@@ -723,6 +727,7 @@ impl Store {
             sender,
             mailbox_label,
             pane_id,
+            agent_only,
         } = digest;
         if body.trim().is_empty() {
             return Err(refuse("a digest needs a body"));
@@ -778,6 +783,15 @@ impl Store {
                     .map_err(map_sqlite)?;
                 id
             };
+            if agent_only {
+                transaction
+                    .execute(
+                        "INSERT OR IGNORE INTO message_audiences (message_id, audience) \
+                         VALUES (?, 'agent')",
+                        [&message_id],
+                    )
+                    .map_err(map_sqlite)?;
+            }
             transaction.commit().map_err(map_sqlite)?;
             Ok(message_id)
         })

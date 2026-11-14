@@ -542,6 +542,10 @@ pub(crate) type DunkerHandle = Arc<std::sync::Mutex<Dunker>>;
 #[path = "dunk_phase_fixture_tests.rs"]
 mod dunk_phase_fixture_tests;
 
+/// t4681: how long a non-owner pane's notices wait for an empty box after a scheduled dunk was
+/// refused there over a person's draft. Bounded so a misread box cannot silence a lane.
+pub(crate) const DUNK_DRAFT_HOLD_S: f64 = 600.0;
+
 /// What [`Flock::store_scheduled_dunk`] did (t4681).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DunkStored {
@@ -1371,27 +1375,51 @@ impl Flock {
     }
 
     /// t4681: remember (or forget) that a scheduled dunk found a person's draft in this pane.
-    pub(crate) fn set_dunk_draft(&self, pane_id: &str, present: bool) {
+    /// Returns true when the pane was not remembered before (the caller logs that once).
+    pub(crate) fn set_dunk_draft(&self, pane_id: &str, present: bool) -> bool {
+        self.set_dunk_draft_at(pane_id, present, clock::now_s())
+    }
+
+    pub(crate) fn set_dunk_draft_at(&self, pane_id: &str, present: bool, now: f64) -> bool {
         let mut panes = self
             .dunk_draft_panes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if present {
-            panes.insert(pane_id.to_owned());
-        } else {
+        if !present {
             panes.remove(pane_id);
+            return false;
         }
+        let fresh = panes
+            .get(pane_id)
+            .is_none_or(|since| now - since >= DUNK_DRAFT_HOLD_S);
+        if fresh {
+            // The bound runs from the first refusal; later intervals do not extend it.
+            panes.insert(pane_id.to_owned(), now);
+        }
+        fresh
     }
 
     /// t4681: whether a notice to this pane must leave a draft alone: a registered owner lane,
-    /// or a pane where a scheduled dunk has just been refused over a person's draft.
+    /// or, for at most [`DUNK_DRAFT_HOLD_S`], a pane where a scheduled dunk has just been
+    /// refused over a person's draft. An expired entry is dropped, and the pane's notices then
+    /// behave as on any other lane.
     pub(crate) fn notice_preserves_draft(&self, pane_id: &str) -> bool {
-        self.is_owner_lane(pane_id)
-            || self
-                .dunk_draft_panes
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .contains(pane_id)
+        if self.is_owner_lane(pane_id) {
+            return true;
+        }
+        let now = clock::now_s();
+        let mut panes = self
+            .dunk_draft_panes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match panes.get(pane_id) {
+            Some(since) if now - since < DUNK_DRAFT_HOLD_S => true,
+            Some(_) => {
+                panes.remove(pane_id);
+                false
+            }
+            None => false,
+        }
     }
 
     /// t4681: store a scheduled dunk as ONE inbox row in its target lane's mailbox instead of
@@ -1471,6 +1499,9 @@ impl Flock {
                 sender: Some(&sender),
                 mailbox_label: Some(&label),
                 pane_id: pane_id.as_deref(),
+                // Agent audience: a scheduled check-in for an owner lane is mail for the
+                // agent in that pane, not a message in the person's own conversation view.
+                agent_only: true,
             })?;
         let notice = wake(&message_id);
         Ok(DunkStored::Stored { message_id, notice })

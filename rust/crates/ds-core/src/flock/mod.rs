@@ -153,9 +153,10 @@ pub struct Flock {
     #[allow(dead_code)] // The send integration callers are assigned to dependent T33 leaves.
     pub(crate) sent_text_by_pane: Mutex<BTreeMap<String, Vec<serde_json::Value>>>,
     /// t4681: panes where a scheduled dunk was just refused because a person's draft is in the
-    /// input box. The stored dunk's one-line notice must not flush that same draft, so a notice
-    /// to such a pane waits for an empty box. Cleared when something is typed there normally.
-    pub(crate) dunk_draft_panes: Mutex<std::collections::BTreeSet<String>>,
+    /// input box, with when that was first seen. The stored dunk's one-line notice must not flush
+    /// that same draft, so a notice to such a pane waits for an empty box, for a bounded time.
+    /// Cleared when something is typed there normally or the box is seen empty.
+    pub(crate) dunk_draft_panes: Mutex<BTreeMap<String, f64>>,
     /// Next direct-message identity, matching `_new_message`'s monotonic `mN` allocation.
     next_message_id: AtomicU64,
     /// One whole-send lock per pane (`Flock._lock_for`). The `Arc` lets a caller keep the
@@ -223,7 +224,7 @@ impl Flock {
             stuck_config_declared: AtomicBool::new(false),
             stuck_last_check: Mutex::new(BTreeMap::new()),
             sent_text_by_pane: Mutex::new(BTreeMap::new()),
-            dunk_draft_panes: Mutex::new(std::collections::BTreeSet::new()),
+            dunk_draft_panes: Mutex::new(BTreeMap::new()),
             next_message_id: AtomicU64::new(1),
             pane_send_locks: Mutex::new(BTreeMap::new()),
             typing_lock: sends::TypingLock::default(),

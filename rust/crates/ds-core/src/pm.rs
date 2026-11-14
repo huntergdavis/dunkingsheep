@@ -500,6 +500,7 @@ impl Flock {
             sender: self_pane_id,
             mailbox_label: Some(&label),
             pane_id: pane_id.as_deref(),
+            agent_only: false,
         })?;
 
         // Read back the stored row after the write has completed; notification is deliberately

@@ -1179,6 +1179,37 @@ fn a_dunk_held_by_a_draft_is_one_inbox_row_and_wakes_even_a_silent_mailbox_each_
     assert_eq!("inspect the coordinators", body);
     assert_eq!(Some("dunk d1"), summary.sender.as_deref());
     assert_eq!(Some("dunk:d1"), summary.digest_id.as_deref());
+    // Agent audience: the row is mail for the agent in the pane. It is not part of a person's
+    // conversation view of that mailbox (the owner thread reads owner-lane mailboxes too),
+    // while an ordinary digest row in the same mailbox is.
+    assert!(
+        inbox
+            .store
+            .conversation(&summary.mailbox, None, None)
+            .unwrap()
+            .is_empty(),
+        "a stored dunk never shows in the owner's conversation"
+    );
+    inbox
+        .store
+        .upsert_digest(crate::inbox_store::DigestUpsert::new(
+            &summary.mailbox,
+            "other-digest",
+            "a row for people",
+        ))
+        .unwrap();
+    assert_eq!(
+        1,
+        inbox
+            .store
+            .conversation(&summary.mailbox, None, None)
+            .unwrap()
+            .len()
+    );
+    inbox
+        .store
+        .delete(&[inbox.store.digest_waiting("other-digest").unwrap().unwrap()])
+        .unwrap();
 
     // The mailbox is configured silent; the wake above was sent all the same.
     assert!(

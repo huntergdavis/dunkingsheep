@@ -2496,6 +2496,22 @@ pub(crate) fn clear_to_send_with_fallback(
     }
 }
 
+/// t4681: the pane's input box was read and is conclusively empty (no text, not ambiguous, no
+/// dialog). An unreadable or ambiguous box is not "empty".
+pub(crate) fn box_is_empty(env: &dyn SendEnv, pane_id: &str) -> bool {
+    let (screen, text, detail) = read_box(env, pane_id);
+    let Some(screen) = screen else {
+        return false;
+    };
+    if modal_open(&screen) || detail.starts_with(AMBIGUOUS_COMPOSER) {
+        return false;
+    }
+    match federated_composer(env.federated_input(), &screen) {
+        Some(federated) => federated.is_empty(),
+        None => text.is_empty() && typed_text(&screen).is_some_and(|typed| typed.is_empty()),
+    }
+}
+
 /// `_box_holds`: true if `text` still sits in the pane's input box, false if nothing of ours is
 /// waiting there, `None` if the pane could not be read or the box state is unknowable.
 pub fn box_holds(env: &dyn SendEnv, pane_id: &str, text: &str) -> Option<bool> {
@@ -4491,10 +4507,13 @@ impl Flock {
             let reason = blocker_reason.as_deref();
             let permanent = detail.starts_with("dead session (")
                 || detail == "the lane's recorded process is gone";
-            // t4681: a person's draft in an owner lane's box is a wait, not a refusal. It is
+            // t4681: a notice waiting for a person's draft (an owner lane, or for a bounded time
+            // a pane where a dunk was just refused over one) is a wait, not a refusal. It is
             // retried on the usual schedule and never counted toward `undeliverable`; the row
             // stays in the mailbox meanwhile.
-            let waiting_for_person = reason == Some("human_draft") && self.is_owner_lane(&pane_id);
+            let waiting_for_person = reason == Some("human_draft")
+                && message.is_notice
+                && self.notice_preserves_draft(&pane_id);
             self.record_outbox_hold(OutboxHold {
                 message: &message,
                 now,

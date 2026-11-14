@@ -7121,3 +7121,71 @@ fn a_notice_to_an_owner_lane_waits_for_the_draft_and_is_never_undeliverable() {
         pane.typed
     );
 }
+
+#[test]
+fn a_pane_with_a_refused_dunk_holds_its_notice_for_a_bounded_time_then_behaves_as_before() {
+    // An ordinary lane where a scheduled dunk was just refused over a person's draft.
+    let (_dir, flock) = t4681_notice_flock(false);
+    let now = crate::clock::now_s();
+    assert!(
+        flock.set_dunk_draft_at(P, true, now),
+        "first refusal starts the bound"
+    );
+    assert!(
+        !flock.set_dunk_draft_at(P, true, now + 60.0),
+        "later ones do not extend it"
+    );
+    let mut pane = submit_pane("idle");
+    pane.screen_script.borrow_mut().clear();
+    pane.screens
+        .insert(P.into(), submit_pending_screen("a person is typing"));
+
+    // Inside the bound: the notice waits, nothing is typed, and 13 holds are not a refusal.
+    for attempt in 0..13 {
+        let outcome =
+            flock.deliver_message("m-notice", 1.0 + attempt as f64 * 1000.0, &mut pane, || {
+                None
+            });
+        assert_eq!(DeliveryOutcome::Held, outcome, "attempt {attempt}");
+        assert_eq!(Some("queued".to_string()), t4681_notice_status(&flock));
+    }
+    assert!(pane.typed.is_empty());
+    assert!(pane.keys.is_empty());
+
+    // The bound has passed and the text is still there: the pane is forgotten and the notice
+    // is delivered the way it is on any other lane (the leftover text is flushed first).
+    flock
+        .dunk_draft_panes
+        .lock()
+        .unwrap()
+        .insert(P.into(), now - super::dunks::DUNK_DRAFT_HOLD_S - 1.0);
+    assert!(!flock.notice_preserves_draft(P), "expired");
+    assert!(
+        flock.dunk_draft_panes.lock().unwrap().is_empty(),
+        "an expired pane is dropped"
+    );
+    let _ = flock.deliver_message("m-notice", 99_000.0, &mut pane, || None);
+    assert!(
+        !pane.keys.is_empty(),
+        "after the bound the notice path is the ordinary one"
+    );
+}
+
+#[test]
+fn a_remembered_pane_is_forgotten_when_something_is_typed_or_the_box_is_seen_empty() {
+    let (_dir, flock) = t4681_notice_flock(false);
+    flock.set_dunk_draft(P, true);
+    assert!(flock.notice_preserves_draft(P));
+    flock.set_dunk_draft(P, false);
+    assert!(!flock.notice_preserves_draft(P));
+
+    let mut pane = submit_pane("idle");
+    pane.screen_script.borrow_mut().clear();
+    pane.screens
+        .insert(P.into(), submit_pending_screen("a person is typing"));
+    assert!(!box_is_empty(&pane, P), "a draft is not an empty box");
+    pane.screens.insert(P.into(), submit_live_screen());
+    assert!(box_is_empty(&pane, P));
+    pane.screens.insert(P.into(), submit_modal_screen());
+    assert!(!box_is_empty(&pane, P), "a dialog is not an empty box");
+}

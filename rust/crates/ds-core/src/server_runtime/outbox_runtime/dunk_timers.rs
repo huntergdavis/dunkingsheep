@@ -561,6 +561,11 @@ fn run_dunk_timer(
         if signal.cancelled.load(Ordering::Acquire) {
             break;
         }
+        // The box is read here on every tick: once it is seen empty the person's draft is
+        // gone, and the pane's notices go back to behaving as on any other lane.
+        if crate::flock::sends::box_is_empty(&env, pane) {
+            flock.set_dunk_draft(pane, false);
+        }
         if flock.is_owner_lane(pane) {
             match store_instead_of_typing(&flock, &inbox, &handle, pane, "owner lane") {
                 Some(done) => {
@@ -628,7 +633,16 @@ fn run_dunk_timer(
         } else if human_draft(blocker.as_deref()) {
             // A person's text is in the box: nothing was typed. The dunk waits in the inbox, and
             // its notice must not flush that draft either.
-            flock.set_dunk_draft(pane, true);
+            if flock.set_dunk_draft(pane, true) {
+                log_dunk(
+                    &handle,
+                    pane,
+                    &format!(
+                        "a person's draft is in the input box; notices to this pane wait for an empty box for up to {} minutes",
+                        (crate::flock::dunks::DUNK_DRAFT_HOLD_S / 60.0) as i64
+                    ),
+                );
+            }
             match store_instead_of_typing(
                 &flock,
                 &inbox,
