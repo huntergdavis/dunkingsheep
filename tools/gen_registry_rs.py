@@ -22,7 +22,7 @@ FIXTURE = ROOT / "rust/crates/ds-core/tests/registry_expected.json"
 # fixture (see registry_parity.rs, rust_only). owner_page is t665; the two task_owner verbs
 # were hand-added before this generator knew them.
 RUST_ONLY_OUTSIDE_FIXTURE = frozenset({"owner_page", "owner_page_confirmed", "task_owner_question",
-                                       "task_owner_answer", "task_batch_claim"})
+                                       "task_owner_answer", "task_batch_claim", "pr_wait"})
 
 
 def _close(text, i, opening, closing):
@@ -264,6 +264,14 @@ def build():
             return {"type": "object", "properties": self.params, "required": self.required, "additionalProperties": False}
 
     commands.append(RustOnlyTaskBatchClaim())
+    pr_wait = RustOnlyTaskOwner(
+        "pr_wait", "One-shot durable PR wait. Supply target=owner/repo#PR and optional full head SHA, list=true, or cancel=ID. Sends one inbox notice; read-only on GitHub. Driven by review-sync.",
+        {"target": {"type": "string"}, "head": {"type": "string"},
+         "list": {"type": "boolean"}, "cancel": {"type": "integer"}}, [])
+    pr_wait.mcp = True
+    pr_wait.owner_only = False
+    commands.append(pr_wait)
+
 
     def permitted(role, name):
         if role == "web" and name in web_denied:
@@ -326,6 +334,7 @@ def build():
         allowed = (["owner", "desk"] if c.name == "project_spawn"
                    else ["owner", "system"] if c.name in ("owner_page", "owner_page_confirmed")
                    else ["owner", "worker"] if c.name == "task_batch_claim"
+                   else ["owner", "planner", "worker", "reviewer"] if c.name == "pr_wait"
                    else ["owner", "web"] if c.name.startswith("task_owner_")
                    else [r for r in roles if permitted(r, c.name)])
         lines.append("    Command {")

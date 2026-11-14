@@ -3138,5 +3138,39 @@ pub static ROOT: Cmd = Cmd {
             subs: &[
             ],
         },
+        Cmd {
+            name: "pr", aliases: &[],
+            help: Some("one-shot PR event subscriptions"),
+            raw: false,
+            raw_text: false,
+            about: None,
+            epilog: None,
+            args: &[
+                Arg { id: "json", dest: "json", tri: false, default_int: false, flags: &["--json"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: None, hidden: true, metavar: None, version: None },
+            ],
+            groups: &[],
+            sub_dest: Some("pr_command"), sub_metavar: Some("<subcommand>"), sub_required: true,
+            subs: &[
+                Cmd {
+                    name: "wait", aliases: &[],
+                    help: Some("register a PR wait, then end the turn"),
+                    raw: false,
+                    raw_text: false,
+                    about: None,
+                    epilog: None,
+                    args: &[
+                        Arg { id: "target", dest: "target", tri: false, default_int: false, flags: &[], positional: true, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::Opt, choices: &[], default: None, required: false, help: Some("owner/repo#PR"), hidden: false, metavar: None, version: None },
+                        Arg { id: "head", dest: "head", tri: false, default_int: false, flags: &["--head"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("full expected head SHA"), hidden: false, metavar: None, version: None },
+                        Arg { id: "list", dest: "list", tri: false, default_int: false, flags: &["--list"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: Some("list your waits and poll timestamps"), hidden: false, metavar: None, version: None },
+                        Arg { id: "cancel", dest: "cancel", tri: false, default_int: false, flags: &["--cancel"], positional: false, kind: Kind::Store, ty: Ty::Int, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("cancel your wait by ID"), hidden: false, metavar: None, version: None },
+                        Arg { id: "json", dest: "json", tri: false, default_int: false, flags: &["--json"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: None, hidden: false, metavar: None, version: None },
+                    ],
+                    groups: &[],
+                    sub_dest: None, sub_metavar: None, sub_required: false,
+                    subs: &[
+                    ],
+                },
+            ],
+        },
     ],
 };

@@ -1,0 +1,8 @@
+usage: dunkingsheep pr [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    wait        register a PR wait, then end the turn
+
+options:
+  -h, --help    show this help message and exit

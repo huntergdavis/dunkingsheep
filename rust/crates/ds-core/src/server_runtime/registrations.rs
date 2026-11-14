@@ -836,6 +836,7 @@ os.rename(out_path + ".tmp", out_path)
             "read_pane",
             "list_workspaces",
             "gh_token",
+            "pr_wait",
             "review_sync",
             "review_list",
             "context_add",

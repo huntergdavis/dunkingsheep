@@ -88,6 +88,7 @@ impl Caller for FakeDaemon {
                     None => refuse(&format!("no dunk with id '{id}'")),
                 }
             }
+            "pr_wait" => Ok(json!({"registered":true})),
             "status" => Ok(json!({"dunkers": 0, "version": "x"})),
             "help" => {
                 let commands: Vec<Value> = registry::COMMANDS
@@ -268,7 +269,7 @@ fn test_every_flat_command_has_a_grouped_home() {
     // `owner_receipts` is already mcp=true with no group. `project_spawn` is a Rust-only flat
     // extension: putting it in a group would change the frozen Python mcp-map shape. Both remain
     // callable by flat name, and this list makes each ungrouped exception explicit.
-    const KNOWN_UNGROUPED: [&str; 2] = ["owner_receipts", "project_spawn"];
+    const KNOWN_UNGROUPED: [&str; 3] = ["owner_receipts", "project_spawn", "pr_wait"];
     for command in registry::COMMANDS.iter().filter(|c| c.mcp) {
         if KNOWN_UNGROUPED.contains(&command.name) {
             continue;
@@ -641,4 +642,16 @@ fn text_content_is_json_dumps_indent_2_with_ascii_escapes() {
         .unwrap();
     assert_eq!("plain words", result["content"][0]["text"]);
     assert!(result.get("structuredContent").is_none());
+}
+
+#[test]
+fn test_rust_only_pr_wait_flat_name_forwards_to_daemon() {
+    let mut h = harness_with("worker");
+    let reply = h.call("pr_wait", json!({"target":"o/r#7"}));
+    assert_ne!(reply["result"]["isError"], json!(true));
+    assert!(h
+        .calls
+        .borrow()
+        .iter()
+        .any(|(cmd, args)| cmd == "pr_wait" && args.get("target") == Some(&json!("o/r#7"))));
 }

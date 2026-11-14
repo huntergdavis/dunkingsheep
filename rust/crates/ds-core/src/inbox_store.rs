@@ -31,6 +31,7 @@ use crate::inbox::{
     RETENTION_S, SCHEMA, STATES,
 };
 
+pub(crate) mod pr_wait;
 mod retired;
 pub use retired::RetiredArchiveOptions;
 mod owner_handoff;
@@ -201,6 +202,7 @@ impl Store {
                 .map_err(|e| captured.sqlite(e, &db_path, "inbox_schema"))?;
             connection.execute_batch("CREATE TABLE IF NOT EXISTS owner_handoff_attention (question_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, pane_id TEXT NOT NULL, prior_notice_state TEXT, created_at REAL NOT NULL)")
                 .map_err(|e| captured.sqlite(e, &db_path, "inbox_schema"))?;
+            connection.execute_batch(pr_wait::SCHEMA).map_err(map_sqlite)?;
             Ok(())
         })?;
         let readers = ReadPool::open_context(path, DEFAULT_READ_POOL, context)?;

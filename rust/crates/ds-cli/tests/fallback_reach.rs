@@ -62,6 +62,7 @@ fn required_groups_refuse_a_bare_command_and_an_unknown_subcommand() {
         "pm",
         "poolrad",
         "review",
+        "pr",
         "token",
         "turn",
         "inbox",
@@ -173,6 +174,7 @@ fn the_table_accepts_exactly_the_subcommands_the_dispatcher_routes() {
         names(&["backlog-sync", "progress"])
     );
     assert_eq!(sub_names(&["review"]), names(&["sync", "list"]));
+    assert_eq!(sub_names(&["pr"]), names(&["wait"]));
     assert_eq!(sub_names(&["token"]), names(&["issue", "revoke", "list"]));
     assert_eq!(sub_names(&["turn"]), names(&["start", "end"]));
     assert_eq!(
@@ -279,6 +281,7 @@ fn the_top_level_table_is_exactly_what_run_dispatches() {
         "secrets-check",
         "git-credential",
         "review",
+        "pr",
         "poolrad",
         "github",
         "whoami",

@@ -621,3 +621,77 @@ fn task_complete_verdict_error_is_reported_through_the_production_adapter() {
         "no write reaches GitHub when the reviewer App is missing"
     );
 }
+
+#[test]
+fn pr_wait_production_registration_listing_and_cancellation_are_caller_scoped() {
+    let f = Fixture::with(&["reviewer"], lanes());
+    f.services
+        .flock()
+        .remember_lane("%worker", "wait-worker", true);
+    f.services
+        .flock()
+        .remember_lane("%reviewer", "wait-reviewer", true);
+    let wait = f
+        .dispatch("pr_wait", json!({"target":"o/r#7"}), "%worker")
+        .unwrap();
+    assert!(f
+        .dispatch(
+            "pr_wait",
+            json!({"target":"unregistered/repo#1"}),
+            "%worker"
+        )
+        .is_err());
+    assert!(f
+        .dispatch(
+            "pr_wait",
+            json!({"target":"o/r#7","head":"short"}),
+            "%worker"
+        )
+        .is_err());
+    let listed = f
+        .dispatch("pr_wait", json!({"list":true}), "%worker")
+        .unwrap();
+    assert_eq!(listed[0]["id"], wait["id"]);
+    assert!(listed[0].get("last_poll_at").is_some());
+    assert!(f
+        .dispatch("pr_wait", json!({"list":true}), "%reviewer")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        f.dispatch("pr_wait", json!({"cancel":wait["id"]}), "%reviewer")
+            .unwrap()["cancelled"],
+        0
+    );
+    assert_eq!(
+        f.dispatch("pr_wait", json!({"cancel":wait["id"]}), "%worker")
+            .unwrap()["cancelled"],
+        1
+    );
+    assert!(
+        f.endpoint.requests().is_empty(),
+        "registration/list/cancel makes no API calls"
+    );
+}
+
+#[test]
+fn pr_wait_production_sweep_delivers_pending_event_once_through_inbox_send() {
+    let f = Fixture::with(&["reviewer"], lanes());
+    let store = f.services.flock().stores().inbox.unwrap();
+    let id = store
+        .pr_wait_register("o/r", 7, "owner", "%owner", None)
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    store
+        .pr_wait_finish(id, "o/r#7 fixture: PR closed")
+        .unwrap();
+    f.dispatch("review_sync", json!({}), "%owner").unwrap();
+    assert!(store.pr_wait_pending(NOW).unwrap().is_empty());
+    let messages = store.read("owner", 10, true, false).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].body, "o/r#7 fixture: PR closed");
+    f.dispatch("review_sync", json!({}), "%owner").unwrap();
+    assert_eq!(store.read("owner", 10, true, false).unwrap().len(), 1);
+}

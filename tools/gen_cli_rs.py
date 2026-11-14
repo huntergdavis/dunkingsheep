@@ -84,6 +84,14 @@ def load_parser():
     usage_provider.add_argument("provider", choices=["claude", "codex", "pi", "opencode"])
     usage_provider.add_argument("--max-age-s", dest="max_age", type=float,
                                 help="snapshot maximum age in seconds")
+    pr = root.add_parser("pr", help="one-shot PR event subscriptions")
+    actions = pr.add_subparsers(dest="pr_command", metavar="<subcommand>", required=True)
+    wait = actions.add_parser("wait", help="register a PR wait, then end the turn")
+    wait.add_argument("target", nargs="?", help="owner/repo#PR")
+    wait.add_argument("--head", help="full expected head SHA")
+    wait.add_argument("--list", action="store_true", help="list your waits and poll timestamps")
+    wait.add_argument("--cancel", type=int, help="cancel your wait by ID")
+    wait.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     return parser
 
 

@@ -1,0 +1,13 @@
+usage: dunkingsheep pr wait [-h] [--head HEAD] [--list] [--cancel CANCEL]
+                            [--json]
+                            [target]
+
+positional arguments:
+  target           owner/repo#PR
+
+options:
+  -h, --help       show this help message and exit
+  --head HEAD      full expected head SHA
+  --list           list your waits and poll timestamps
+  --cancel CANCEL  cancel your wait by ID
+  --json
