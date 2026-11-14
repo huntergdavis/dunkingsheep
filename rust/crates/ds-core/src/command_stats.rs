@@ -116,13 +116,33 @@ impl Cell {
     }
 }
 
-/// The cells not yet written: the current minute, and any earlier one until the next request.
+/// The most cells kept after failed writes. Past it the oldest are dropped, so an outage of the
+/// metrics database cannot grow the daemon's memory or the size of the next write without limit.
+pub const MAX_BACKLOG: usize = 4096;
+
 #[derive(Debug, Default)]
-pub struct Pending(Mutex<BTreeMap<Key, Cell>>);
+struct PendingState {
+    cells: BTreeMap<Key, Cell>,
+    /// The minute in which complete cells were last handed out for writing.
+    handed_out: Option<i64>,
+    /// Cells dropped because the backlog was full.
+    dropped: i64,
+}
+
+/// The cells not yet written: the current minute, and any earlier one until it is written.
+#[derive(Debug, Default)]
+pub struct Pending(Mutex<PendingState>);
 
 impl Pending {
+    fn state(&self) -> std::sync::MutexGuard<'_, PendingState> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Count one request, and hand back the cells of every minute before `at`'s: they are
-    /// complete, and the caller writes them.
+    /// complete, and the caller writes them. Cells are handed out at most once per minute, so a
+    /// write that keeps failing is retried once a minute and not on every request.
     pub fn add(
         &self,
         at: f64,
@@ -133,33 +153,48 @@ impl Pending {
         ok: bool,
     ) -> Vec<(Key, Cell)> {
         let minute = minute_of(at);
-        let mut cells = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        cells
+        let mut state = self.state();
+        state
+            .cells
             .entry((minute, command.to_string(), role.to_string()))
             .or_default()
             .add(duration_ms, bytes, ok);
-        let open = cells.split_off(&(minute, String::new(), String::new()));
-        std::mem::replace(&mut *cells, open).into_iter().collect()
+        if state.handed_out == Some(minute) {
+            return Vec::new();
+        }
+        let open = state
+            .cells
+            .split_off(&(minute, String::new(), String::new()));
+        let closed: Vec<(Key, Cell)> = std::mem::replace(&mut state.cells, open)
+            .into_iter()
+            .collect();
+        if !closed.is_empty() {
+            state.handed_out = Some(minute);
+        }
+        closed
     }
 
-    /// Put cells back after a failed write, so a later request tries again.
+    /// Put cells back after a failed write; the next minute tries again. Only `MAX_BACKLOG`
+    /// cells are kept: the oldest go first and are counted in `dropped`.
     pub fn restore(&self, closed: Vec<(Key, Cell)>) {
-        let mut cells = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self.state();
         for (key, cell) in closed {
-            cells.entry(key).or_default().merge(&cell);
+            state.cells.entry(key).or_default().merge(&cell);
+        }
+        while state.cells.len() > MAX_BACKLOG {
+            state.cells.pop_first();
+            state.dropped += 1;
         }
     }
 
+    /// Cells lost to a full backlog since the daemon started.
+    pub fn dropped(&self) -> i64 {
+        self.state().dropped
+    }
+
     pub fn snapshot(&self) -> Vec<(Key, Cell)> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.state()
+            .cells
             .iter()
             .map(|(key, cell)| (key.clone(), cell.clone()))
             .collect()
@@ -279,11 +314,28 @@ mod tests {
         pending.add(600.0, "task_list", "worker", 3, 100, true);
         let closed = pending.add(660.0, "roster", "owner", 1, 10, true);
         pending.restore(closed);
-        let again = pending.add(661.0, "roster", "owner", 1, 10, true);
+        // Not again within the minute of the failed write: one attempt per minute.
+        assert!(pending
+            .add(661.0, "roster", "owner", 1, 10, true)
+            .is_empty());
+        let again = pending.add(720.0, "roster", "owner", 1, 10, true);
         assert_eq!(
-            vec![key(10, "task_list", "worker")],
+            vec![key(10, "task_list", "worker"), key(11, "roster", "owner")],
             again.into_iter().map(|(k, _)| k).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn a_full_backlog_drops_its_oldest_cells_and_counts_them() {
+        let pending = Pending::default();
+        let closed = (0..MAX_BACKLOG as i64 + 3)
+            .map(|minute| (key(minute, "task_list", "worker"), Cell::default()))
+            .collect();
+        pending.restore(closed);
+        let kept = pending.snapshot();
+        assert_eq!(MAX_BACKLOG, kept.len());
+        assert_eq!(3, kept[0].0 .0, "the oldest minutes went first");
+        assert_eq!(3, pending.dropped());
     }
 
     #[test]

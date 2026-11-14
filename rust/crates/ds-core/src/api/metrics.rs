@@ -215,10 +215,10 @@ pub fn h_metrics(context: &HandlerContext<'_>, args: Args) -> Result<Value, Dunk
     coverage.insert("retention_s".into(), json!(metrics.retention_s));
     coverage.insert("notes".into(), Value::String(notes.to_string()));
     output.insert("coverage".into(), Value::Object(coverage));
-    output.insert(
-        "commands".into(),
-        crate::command_stats::summarize(metrics.command_cells(start, end)?, start, end),
-    );
+    let mut commands =
+        crate::command_stats::summarize(metrics.command_cells(start, end)?, start, end);
+    commands["dropped_cells"] = json!(metrics.commands_dropped());
+    output.insert("commands".into(), commands);
     Ok(Value::Object(output))
 }
 

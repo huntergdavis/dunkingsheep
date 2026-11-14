@@ -127,6 +127,11 @@ impl MetricsStore {
         }
     }
 
+    /// Per-command cells lost because failed writes filled the backlog.
+    pub fn commands_dropped(&self) -> i64 {
+        self.commands.dropped()
+    }
+
     /// The per-command cells of every minute overlapping `[start, end)`: the written rows plus
     /// the ones still in memory.
     pub fn command_cells(
@@ -653,5 +658,66 @@ pub fn summary(events: &[Event]) -> Summary {
         counts,
         durations,
         retries,
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    fn written(store: &MetricsStore) -> i64 {
+        store
+            .writer
+            .call(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM command_minutes", [], |r| r.get(0))
+                    .map_err(crate::db::map_sqlite)
+            })
+            .unwrap_or(-1)
+    }
+
+    /// A write that fails keeps the cells, is retried once per minute and not on every request,
+    /// and loses nothing once the database answers again.
+    #[test]
+    fn a_failing_command_write_is_retried_once_per_minute_and_keeps_the_cells() {
+        let store = MetricsStore::open(":memory:").unwrap();
+        store.record_command(600.0, "task_list", "worker", 3, 100, true);
+        store
+            .writer
+            .call(|conn| {
+                conn.execute_batch("ALTER TABLE command_minutes RENAME TO gone")
+                    .map_err(crate::db::map_sqlite)
+            })
+            .unwrap();
+        // Minute 11 closes minute 10; the write fails and the cell is kept.
+        store.record_command(660.0, "roster", "owner", 1, 10, true);
+        assert_eq!(
+            1,
+            store
+                .commands
+                .snapshot()
+                .iter()
+                .filter(|(k, _)| k.0 == 10)
+                .count()
+        );
+        store
+            .writer
+            .call(|conn| {
+                conn.execute_batch("ALTER TABLE gone RENAME TO command_minutes")
+                    .map_err(crate::db::map_sqlite)
+            })
+            .unwrap();
+        // The database is back, but the same minute makes no second attempt.
+        store.record_command(661.0, "roster", "owner", 1, 10, true);
+        assert_eq!(0, written(&store));
+        // The next minute writes everything that was held.
+        store.record_command(720.0, "roster", "owner", 1, 10, true);
+        assert_eq!(2, written(&store));
+        let counts: i64 = store
+            .command_cells(0.0, 800.0)
+            .unwrap()
+            .iter()
+            .map(|(_, cell)| cell.count)
+            .sum();
+        assert_eq!(4, counts);
     }
 }
