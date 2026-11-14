@@ -5321,6 +5321,7 @@ fn cli_route_58_commands_map() {
     assert!(r.contains("task_block(id*, reason, waiting_on)"));
     assert!(r.contains("task_read(id*, summary, notes, note_kind, before_note)"));
     assert!(r.contains("task_note(id*, event, reason, note_kind)"));
+    assert!(r.contains("task_complete(id*, by, verdict, landed, note, next)"));
     assert!(r.contains("Task queues are omitted by default"));
     assert!(
         r.contains("owner_conversation(limit, before, before_id, source_filter, include_internal)")
@@ -5353,7 +5354,8 @@ fn cli_route_58_commands_map() {
                         "inbox_list(mailbox, unread_only, limit)",
                     ).replace("owner_conversation(limit, before, before_id, source_filter, include_internal)", "owner_conversation(limit, before)")
                     .replace("task_read(id*, summary, notes, note_kind, before_note)", "task_read(id*)")
-                    .replace("task_note(id*, event, reason, note_kind)", "task_note(id*, event, reason)"))
+                    .replace("task_note(id*, event, reason, note_kind)", "task_note(id*, event, reason)")
+                    .replace("task_complete(id*, by, verdict, landed, note, next)", "task_complete(id*, by, verdict, landed)"))
                 }
             })
             .collect::<Vec<_>>()
@@ -5406,6 +5408,17 @@ fn cli_route_58_commands_map() {
                 .remove(key)
                 .is_some());
         }
+        // t4693: inline completion is Rust-only; assert the extension before
+        // comparing the remaining schema with the frozen Python command map.
+        let complete = r
+            .iter_mut()
+            .find(|row| row["name"] == "task_complete")
+            .unwrap();
+        let properties = complete["input_schema"]["properties"]
+            .as_object_mut()
+            .unwrap();
+        assert_eq!(properties.remove("note").unwrap()["type"], "string");
+        assert_eq!(properties.remove("next").unwrap()["type"], "boolean");
         // t4704: the typed block wait is Rust-only.
         let task_block = r
             .iter_mut()
