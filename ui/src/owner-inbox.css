@@ -27,3 +27,6 @@
 .owner-inbox-filters label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .owner-inbox-filters select { min-width: 0; max-width: 100%; }
 .owner-inbox-filters p { color: var(--dash-muted); margin: 0; }
+
+.owner-inbox-views { display: flex; flex-wrap: wrap; gap: 8px; }
+.owner-inbox-views button[aria-pressed="true"] { border-color: var(--dash-accent); font-weight: 700; }

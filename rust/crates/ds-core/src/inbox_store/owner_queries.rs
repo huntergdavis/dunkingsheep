@@ -270,7 +270,13 @@ impl Store {
         );
         let annotate_ambiguous =
             exclude_routine || matches!(visibility, ConversationVisibility::Filter(_));
-        let columns = if matches!(visibility, ConversationVisibility::Filter(_)) {
+        let thread_view = match visibility {
+            ConversationVisibility::Filter(filter) => filter.thread_view(),
+            _ => None,
+        };
+        let columns = if thread_view.is_some() {
+            super::threads::COLUMNS
+        } else if matches!(visibility, ConversationVisibility::Filter(_)) {
             "*, (SELECT audience FROM message_audiences WHERE message_id = messages.id) AS audience"
         } else {
             "*"
@@ -278,6 +284,14 @@ impl Store {
         let mut sql =
             format!("SELECT {columns} FROM messages WHERE {condition} AND state != 'cancelled'");
         let mut values: Vec<SqlValue> = box_params.into_iter().map(SqlValue::Text).collect();
+        if let Some(view) = thread_view {
+            if view == "historical" {
+                sql.push_str(" AND NOT EXISTS (SELECT 1 FROM message_threads t WHERE t.message_id = messages.id AND t.thread_version = 1 AND t.conversation_kind IN ('human', 'vp'))");
+            } else {
+                sql.push_str(" AND EXISTS (SELECT 1 FROM message_threads t WHERE t.message_id = messages.id AND t.thread_version = 1 AND t.conversation_kind = ?)");
+                values.push(SqlValue::Text(view.to_owned()));
+            }
+        }
         if exclude_routine {
             // Same rule as `is_routine_mail`: the subject, after leading whitespace, starts with a routine
             // prefix, and the row is not an owner reply. The parameters bind in clause order.
@@ -310,10 +324,13 @@ impl Store {
         match visibility {
             ConversationVisibility::Filter(filter) => {
                 // Only recorded audience metadata classifies mail; filter before LIMIT/cursor.
-                if filter.include_internal() {
-                    sql.push_str(" AND NOT EXISTS (SELECT 1 FROM message_audiences WHERE message_id = messages.id AND (audience IS NULL OR audience != 'agent'))");
-                } else {
-                    sql.push_str(" AND NOT EXISTS (SELECT 1 FROM message_audiences WHERE message_id = messages.id)");
+                // Versioned routing is authoritative; audience is not a view predicate.
+                if filter.thread_view().is_none() {
+                    if filter.include_internal() {
+                        sql.push_str(" AND NOT EXISTS (SELECT 1 FROM message_audiences WHERE message_id = messages.id AND (audience IS NULL OR audience != 'agent'))");
+                    } else {
+                        sql.push_str(" AND NOT EXISTS (SELECT 1 FROM message_audiences WHERE message_id = messages.id)");
+                    }
                 }
             }
             _ => {
@@ -380,6 +397,16 @@ impl Store {
                     continue;
                 };
                 object.insert("answered".to_string(), Value::Bool(answered));
+                if thread_view == Some("historical") {
+                    let fields=["thread_version","parent_id","root_id","conversation_kind","sender_kind"];
+                    let lineage:serde_json::Map<String,Value>=fields.iter().map(|field|((*field).to_owned(),object.get(*field).cloned().unwrap_or(Value::Null))).collect();
+                    let reason=if lineage["thread_version"].is_null() && lineage["conversation_kind"].is_null(){"prior_version"}else if lineage["thread_version"]==1 && lineage["conversation_kind"]=="other"{"other"}else{"unknown"};
+                    object.insert("historical_reason".into(),Value::String(reason.into()));
+                    object.insert("historical_lineage".into(),Value::Object(lineage));
+                    // Preserve recorded metadata separately; Historical never invents reply links.
+                    for field in fields {object.insert(field.into(),Value::Null);}
+                }
+
                 // A senderless reply to an owner question can be a detached service answer
                 // or a human follow-up. Stored timestamps cannot distinguish them.
                 let ambiguous_owner_reply = if object.get("sender").is_none_or(|sender| sender.is_null() || sender.as_str() == Some("")) {

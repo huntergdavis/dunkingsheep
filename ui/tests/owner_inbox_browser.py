@@ -71,9 +71,9 @@ def mock(route):
     else:
         value = {'ok': True}
     if path == '/api/owner-thread':
-        value.update({'source_filter': 'all_sources', 'include_internal': False})
+        value.update({'source_filter': 'human_threads', 'include_internal': False})
         for row in value.get('items', []):
-            row.update({'audience': None, 'conversation_source': 'human', 'mailbox': 'owner'})
+            row.update({'audience': None, 'conversation_source': 'human', 'mailbox': 'owner', 'thread_version': 1, 'parent_id': None, 'root_id': f"i{row['id']}", 'conversation_kind': 'human', 'sender_kind': 'human' if row.get('role') == 'owner' else 'agent'})
     route.fulfill(status=200, content_type='application/json', body=json.dumps(value))
 
 try:
@@ -84,7 +84,7 @@ try:
             page = browser.new_page(viewport={'width': width, 'height': 900})
             page.route('**/api/**', mock)
             page.goto(base + '/dash/cos', wait_until='domcontentloaded')
-            page.get_by_role('heading', name='Inbox', exact=True).wait_for()
+            page.get_by_role('heading', name='Your inbox', exact=True).wait_for()
             page.locator('.owner-inbox-row').first.wait_for()
             assert page.locator('.owner-inbox-row').count() == 25
             assert 'lane-27' in page.locator('.owner-inbox-row').first.inner_text()
@@ -153,7 +153,7 @@ try:
         page = browser.new_page()
         page.route('**/api/**', mock)
         page.goto(base + '/dash/cos')
-        page.get_by_text('No messages match these Inbox filters.', exact=True).wait_for()
+        page.get_by_text('No messages in this inbox yet.', exact=True).wait_for()
         page.close()
         # The existing shell reports viewport dimensions separately from mailbox browsing.
         assert all(method == 'GET' for method, path in requests if path != '/api/viewport'), requests

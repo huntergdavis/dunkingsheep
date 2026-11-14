@@ -275,16 +275,19 @@
        "all",
        "human",
        "owner_lane",
-       "all_sources"
+       "all_sources",
+       "human_threads",
+       "vp_threads",
+       "historical"
       ],
-      "description": "Recorded mailbox partition: human (Your inbox), owner_lane (VP), all_sources (both). The all alias preserves the legacy view."
+      "description": "Thread views: human_threads, vp_threads, historical. Legacy selectors remain supported."
      }
     ],
     [
      "include_internal",
      {
       "type": "boolean",
-      "description": "Independent opt-in to recorded agent-only mail in human, owner_lane or all_sources; default false. Legacy all remains unchanged."
+      "description": "Legacy audience opt-in; new thread views require false (default)."
      }
     ]
    ]

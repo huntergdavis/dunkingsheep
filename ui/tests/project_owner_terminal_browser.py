@@ -2,7 +2,7 @@
 import json, os, threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from playwright.sync_api import sync_playwright
 
 DIST = Path(__file__).resolve().parents[1] / 'dist'
@@ -23,7 +23,7 @@ def api(route):
         value = {'lanes':[{'pane_id':'%1','name':'owner','membership':{'scope':'global'}}, {'pane_id':'%3','name':'Worker','membership':{'scope':'project','project':'alpha'}}]}
     elif path == '/api/terminals': value = [{'pane_id':'%1','name':'__owner_terminal__','agent':'owner','cols':80,'rows':24}]
     elif path == '/api/fleet': value = {'state':'ok','rows':[{'pane_id':'%1','name':'owner','project':None}], 'unrouted':{'state':'ok','rows':[]}}
-    elif path == '/api/owner-thread': value = {'items':[], 'has_more':False}
+    elif path == '/api/owner-thread': value = {'items':[], 'next_before':None, 'source_filter':parse_qs(urlsplit(route.request.url).query)['filter'][0], 'include_internal':False}
     elif path == '/api/channels': value = {'channels':[{'id':'cos','name':'Owner','pane_id':'%1','can_message':True,'status':'ready'}]}
     elif path.endswith('/resize'): value = {'cols':80,'rows':24}
     else: value = {'ok':True,'channels':[]}
@@ -63,10 +63,9 @@ try:
             page.get_by_role('button', name='Close terminal').click()
             assert page.locator('.project-terminal').count() == 0
             page.goto(base + '/dash/cos', wait_until='domcontentloaded')
-            page.get_by_role('heading', name='Inbox', exact=True).wait_for()
-            selector=page.get_by_label('Inbox filter', exact=True)
-            assert selector.locator('option[value="human"]').inner_text() == 'Your inbox'
-            assert selector.locator('option[value="owner_lane"]').inner_text() == 'VP'
+            page.get_by_role('heading', name='Your inbox', exact=True).wait_for()
+            assert page.get_by_role('navigation', name='Inbox views').get_by_role('button').all_text_contents() == ['Your inbox','VP','Historical / prior versions']
+            assert page.get_by_role('checkbox', name='Include agent-only mail').count() == 0
             page.get_by_role('button', name='Compose message', exact=True).click()
             recipients=page.get_by_label('Message recipient', exact=True)
             assert recipients.locator('option[value="owner"]').inner_text() == 'VP conversation'

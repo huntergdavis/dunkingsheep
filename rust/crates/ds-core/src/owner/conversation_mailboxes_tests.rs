@@ -514,3 +514,182 @@ fn inbox_source_filters_use_metadata_scope_and_opt_in_without_consuming() {
         .is_err());
     assert_eq!(before, snapshot());
 }
+
+#[test]
+fn thread_views_use_recorded_kind_and_keep_every_legacy_shape_historical() {
+    use crate::owner::ConversationFilter::{Historical, HumanThreads, VpThreads};
+    let (_dir, flock, store) = fixture("thread-views");
+    let db = rusqlite::Connection::open(store.path()).unwrap();
+    let send =
+        |mailbox: &str, pane: Option<&str>, sender: Option<&str>, transport: Option<&str>| {
+            store
+                .send(&Outgoing {
+                    mailbox,
+                    pane_id: pane,
+                    sender,
+                    transport,
+                    body: Some("Your inbox VP human agent-only: words are not classification"),
+                    ..Default::default()
+                })
+                .unwrap()
+        };
+    // Real recorded shapes: untagged pane mail to VP, human web ingress, and
+    // null-transport pane mail in owner. All are prior versions without metadata.
+    let legacy_vp = send(OWNER_LANE_MAILBOX, Some(OWNER), Some("%303"), None);
+    let legacy_human = send("owner", None, None, Some("web"));
+    let legacy_root_agent = send("owner", None, Some("%303"), None);
+    let legacy_tagged = store
+        .send_snapshot_wire_agent_only(
+            &Outgoing {
+                mailbox: OWNER_LANE_MAILBOX,
+                pane_id: Some(OWNER),
+                body: Some("tagged historical"),
+                ..Default::default()
+            },
+            None,
+            None,
+            true,
+        )
+        .unwrap()
+        .summary
+        .message_id;
+    let human = send("owner", None, None, Some("telegram"));
+    let reply = send("owner", None, Some(OWNER), Some("telegram"));
+    let vp = send(OWNER_LANE_MAILBOX, Some(OWNER), Some("%303"), None);
+    let private = send("worker-private", Some(WORKER), Some("%303"), None);
+    for (id, parent, root, kind, sender) in [
+        (&human, None, &human, "human", "human"),
+        (&reply, Some(human.as_str()), &human, "human", "agent"),
+        (&vp, None, &vp, "vp", "agent"),
+        (&private, None, &private, "human", "human"),
+    ] {
+        db.execute("INSERT INTO message_threads(message_id,thread_version,parent_id,root_id,conversation_kind,sender_kind) VALUES(?,1,?,?,?,?)",
+            rusqlite::params![id,parent,root,kind,sender]).unwrap();
+    }
+    let read = |filter| {
+        OwnerConversations::new(&flock, &NoPanes)
+            .conversation_filtered_cursor(100, None, Some(OWNER), filter)
+            .unwrap()
+            .messages
+    };
+    let ids = |rows: &[Value]| {
+        rows.iter()
+            .map(|r| r["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(vec![human.clone(), reply.clone()], ids(&read(HumanThreads)));
+    assert_eq!(vec![vp.clone()], ids(&read(VpThreads)));
+    assert_eq!(
+        vec![legacy_vp, legacy_human, legacy_root_agent, legacy_tagged],
+        ids(&read(Historical))
+    );
+    for row in read(Historical) {
+        assert!(row["thread_version"].is_null());
+    }
+    assert!(
+        read(VpThreads)[0]["audience"].is_null(),
+        "missing audience does not imply human"
+    );
+    let page = OwnerConversations::new(&flock, &NoPanes)
+        .conversation_filtered_cursor(1, None, Some(OWNER), HumanThreads)
+        .unwrap();
+    assert_eq!(vec![reply.clone()], ids(&page.messages));
+    let older = OwnerConversations::new(&flock, &NoPanes)
+        .conversation_filtered_cursor(1, Some(&reply), Some(OWNER), HumanThreads)
+        .unwrap();
+    assert_eq!(vec![human], ids(&older.messages));
+    assert!(
+        OwnerConversations::new(&flock, &NoPanes)
+            .conversation_filtered_cursor(1, Some(&vp), Some(OWNER), HumanThreads)
+            .is_err(),
+        "cursor cannot cross views"
+    );
+    assert!(OwnerConversations::new(&flock, &NoPanes)
+        .conversation_filtered_cursor(100, None, Some(WORKER), Historical)
+        .is_err());
+    assert_eq!(
+        "queued",
+        store.get_message(&reply).unwrap().summary.state,
+        "browse never consumes"
+    );
+}
+
+#[test]
+fn thread_views_are_exhaustive_for_other_unknown_and_future_metadata() {
+    use crate::owner::ConversationFilter::{Historical, HumanThreads, VpThreads};
+    let (_dir, flock, store) = fixture("thread-exhaustive");
+    let db = rusqlite::Connection::open(store.path()).unwrap();
+    db.execute_batch("PRAGMA ignore_check_constraints=ON")
+        .unwrap();
+    let mut scoped = std::collections::BTreeSet::new();
+    for (version, kind) in [
+        (1, "human"),
+        (1, "vp"),
+        (1, "other"),
+        (1, "unknown-kind"),
+        (2, "human"),
+        (0, ""),
+    ] {
+        let id = store
+            .send(&Outgoing {
+                mailbox: "owner",
+                body: Some("preserved body"),
+                ..Default::default()
+            })
+            .unwrap();
+        scoped.insert(id.clone());
+        if version != 0 {
+            db.execute(
+                "INSERT INTO message_threads VALUES(?,?,NULL,?,?,?)",
+                rusqlite::params![id, version, id, kind, "agent"],
+            )
+            .unwrap();
+        }
+    }
+    let foreign = store
+        .send(&Outgoing {
+            mailbox: "private-worker",
+            body: Some("outside authorized envelope"),
+            ..Default::default()
+        })
+        .unwrap();
+    db.execute(
+        "INSERT INTO message_threads VALUES(?,1,NULL,?,'other','agent')",
+        rusqlite::params![foreign, foreign],
+    )
+    .unwrap();
+    let service = OwnerConversations::new(&flock, &NoPanes);
+    let mut seen = std::collections::BTreeSet::new();
+    for view in [HumanThreads, VpThreads, Historical] {
+        let rows = service
+            .conversation_filtered_cursor(100, None, Some(OWNER), view)
+            .unwrap()
+            .messages;
+        for row in rows {
+            let id = row["id"].as_str().unwrap().to_owned();
+            assert!(seen.insert(id.clone()), "views must be disjoint");
+            assert_ne!(id, foreign);
+            if view == Historical {
+                assert!(row["thread_version"].is_null());
+                assert!(matches!(
+                    row["historical_reason"].as_str(),
+                    Some("prior_version" | "other" | "unknown")
+                ));
+            }
+        }
+    }
+    assert_eq!(
+        seen, scoped,
+        "every in-scope noncancelled row appears exactly once"
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT conversation_kind FROM message_threads WHERE conversation_kind='unknown-kind'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "unknown-kind",
+        "read projection does not rewrite history"
+    );
+}

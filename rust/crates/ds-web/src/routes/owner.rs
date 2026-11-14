@@ -585,6 +585,50 @@ async fn owner_thread(
             {
                 return Err(invalid());
             }
+            if let Some(view) = filter.thread_view() {
+                if view == "historical" {
+                    if !matches!(
+                        row["historical_reason"].as_str(),
+                        Some("prior_version" | "other" | "unknown")
+                    ) {
+                        return Err(invalid());
+                    }
+                    for field in [
+                        "thread_version",
+                        "parent_id",
+                        "root_id",
+                        "conversation_kind",
+                        "sender_kind",
+                    ] {
+                        if row.get(field) != Some(&Value::Null) {
+                            return Err(invalid());
+                        }
+                    }
+                } else {
+                    if row["thread_version"].as_i64() != Some(1)
+                        || row["conversation_kind"].as_str() != Some(view)
+                        || !row["root_id"]
+                            .as_str()
+                            .is_some_and(ds_core::inbox::valid_message_id)
+                        || !matches!(
+                            row["sender_kind"].as_str(),
+                            Some("human" | "agent" | "system")
+                        )
+                        || !matches!(row.get("parent_id"), Some(Value::Null))
+                            && !row["parent_id"]
+                                .as_str()
+                                .is_some_and(ds_core::inbox::valid_message_id)
+                    {
+                        return Err(invalid());
+                    }
+                }
+                if !matches!(row.get("audience"), Some(Value::Null))
+                    && row["audience"].as_str() != Some("agent")
+                {
+                    return Err(invalid());
+                }
+                continue;
+            }
             match row.get("audience") {
                 Some(Value::Null) => {}
                 Some(Value::String(audience))
@@ -627,14 +671,52 @@ async fn owner_thread(
                     if filter != ConversationFilter::All {
                         item["mailbox"] = row["mailbox"].clone();
                         item["audience"] = row["audience"].clone();
-                        item["conversation_source"] = json!(if ds_core::inbox::normalise_mailbox(
-                            row["mailbox"].as_str().unwrap_or_default()
-                        ) == "owner"
-                        {
-                            "human"
+                        item["conversation_source"] = if let Some(view) = filter.thread_view() {
+                            for field in [
+                                "thread_version",
+                                "parent_id",
+                                "root_id",
+                                "conversation_kind",
+                                "sender_kind",
+                            ] {
+                                item[field] = row[field].clone();
+                            }
+                            if view == "historical" {
+                                item["historical_reason"] = row["historical_reason"].clone();
+                                let mut labels = Vec::new();
+                                if row["audience"] == "agent" {
+                                    labels.push("Agent-only");
+                                }
+                                if ds_core::owner::conversations::is_routine_mail(row) {
+                                    labels.push("Routine agent mail");
+                                }
+                                if row["digest_id"]
+                                    .as_str()
+                                    .is_some_and(|id| id.starts_with("dunk:"))
+                                {
+                                    labels.push("Scheduled check-in");
+                                }
+                                item["historical_labels"] = json!(labels);
+                            }
+                            if view != "historical" {
+                                item["role"] =
+                                    json!(if row["sender_kind"].as_str() == Some("human") {
+                                        "owner"
+                                    } else {
+                                        "agent"
+                                    });
+                            }
+                            json!(view)
                         } else {
-                            "owner_lane"
-                        });
+                            json!(if ds_core::inbox::normalise_mailbox(
+                                row["mailbox"].as_str().unwrap_or_default()
+                            ) == "owner"
+                            {
+                                "human"
+                            } else {
+                                "owner_lane"
+                            })
+                        };
                     }
                     item
                 })
@@ -2062,5 +2144,87 @@ mod tests {
             json!({"detail": "the owner mailbox is unavailable: daemon down"})
         );
         assert_eq!(backend.calls.lock().unwrap()[0].1, json!({"limit": 1}));
+    }
+    #[test]
+    fn thread_views_require_confirmed_lineage_and_scope() {
+        for (filter, kind) in [
+            ("human_threads", "human"),
+            ("vp_threads", "vp"),
+            ("historical", "historical"),
+        ] {
+            let historical = kind == "historical";
+            let backend = Arc::new(FakeOwner::new());
+            let row = json!({"id":"i7","mailbox":"owner","sender":null,"audience":"agent","created_at":100,"body":"unchanged",
+                "thread_version":if historical {Value::Null}else{json!(1)},
+                "parent_id":null,"root_id":if historical {Value::Null}else{json!("i7")},
+                "conversation_kind":if historical {Value::Null}else{json!(kind)},
+                "sender_kind":if historical {Value::Null}else{json!("agent")},"historical_reason":if historical {json!("prior_version")}else{Value::Null}});
+            backend.reply("owner_conversation",json!({"source_filter":filter,"include_internal":false,"messages":[row],"waiting":[]}));
+            let response = block_on(app(authorized(), backend.clone()).oneshot(request(
+                "GET",
+                &format!("/api/owner-thread?paged=true&filter={filter}"),
+                None,
+            )))
+            .unwrap();
+            let (status, body, _) = response_json(response);
+            assert_eq!(StatusCode::OK, status, "{filter}: {body}");
+            assert_eq!(body["items"][0]["conversation_source"], kind);
+            assert_eq!(body["items"][0]["body"], "unchanged");
+            if !historical {
+                assert_eq!(
+                    body["items"][0]["role"], "agent",
+                    "sender kind, not a missing sender, determines new message role"
+                );
+            }
+            assert_eq!(backend.calls.lock().unwrap()[0].1["source_filter"], filter);
+        }
+        for bad in [
+            json!({"thread_version":null,"parent_id":null,"root_id":null,"conversation_kind":null,"sender_kind":null}),
+            json!({"thread_version":1,"parent_id":null,"root_id":"i7","conversation_kind":"vp","sender_kind":"agent"}),
+            json!({"thread_version":1,"parent_id":null,"root_id":null,"conversation_kind":"human","sender_kind":"human"}),
+        ] {
+            let backend = Arc::new(FakeOwner::new());
+            let mut row =
+                json!({"id":"i7","mailbox":"owner","audience":null,"body":"DO_NOT_DISPLAY"});
+            row.as_object_mut()
+                .unwrap()
+                .extend(bad.as_object().unwrap().clone());
+            backend.reply(
+                "owner_conversation",
+                json!({"source_filter":"human_threads","include_internal":false,"messages":[row]}),
+            );
+            let response = block_on(app(authorized(), backend).oneshot(request(
+                "GET",
+                "/api/owner-thread?paged=true&filter=human_threads",
+                None,
+            )))
+            .unwrap();
+            let (status, body, _) = response_json(response);
+            assert_eq!(StatusCode::BAD_GATEWAY, status);
+            assert!(!body.to_string().contains("DO_NOT_DISPLAY"));
+        }
+    }
+    #[test]
+    fn historical_labels_use_recorded_audience_digest_and_existing_routine_marker() {
+        let backend = Arc::new(FakeOwner::new());
+        let row = json!({"id":"i7","mailbox":"owner","audience":"agent","created_at":100,"body":"unchanged","subject":"[review-note] recorded marker","digest_id":"dunk:d7","thread_version":null,"parent_id":null,"root_id":null,"conversation_kind":null,"sender_kind":null,"historical_reason":"other"});
+        backend.reply(
+            "owner_conversation",
+            json!({"source_filter":"historical","include_internal":false,"messages":[row]}),
+        );
+        let response = block_on(app(authorized(), backend).oneshot(request(
+            "GET",
+            "/api/owner-thread?paged=true&filter=historical",
+            None,
+        )))
+        .unwrap();
+        let (status, body, _) = response_json(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["items"][0]["historical_reason"], "other");
+        assert_eq!(
+            body["items"][0]["historical_labels"],
+            json!(["Agent-only", "Routine agent mail", "Scheduled check-in"])
+        );
+        assert_eq!(body["items"][0]["body"], "unchanged");
     }
 }
