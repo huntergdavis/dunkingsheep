@@ -4,7 +4,7 @@ usage: dunkingsheep task add [-h] [--scope SCOPE] [--body BODY]
                              [--assign PANE] [--depends-on ID] [--parent ID]
                              [--multi] [--kind {work,review,verify,report}]
                              [--author AUTHOR] [--repo REPO] [--pr PR]
-                             [--head HEAD]
+                             [--head HEAD] [--project NAME] [--no-project]
                              title
 
 positional arguments:
@@ -26,3 +26,7 @@ options:
   --repo REPO           owner/name (reviews)
   --pr PR               PR number (reviews)
   --head HEAD           exact commit under review (reviews)
+  --project NAME        file the task under this project (your own or one you
+                        hold a planner grant for; the owner may name any)
+                        instead of your lane's
+  --no-project          file the task under no project

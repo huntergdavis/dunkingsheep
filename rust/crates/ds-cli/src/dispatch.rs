@@ -4699,6 +4699,14 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                 ] {
                     args.insert(key.into(), value);
                 }
+                // t4701: the project overrides are sent only when given, so a plain
+                // `task add` request is unchanged.
+                if let Some(project) = ns.get("project").filter(|value| !value.is_null()) {
+                    args.insert("project".into(), project.clone());
+                }
+                if matches!(ns.get("no_project"), Some(Value::Bool(true))) {
+                    args.insert("no_project".into(), Value::Bool(true));
+                }
                 crate::daemon_cmd::run_command(ns, "task_add", args, |task| {
                     crate::render_print::render_task(task, &task_stamp)
                 })

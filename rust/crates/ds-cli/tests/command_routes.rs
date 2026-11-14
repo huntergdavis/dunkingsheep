@@ -137,7 +137,16 @@ fn assert_matches_python(args: &[&str]) {
             text.contains(old_poll),
             "archived guide's dunk-poll paragraph changed unexpectedly"
         );
-        text.replacen(old_poll, new_poll, 1).into_bytes()
+        let text = text.replacen(old_poll, new_poll, 1);
+        // t4701: the archived guide has no task projects. The Rust guide says which project
+        // a new task is filed under, after the paragraph on who owns it.
+        let old_owner = "than left ownerless.\n`task_metrics` is the read-only analytics endpoint";
+        let new_owner = "than left ownerless.\nA new global task is filed under its creator lane's project (the lane's\nproject membership, when it still belongs to the pane's running\nprocess); a lane with no membership takes the `--parent` task's project\nwhen it could have named that project itself. `--project NAME` files it\nunder a named project instead: your own, or one you hold a planner grant\nfor (the owner may name any; any other name is refused). `--no-project`\nfiles it under none. A lane with global membership files unmapped tasks\nunless it names a project.\n`task_metrics` is the read-only analytics endpoint";
+        assert!(
+            text.contains(old_owner),
+            "archived guide's task ownership paragraph changed unexpectedly"
+        );
+        text.replacen(old_owner, new_owner, 1).into_bytes()
     } else {
         python.stdout
     };
@@ -2081,6 +2090,80 @@ fn cli_route_22_task_metrics() {
         String::from_utf8(reap.stdout).unwrap()
     );
     assert!(reap.stderr.is_empty());
+}
+
+/// t4701: `--project` and `--no-project` reach `task_add`, and the task's project is printed.
+#[test]
+fn cli_task_add_forwards_the_project_overrides_and_prints_the_project() {
+    let flags = [
+        "--scope",
+        "global",
+        "--body",
+        "check change",
+        "--status",
+        "blocked",
+        "--priority",
+        "high",
+        "--assign",
+        "%99",
+        "--depends-on",
+        "t1",
+        "--parent",
+        "t0",
+        "--multi",
+        "--kind",
+        "review",
+        "--author",
+        "writer",
+        "--repo",
+        "owner/repo",
+        "--pr",
+        "42",
+        "--head",
+        "abc123",
+    ];
+    let expected = json!({
+        "title": "Review", "scope": "global", "body": "check change",
+        "status": "blocked", "priority": "high", "assignees": ["%99"],
+        "depends_on": ["t1"], "parent_id": "t0", "multi_assignee": true,
+        "kind": "review", "author": "writer", "repo": "owner/repo", "pr": 42,
+        "head": "abc123"
+    });
+
+    let mut args = vec!["task", "add", "Review"];
+    args.extend(flags);
+    args.extend(["--project", "gamma"]);
+    let mut named = expected.clone();
+    named["project"] = json!("gamma");
+    let added = run_daemon_cli(
+        &args,
+        "task_add",
+        named,
+        json!({"id":"t2", "priority":"high", "status":"blocked", "title":"Review", "scope":"global", "project":"gamma"}),
+    );
+    assert_eq!(0, added.status.code().unwrap());
+    assert_eq!(
+        "t2 [high] blocked  Review\nscope       global\nproject     gamma\n",
+        String::from_utf8(added.stdout).unwrap()
+    );
+    assert!(added.stderr.is_empty());
+
+    let mut args = vec!["task", "add", "Review"];
+    args.extend(flags);
+    args.push("--no-project");
+    let mut none = expected;
+    none["no_project"] = json!(true);
+    let added = run_daemon_cli(
+        &args,
+        "task_add",
+        none,
+        json!({"id":"t3", "priority":"high", "status":"blocked", "title":"Review", "scope":"global"}),
+    );
+    assert_eq!(0, added.status.code().unwrap());
+    assert_eq!(
+        "t3 [high] blocked  Review\nscope       global\n",
+        String::from_utf8(added.stdout).unwrap()
+    );
 }
 
 #[test]
@@ -5207,6 +5290,7 @@ fn cli_route_58_commands_map() {
     assert!(r.contains("start_agent(project, global, role"));
     assert!(r.contains("memory_backfill(action, limit, queue_id, path, reason)"));
     assert!(r.contains("roster(project)"));
+    assert!(r.contains("head, project, no_project)"));
     assert!(r.contains("Task queues are omitted by default"));
     assert!(
         r.contains("owner_conversation(limit, before, before_id, source_filter, include_internal)")
@@ -5228,6 +5312,7 @@ fn cli_route_58_commands_map() {
                     || line.starts_with("memory_backfill(")
                     || line.starts_with("owner_handoff(")
                     || line.starts_with("inbox_read(")
+                    || line.starts_with("task_add(")
                 {
                     skip_description = true;
                     None
@@ -5283,6 +5368,15 @@ fn cli_route_58_commands_map() {
             .unwrap();
         for key in ["before_id", "source_filter", "include_internal"] {
             assert!(conversation["input_schema"]["properties"]
+                .as_object_mut()
+                .unwrap()
+                .remove(key)
+                .is_some());
+        }
+        // t4701: the two task project overrides are Rust-only.
+        let task_add = r.iter_mut().find(|row| row["name"] == "task_add").unwrap();
+        for key in ["project", "no_project"] {
+            assert!(task_add["input_schema"]["properties"]
                 .as_object_mut()
                 .unwrap()
                 .remove(key)
