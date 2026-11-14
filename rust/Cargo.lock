@@ -502,6 +502,7 @@ dependencies = [
  "chrono",
  "ds-core",
  "futures-util",
+ "nix",
  "ring",
  "rusqlite",
  "serde",

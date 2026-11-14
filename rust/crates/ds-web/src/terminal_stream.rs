@@ -4,18 +4,66 @@ use serde_json::{Map, Value};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
-/// Validate an external Host against explicitly configured authorities.
+/// Match an authority against the current local names/addresses at the listener port.
+/// Numeric addresses are compared by value, including alternate IPv6 spellings.
 pub fn valid_terminal_host(headers: &axum::http::HeaderMap, allowed_hosts: &[String]) -> bool {
     let mut hosts = headers.get_all(axum::http::header::HOST).iter();
     let Some(host) = hosts.next().and_then(|v| v.to_str().ok()) else {
         return false;
     };
-    hosts.next().is_none()
-        && !host.is_empty()
-        && !host.contains(['/', '\\', '@', ' ', '\t', ','])
-        && allowed_hosts
-            .iter()
-            .any(|allowed| allowed.eq_ignore_ascii_case(host))
+    if hosts.next().is_some() {
+        return false;
+    }
+    let Some(host) = terminal_authority(host) else {
+        return false;
+    };
+    allowed_hosts
+        .iter()
+        .filter_map(|allowed| terminal_authority(allowed))
+        .any(|allowed| allowed == host)
+}
+
+pub(crate) fn terminal_authority(value: &str) -> Option<(String, Option<u16>)> {
+    if value.is_empty() || value.contains(['/', '\\', '@', ' ', '\t', ',', '?', '#', '%']) {
+        return None;
+    }
+    let authority = value.parse::<axum::http::uri::Authority>().ok()?;
+    let port_text = if value.starts_with('[') {
+        let end = value.find(']')?;
+        let tail = &value[end + 1..];
+        if tail.is_empty() {
+            None
+        } else {
+            Some(tail.strip_prefix(':')?)
+        }
+    } else {
+        if value.bytes().filter(|byte| *byte == b':').count() > 1 {
+            return None;
+        }
+        value.rsplit_once(':').map(|(_, port)| port)
+    };
+    let port = match port_text {
+        Some(port) => {
+            if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            Some(port.parse::<u16>().ok()?)
+        }
+        None => None,
+    };
+    let name = authority.host();
+    let name = name
+        .strip_prefix('[')
+        .and_then(|name| name.strip_suffix(']'))
+        .unwrap_or(name);
+    let name = match name.parse::<std::net::IpAddr>() {
+        Ok(address) => address.to_string(),
+        Err(_) => name.strip_suffix('.').unwrap_or(name).to_ascii_lowercase(),
+    };
+    if name.is_empty() {
+        return None;
+    }
+    Some((name, port))
 }
 
 /// Browser WebSocket handshakes require exactly one explicit Origin and Host.
@@ -751,6 +799,40 @@ mod tests {
     };
     use super::{snapshot_command, ControlClient, ControlLines, ControlReply, Snapshot};
     use serde_json::json;
+
+    #[test]
+    fn terminal_authorities_normalize_ip_spelling_but_never_widen_ports() {
+        use axum::http::{header, HeaderMap};
+        let allowed = vec!["[::1]:8787".to_owned(), "cell:8787".to_owned()];
+        for (host, expected) in [
+            ("[0:0:0:0:0:0:0:1]:8787", true),
+            ("CELL:8787", true),
+            ("cell.:8787", true),
+            ("cell", false),
+            ("cell:80", false),
+            ("cell:65536", false),
+            ("user@cell:8787", false),
+            ("cell:8787/path", false),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::HOST, host.parse().unwrap());
+            assert_eq!(
+                super::valid_terminal_host(&headers, &allowed),
+                expected,
+                "{host}"
+            );
+        }
+        let defaults = vec!["cell".to_owned(), "cell:80".to_owned()];
+        for host in ["cell:", "cell:65536", "cell:+80", "cell:invalid"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::HOST, host.parse().unwrap());
+            assert!(!super::valid_terminal_host(&headers, &defaults), "{host}");
+        }
+        let mut headers = HeaderMap::new();
+        headers.append(header::HOST, "cell:8787".parse().unwrap());
+        headers.append(header::HOST, "cell:8787".parse().unwrap());
+        assert!(!super::valid_terminal_host(&headers, &allowed));
+    }
 
     #[test]
     fn websocket_requires_single_same_origin_for_configured_scheme() {

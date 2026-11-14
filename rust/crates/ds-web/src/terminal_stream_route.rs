@@ -7,16 +7,17 @@ use crate::{
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        DefaultBodyLimit, Path, Query, State,
+        ConnectInfo, DefaultBodyLimit, Path, Query, State,
     },
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use ds_core::{config::Env, roles::Roles, terminal::tmux::TmuxBackend};
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
+    net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -33,10 +34,86 @@ type Binding = (String, i64, String);
 // the terminal before tmux acknowledged the first command.
 const INPUT_FRAME_BYTES: usize = 4096;
 const INPUT_BUFFER_BYTES: usize = 32 * 1024;
+type HostSource = Arc<dyn Fn() -> Result<Vec<String>, String> + Send + Sync>;
+
+const REFUSAL_LOG_INTERVAL: Duration = Duration::from_secs(60);
+const MAX_REFUSAL_PEERS: usize = 1024;
+#[derive(Default)]
+struct RefusalThrottle {
+    peers: HashMap<Option<IpAddr>, RefusalWindow>,
+    untracked: u64,
+}
+struct RefusalWindow {
+    emitted: std::time::Instant,
+    suppressed: u64,
+}
+struct RefusalCounts {
+    suppressed: u64,
+    untracked: u64,
+}
+impl RefusalThrottle {
+    fn observe(
+        &mut self,
+        remote: Option<SocketAddr>,
+        now: std::time::Instant,
+    ) -> Option<RefusalCounts> {
+        // Source-port rotation and IPv4-mapped IPv6 cannot create a new budget.
+        let peer = remote.map(|remote| remote.ip().to_canonical());
+        if let Some(window) = self.peers.get_mut(&peer) {
+            if now
+                .checked_duration_since(window.emitted)
+                .unwrap_or_default()
+                < REFUSAL_LOG_INTERVAL
+            {
+                window.suppressed = window.suppressed.saturating_add(1);
+                return None;
+            }
+            window.emitted = now;
+            return Some(RefusalCounts {
+                suppressed: std::mem::take(&mut window.suppressed),
+                untracked: std::mem::take(&mut self.untracked),
+            });
+        }
+        if self.peers.len() >= MAX_REFUSAL_PEERS {
+            let mut expired = 0_u64;
+            self.peers.retain(|_, window| {
+                if now
+                    .checked_duration_since(window.emitted)
+                    .unwrap_or_default()
+                    < REFUSAL_LOG_INTERVAL
+                {
+                    true
+                } else {
+                    expired = expired.saturating_add(window.suppressed);
+                    false
+                }
+            });
+            self.untracked = self.untracked.saturating_add(expired);
+            if self.peers.len() >= MAX_REFUSAL_PEERS {
+                self.untracked = self.untracked.saturating_add(1);
+                return None;
+            }
+        }
+        self.peers.insert(
+            peer,
+            RefusalWindow {
+                emitted: now,
+                suppressed: 0,
+            },
+        );
+        Some(RefusalCounts {
+            suppressed: 0,
+            untracked: std::mem::take(&mut self.untracked),
+        })
+    }
+}
+
 struct StreamState {
     auth: Arc<dyn AuthBackend>,
     scheme: RequestScheme,
-    hosts: Vec<String>,
+    hosts: HostSource,
+    bound_port: u16,
+    refusal_log: Mutex<RefusalThrottle>,
     backend: TmuxBackend,
     roles: Mutex<Roles>,
     socket: Option<String>,
@@ -47,14 +124,29 @@ struct StreamState {
     resize_epoch: String,
 }
 
-/// Disabled unless explicitly enabled and supplied with trusted hosts. Returns the router and
+/// Disabled unless explicitly enabled and local authorities can be discovered. Returns the router and
 /// whether its routes are mounted, and logs one startup line saying which, so a deployment that
 /// answers 404 names its own cause.
-pub fn configured_router(auth: Arc<dyn AuthBackend>, scheme: RequestScheme) -> (Router, bool) {
+pub fn configured_router(
+    auth: Arc<dyn AuthBackend>,
+    scheme: RequestScheme,
+    port: u16,
+) -> (Router, bool) {
     let env = Env::from_process();
-    match build_router(auth, scheme, &env) {
+    // Only pre-existing explicit DNS authorities are grandfathered; never resolver search names.
+    let domains = env
+        .get("DUNKINGSHEEP_TERMINAL_STREAM_HOSTS")
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let hosts: HostSource =
+        Arc::new(move || crate::terminal_hosts::local_hosts(port, scheme, &domains));
+    match build_router_with_hosts(auth, scheme, &env, hosts, port) {
         Ok((router, hosts)) => {
-            eprintln!("terminal stream enabled ({hosts} trusted host(s))");
+            eprintln!("terminal stream enabled ({hosts} local authorities)");
             (router, true)
         }
         Err(reason) => {
@@ -71,27 +163,52 @@ fn router_from_env(auth: Arc<dyn AuthBackend>, scheme: RequestScheme, env: &Env)
         .unwrap_or_default()
 }
 
-/// The router and its trusted-host count, or why the stream stays off.
+// Existing transport/auth fixtures inject deterministic hosts, rather than depend on the
+// test machine's interfaces. Production discovers LAN addresses; old explicit DNS aliases are preserved.
+#[cfg(test)]
 fn build_router(
     auth: Arc<dyn AuthBackend>,
     scheme: RequestScheme,
     env: &Env,
 ) -> Result<(Router, usize), String> {
-    if env.get("DUNKINGSHEEP_TERMINAL_STREAM") != Some("1") {
-        return Err("DUNKINGSHEEP_TERMINAL_STREAM is not 1".into());
-    }
-    let hosts: Vec<String> = env
+    let configured = env
         .get("DUNKINGSHEEP_TERMINAL_STREAM_HOSTS")
         .unwrap_or("")
         .split(',')
         .map(str::trim)
-        .filter(|v| !v.is_empty())
+        .filter(|value| !value.is_empty())
         .map(str::to_owned)
-        .collect();
-    if hosts.is_empty() {
-        return Err("DUNKINGSHEEP_TERMINAL_STREAM_HOSTS is empty".into());
+        .collect::<Vec<_>>();
+    let port = configured
+        .first()
+        .and_then(|host| host.parse::<axum::http::uri::Authority>().ok())
+        .and_then(|host| host.port_u16())
+        .unwrap_or(8787);
+    let hosts: HostSource = Arc::new(move || {
+        if configured.is_empty() {
+            Err("DUNKINGSHEEP_TERMINAL_STREAM_HOSTS is empty".into())
+        } else {
+            Ok(configured.clone())
+        }
+    });
+    build_router_with_hosts(auth, scheme, env, hosts, port)
+}
+
+/// The router and initial local authority count, or why the stream stays off.
+fn build_router_with_hosts(
+    auth: Arc<dyn AuthBackend>,
+    scheme: RequestScheme,
+    env: &Env,
+    hosts: HostSource,
+    bound_port: u16,
+) -> Result<(Router, usize), String> {
+    if env.get("DUNKINGSHEEP_TERMINAL_STREAM") != Some("1") {
+        return Err("DUNKINGSHEEP_TERMINAL_STREAM is not 1".into());
     }
-    let host_count = hosts.len();
+    let host_count = hosts()?.len();
+    if host_count == 0 {
+        return Err("no local terminal authorities".into());
+    }
     let backend = ds_core::server_runtime::configured_backend()
         .map_err(|error| format!("terminal backend: {error}"))?;
     let roles =
@@ -105,6 +222,8 @@ fn build_router(
         auth,
         scheme,
         hosts,
+        bound_port,
+        refusal_log: Mutex::new(RefusalThrottle::default()),
         backend,
         roles: Mutex::new(roles),
         socket,
@@ -125,6 +244,95 @@ fn build_router(
         .route("/api/terminals/{name}/stream", get(upgrade))
         .with_state(state);
     Ok((router, host_count))
+}
+
+fn refusal_context(
+    headers: &HeaderMap,
+    reason: &'static str,
+    remote: Option<SocketAddr>,
+    listener_port: u16,
+) -> serde_json::Value {
+    let field = |name: axum::http::header::HeaderName| {
+        headers
+            .get(name)
+            .map(|value| value.as_bytes())
+            .unwrap_or(b"<missing>")
+            .iter()
+            .take(160)
+            .map(|byte| {
+                if byte.is_ascii_graphic() || *byte == b' ' {
+                    char::from(*byte)
+                } else {
+                    '?'
+                }
+            })
+            .collect::<String>()
+    };
+    serde_json::json!({"host":field(header::HOST), "origin":field(header::ORIGIN),
+        "host_count":headers.get_all(header::HOST).iter().count(), "origin_count":headers.get_all(header::ORIGIN).iter().count(),
+        "forwarded":{
+            "host":field(axum::http::header::HeaderName::from_static("x-forwarded-host")),
+            "proto":field(axum::http::header::HeaderName::from_static("x-forwarded-proto")),
+            "port":field(axum::http::header::HeaderName::from_static("x-forwarded-port")),
+            "for":field(axum::http::header::HeaderName::from_static("x-forwarded-for")),
+            "standard":field(axum::http::header::HeaderName::from_static("forwarded"))
+        }, "remote_address":remote.map(|address| address.to_string()), "listener_port":listener_port, "reason":reason})
+}
+
+fn log_refusal(
+    state: &StreamState,
+    headers: &HeaderMap,
+    reason: &'static str,
+    remote: Option<SocketAddr>,
+) {
+    let report = state
+        .refusal_log
+        .lock()
+        .ok()
+        .and_then(|mut throttle| throttle.observe(remote, std::time::Instant::now()));
+    if let Some(report) = report {
+        let mut record = refusal_context(headers, reason, remote, state.bound_port);
+        record["suppressed"] = serde_json::json!(report.suppressed);
+        record["suppressed_untracked"] = serde_json::json!(report.untracked);
+        eprintln!("terminal request refused {record}");
+    }
+}
+
+fn auth_refusal(
+    state: &StreamState,
+    headers: &HeaderMap,
+    reason: &'static str,
+    remote: Option<SocketAddr>,
+) -> Response {
+    log_refusal(state, headers, reason, remote);
+    StatusCode::UNAUTHORIZED.into_response()
+}
+
+fn request_hosts_allowed(
+    state: &StreamState,
+    headers: &HeaderMap,
+    require_origin: bool,
+    remote: Option<SocketAddr>,
+) -> bool {
+    let reason = match (state.hosts)() {
+        Err(_) => Some("local_authority_discovery_unavailable"),
+        Ok(hosts) if !terminal_stream::valid_terminal_host(headers, &hosts) => {
+            Some("host_not_local_or_wrong_listener_port")
+        }
+        Ok(hosts)
+            if (require_origin || headers.contains_key(header::ORIGIN))
+                && !terminal_stream::valid_websocket_origin(headers, state.scheme, &hosts) =>
+        {
+            Some("origin_must_match_scheme_and_host")
+        }
+        Ok(_) => None,
+    };
+    if let Some(reason) = reason {
+        log_refusal(state, headers, reason, remote);
+        false
+    } else {
+        true
+    }
 }
 
 fn new_resize_epoch() -> Option<String> {
@@ -156,18 +364,17 @@ async fn resize_status(
     State(state): State<Arc<StreamState>>,
     Path(name): Path<String>,
     headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
 ) -> Response {
-    if !terminal_stream::valid_terminal_host(&headers, &state.hosts)
-        || (headers.contains_key(header::ORIGIN)
-            && !terminal_stream::valid_websocket_origin(&headers, state.scheme, &state.hosts))
-    {
+    let peer = peer.map(|Extension(ConnectInfo(address))| address);
+    if !request_hosts_allowed(&state, &headers, false, peer) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let Some(token) = cookie(&headers) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+        return auth_refusal(&state, &headers, "owner_session_required", peer);
     };
     if !is_owner(&state, &token).await {
-        return StatusCode::UNAUTHORIZED.into_response();
+        return auth_refusal(&state, &headers, "owner_session_required", peer);
     }
     let Some(busy_name) = state.resize_slots.busy_name(&name) else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -186,7 +393,7 @@ async fn resize_status(
         busy
     };
     if !is_owner(&state, &token).await {
-        return StatusCode::UNAUTHORIZED.into_response();
+        return auth_refusal(&state, &headers, "owner_session_required", peer);
     }
     let mut response =
         Json(serde_json::json!({"in_flight":in_flight,"epoch":state.resize_epoch.as_str()}))
@@ -288,16 +495,18 @@ async fn resize_terminal(
     State(state): State<Arc<StreamState>>,
     Path(name): Path<String>,
     headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(request): Json<ResizeRequest>,
 ) -> Response {
-    if !terminal_stream::valid_websocket_origin(&headers, state.scheme, &state.hosts) {
+    let peer = peer.map(|Extension(ConnectInfo(address))| address);
+    if !request_hosts_allowed(&state, &headers, true, peer) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let Some(token) = cookie(&headers) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+        return auth_refusal(&state, &headers, "owner_session_required", peer);
     };
     if !is_owner(&state, &token).await {
-        return StatusCode::UNAUTHORIZED.into_response();
+        return auth_refusal(&state, &headers, "owner_session_required", peer);
     }
     if !(1..=1000).contains(&request.cols) || !(1..=1000).contains(&request.rows) {
         return (
@@ -335,7 +544,7 @@ async fn resize_terminal(
             .into_response();
     };
     if !is_owner(&state, &token).await {
-        return StatusCode::UNAUTHORIZED.into_response();
+        return auth_refusal(&state, &headers, "owner_session_required", peer);
     }
     let Ok(permit) = state.workers.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -366,18 +575,20 @@ async fn resize_terminal(
     }
 }
 
-async fn list_terminals(State(state): State<Arc<StreamState>>, headers: HeaderMap) -> Response {
-    if !terminal_stream::valid_terminal_host(&headers, &state.hosts)
-        || (headers.contains_key(header::ORIGIN)
-            && !terminal_stream::valid_websocket_origin(&headers, state.scheme, &state.hosts))
-    {
+async fn list_terminals(
+    State(state): State<Arc<StreamState>>,
+    headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+) -> Response {
+    let peer = peer.map(|Extension(ConnectInfo(address))| address);
+    if !request_hosts_allowed(&state, &headers, false, peer) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let Some(token) = cookie(&headers) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+        return auth_refusal(&state, &headers, "owner_session_required", peer);
     };
     if !is_owner(&state, &token).await {
-        return StatusCode::UNAUTHORIZED.into_response();
+        return auth_refusal(&state, &headers, "owner_session_required", peer);
     }
     let Ok(permit) = state.workers.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -396,7 +607,7 @@ async fn list_terminals(State(state): State<Arc<StreamState>>, headers: HeaderMa
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     if !is_owner(&state, &token).await {
-        return StatusCode::UNAUTHORIZED.into_response();
+        return auth_refusal(&state, &headers, "owner_session_required", peer);
     }
     let mut response = Json(found).into_response();
     response.headers_mut().insert(
@@ -491,16 +702,18 @@ async fn upgrade(
     Path(name): Path<String>,
     Query(query): Query<StreamQuery>,
     headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if !terminal_stream::valid_websocket_origin(&headers, state.scheme, &state.hosts) {
+    let peer = peer.map(|Extension(ConnectInfo(address))| address);
+    if !request_hosts_allowed(&state, &headers, true, peer) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let Some(token) = cookie(&headers) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+        return auth_refusal(&state, &headers, "owner_session_required", peer);
     };
     if !is_owner(&state, &token).await {
-        return StatusCode::UNAUTHORIZED.into_response();
+        return auth_refusal(&state, &headers, "owner_session_required", peer);
     }
     let Ok(permit) = state.sessions.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -755,6 +968,252 @@ mod tests {
                 .args(["-L", &self.0, "kill-server"])
                 .output();
         }
+    }
+
+    #[test]
+    fn refusal_logs_share_one_minute_budget_per_ip_and_report_suppression() {
+        let mut throttle = RefusalThrottle::default();
+        let now = std::time::Instant::now();
+        let first = Some("192.0.2.8:1111".parse().unwrap());
+        assert_eq!(throttle.observe(first, now).unwrap().suppressed, 0);
+        assert!(throttle
+            .observe(
+                Some("192.0.2.8:2222".parse().unwrap()),
+                now + Duration::from_secs(1)
+            )
+            .is_none());
+        assert!(throttle
+            .observe(
+                Some("[::ffff:192.0.2.8]:3333".parse().unwrap()),
+                now + Duration::from_secs(2)
+            )
+            .is_none());
+        assert_eq!(
+            throttle
+                .observe(
+                    Some("192.0.2.9:1111".parse().unwrap()),
+                    now + Duration::from_secs(2)
+                )
+                .unwrap()
+                .suppressed,
+            0
+        );
+        assert!(throttle
+            .observe(first, now + Duration::from_secs(59))
+            .is_none());
+        assert_eq!(
+            throttle
+                .observe(first, now + Duration::from_secs(60))
+                .unwrap()
+                .suppressed,
+            3
+        );
+        assert!(throttle
+            .observe(first, now + Duration::from_secs(61))
+            .is_none());
+        assert_eq!(
+            throttle
+                .observe(first, now + Duration::from_secs(120))
+                .unwrap()
+                .suppressed,
+            1
+        );
+    }
+
+    #[test]
+    fn refusal_peer_storage_is_bounded_without_resetting_active_budgets() {
+        let mut throttle = RefusalThrottle::default();
+        let now = std::time::Instant::now();
+        for number in 0..MAX_REFUSAL_PEERS {
+            let address = std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, number as u16, 1);
+            assert!(throttle
+                .observe(Some(SocketAddr::new(address.into(), 1000)), now)
+                .is_some());
+        }
+        let extra = Some("[2001:db8:ffff::1]:1000".parse().unwrap());
+        assert!(throttle
+            .observe(extra, now + Duration::from_secs(1))
+            .is_none());
+        assert_eq!(throttle.peers.len(), MAX_REFUSAL_PEERS);
+        let first = Some("[2001:db8::1]:2000".parse().unwrap());
+        assert!(throttle
+            .observe(first, now + Duration::from_secs(59))
+            .is_none());
+        let report = throttle
+            .observe(first, now + Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(report.suppressed, 1);
+        assert_eq!(report.untracked, 1);
+        assert!(throttle
+            .observe(extra, now + Duration::from_secs(60))
+            .is_some());
+        assert!(throttle.peers.len() <= MAX_REFUSAL_PEERS);
+    }
+
+    #[tokio::test]
+    async fn local_lan_authorities_keep_origin_and_login_gates() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let env = Env::from_pairs(&[
+            ("DUNKINGSHEEP_TERMINAL_STREAM", "1"),
+            ("DUNKINGSHEEP_DIR", dir.path().to_str().unwrap()),
+        ]);
+        let identity = Arc::new(Mutex::new(crate::terminal_hosts::LocalIdentity {
+            hostname: Some("cell".into()),
+            addresses: vec!["192.168.0.209".parse().unwrap(), "fe80::1".parse().unwrap()],
+        }));
+        let source = identity.clone();
+        let hosts: HostSource = Arc::new(move || {
+            crate::terminal_hosts::hosts_for_identity(
+                &source.lock().unwrap(),
+                8787,
+                RequestScheme::Http,
+                &[],
+            )
+        });
+        let app = build_router_with_hosts(
+            Arc::new(FakeAuth(AtomicBool::new(true))),
+            RequestScheme::Http,
+            &env,
+            hosts,
+            8787,
+        )
+        .unwrap()
+        .0;
+        let request = |host: &str, origin: Option<&str>| {
+            let mut request = axum::http::Request::builder()
+                .uri("/api/terminals")
+                .header(header::HOST, host);
+            if let Some(origin) = origin {
+                request = request.header(header::ORIGIN, origin);
+            }
+            request.body(axum::body::Body::empty()).unwrap()
+        };
+        for host in [
+            "192.168.0.209:8787",
+            "cell:8787",
+            "cell.local:8787",
+            "[fe80::1]:8787",
+            "[fe80:0:0:0:0:0:0:1]:8787",
+        ] {
+            let origin = format!("http://{host}");
+            assert_eq!(
+                app.clone()
+                    .oneshot(request(host, Some(&origin)))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNAUTHORIZED,
+                "{host}: no cookie grants no access"
+            );
+        }
+        assert_eq!(
+            app.clone()
+                .oneshot(request("cell:8787", None))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        for host in [
+            "foreign.example:8787",
+            "100.91.92.49:8787",
+            "cell.tail68fe78.ts.net:8787",
+            "cell.home.arpa:8787",
+            "cell:80",
+            "cell",
+            "192.168.0.209",
+            "cell.local.evil:8787",
+            "192.168.0.210:8787",
+        ] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(request(host, None))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::FORBIDDEN,
+                "{host}"
+            );
+        }
+        for origin in [
+            "http://foreign.example:8787",
+            "http://cell.local:8787",
+            "https://cell:8787",
+            "null",
+        ] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(request("cell:8787", Some(origin)))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::FORBIDDEN,
+                "{origin}"
+            );
+        }
+        let mut forged = request("foreign.example:8787", None);
+        forged
+            .headers_mut()
+            .insert("x-forwarded-host", "cell:8787".parse().unwrap());
+        forged
+            .headers_mut()
+            .insert("x-forwarded-proto", "http".parse().unwrap());
+        assert_eq!(
+            app.clone().oneshot(forged).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        // The same router re-reads current interfaces instead of retaining startup IPs.
+        identity.lock().unwrap().addresses = vec!["192.168.0.210".parse().unwrap()];
+        assert_eq!(
+            app.clone()
+                .oneshot(request("192.168.0.209:8787", None))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            app.oneshot(request("192.168.0.210:8787", None))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[test]
+    fn refusal_diagnostics_are_bounded_single_line_metadata_without_cookies() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "cell:8787\tforged".parse().unwrap());
+        headers.insert(
+            header::ORIGIN,
+            "http://foreign.example:8787".parse().unwrap(),
+        );
+        headers.insert(
+            header::COOKIE,
+            "vp_session=DO-NOT-LOG-THIS".parse().unwrap(),
+        );
+        headers.insert("x-forwarded-host", "proxy.invalid:443".parse().unwrap());
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        let record = refusal_context(
+            &headers,
+            "host_not_local_or_wrong_listener_port",
+            Some("192.0.2.20:41321".parse().unwrap()),
+            8787,
+        );
+        assert_eq!(record.as_object().unwrap().len(), 8);
+        let line = record.to_string();
+        assert!(
+            !line.contains("DO-NOT-LOG")
+                && !line.contains('\t')
+                && !line.contains('\n')
+                && !line.contains('\r')
+        );
+        assert_eq!(record["host"], "cell:8787?forged");
+        assert_eq!(record["forwarded"]["host"], "proxy.invalid:443");
+        assert_eq!(record["remote_address"], "192.0.2.20:41321");
+        assert_eq!(record["listener_port"], 8787);
     }
 
     #[test]
@@ -1090,7 +1549,12 @@ mod tests {
         let state = Arc::new(StreamState {
             auth: auth.clone(),
             scheme: RequestScheme::Http,
-            hosts: vec![addr.to_string(), client_addr.to_string()],
+            bound_port: addr.port(),
+            refusal_log: Mutex::new(RefusalThrottle::default()),
+            hosts: {
+                let hosts = vec![addr.to_string(), client_addr.to_string()];
+                Arc::new(move || Ok(hosts.clone()))
+            },
             backend,
             roles: Mutex::new(roles),
             socket: Some(socket),

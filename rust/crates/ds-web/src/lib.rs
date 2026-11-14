@@ -17,6 +17,7 @@ pub mod python_json;
 pub mod roster;
 pub mod routes;
 pub mod terminal_control_registry;
+mod terminal_hosts;
 pub mod terminal_stream;
 pub mod terminal_stream_route;
 pub mod web_server;

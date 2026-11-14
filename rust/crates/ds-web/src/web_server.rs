@@ -392,14 +392,19 @@ impl Desk {
     /// Mounts every P0 route against the owned backends, then the legacy redirect middleware
     /// (outermost, so it sees every path) and the static fallback.
     pub fn router(&self) -> Router {
-        self.router_and_terminal_stream().0
+        self.router_on_port(8787)
+    }
+
+    /// An embedded router must receive its listener's bound port for terminal authority checks.
+    pub fn router_on_port(&self, port: u16) -> Router {
+        self.router_and_terminal_stream(port).0
     }
 
     /// The router, and whether the terminal stream routes are mounted on it.
-    fn router_and_terminal_stream(&self) -> (Router, bool) {
+    fn router_and_terminal_stream(&self, bound_port: u16) -> (Router, bool) {
         let auth: Arc<dyn AuthBackend> = self.auth.clone();
         let (terminal_stream, terminal_stream_enabled) =
-            crate::terminal_stream_route::configured_router(auth.clone(), self.scheme);
+            crate::terminal_stream_route::configured_router(auth.clone(), self.scheme, bound_port);
         let scheme = self.scheme;
         let (messages_read_backend, messages_write_backend, search_backend) =
             self.messages.trait_objects();
@@ -641,10 +646,14 @@ pub async fn serve(
     listener: TcpListener,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), DeskError> {
+    let bound_port = listener
+        .local_addr()
+        .map_err(|error| DeskError::Serve(error.to_string()))?
+        .port();
     let desk = Desk::open(config)?;
     desk.start()
         .map_err(|error| DeskError::Startup(format!("board: {error}")))?;
-    let (app, terminal_stream) = desk.router_and_terminal_stream();
+    let (app, terminal_stream) = desk.router_and_terminal_stream(bound_port);
     let served = axum::serve(
         listener,
         axum::ServiceExt::<Request>::into_make_service_with_connect_info::<SocketAddr>(
