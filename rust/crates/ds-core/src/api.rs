@@ -3533,7 +3533,7 @@ pub fn h_task_read(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
         return if summary {
             Ok(wire)
         } else {
-            with_task_project(context, wire)
+            Ok(with_block_kind(with_task_project(context, wire)?))
         };
     }
     let task = context.block_on(

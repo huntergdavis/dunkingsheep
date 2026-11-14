@@ -11092,6 +11092,20 @@ fn task_history_summary_and_kinds_are_bounded_explicit_and_private() {
         .unwrap(),
         default
     );
+    // PR961's typed-block decoration applies to full history as well as default reads.
+    runtime
+        .block_on(tasks.block(id, "waiting-evidence: collect proof"))
+        .unwrap();
+    let blocked = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_read",
+        json!({"id":id,"notes":"1"}),
+        "w1:p1",
+    )
+    .unwrap();
+    assert_eq!(blocked["block_kind"], "evidence");
 }
 
 #[test]
