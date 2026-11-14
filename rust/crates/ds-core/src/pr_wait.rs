@@ -1,9 +1,7 @@
 //! One-shot read-only GitHub waits, driven by the existing review-sync timer.
 //! Review reads are recorded, never cached back into review decisions. Only the wait pass
 //! reuses them. No GitHub write path is reachable from this module.
-use crate::github::{
-    self, GitHubRequest, GitHubResponse, GitHubTransport, PinBoxFuture, RequestOptions,
-};
+use crate::github::{GitHubRequest, GitHubResponse, GitHubTransport, PinBoxFuture};
 use crate::inbox_store::Store;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -20,6 +18,17 @@ async fn db<T: Send + 'static>(
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())
+}
+
+#[derive(Debug)]
+enum ReadError {
+    Http(u16),
+    Failed,
+}
+impl From<ReadError> for String {
+    fn from(_: ReadError) -> Self {
+        "GitHub read failed".into()
+    }
 }
 
 pub struct SweepTransport<'a> {
@@ -46,7 +55,7 @@ impl<'a> SweepTransport<'a> {
         root: &str,
         path: &str,
         token: &str,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, ReadError> {
         let url = format!("{root}/repos/{path}");
         let cached = self.reads.lock().unwrap().get(&url).cloned();
         if let Some(v) = cached {
@@ -57,21 +66,25 @@ impl<'a> SweepTransport<'a> {
             store,
             gets: &self.gets,
         };
-        let (_, body) = github::request(
-            &conditional,
-            RequestOptions {
-                method: "GET",
-                url: &url,
-                token: Some(token),
-                bearer: None,
-                payload: None,
+        let response = conditional
+            .send(GitHubRequest {
+                method: "GET".into(),
+                url,
+                headers: BTreeMap::from([
+                    ("Accept".into(), "application/vnd.github+json".into()),
+                    ("User-Agent".into(), "dunkingsheep".into()),
+                    ("X-GitHub-Api-Version".into(), "2022-11-28".into()),
+                    ("Authorization".into(), format!("token {token}")),
+                ]),
+                body: None,
                 timeout_s: 20,
-                api_root: root,
-            },
-        )
-        .await
-        .map_err(|_| "GitHub read failed".to_owned())?;
-        body.ok_or_else(|| "GitHub returned no data".into())
+            })
+            .await
+            .map_err(|_| ReadError::Failed)?;
+        if !(200..300).contains(&response.status) {
+            return Err(ReadError::Http(response.status));
+        }
+        serde_json::from_slice(&response.body).map_err(|_| ReadError::Failed)
     }
 }
 impl GitHubTransport for SweepTransport<'_> {
@@ -219,6 +232,75 @@ fn checks_result(
     }))
 }
 
+/// With no readable required set, describe only observed outcomes. This never verifies policy.
+fn observed_checks_result(
+    runs: &Value,
+    combined: &Value,
+    head: &str,
+) -> Result<Option<String>, String> {
+    let checks = runs["check_runs"].as_array().ok_or("invalid check runs")?;
+    let statuses = combined["statuses"]
+        .as_array()
+        .ok_or("invalid commit statuses")?;
+    let (Some(run_count), Some(status_count)) = (
+        runs["total_count"].as_u64(),
+        combined["total_count"].as_u64(),
+    ) else {
+        return Ok(None);
+    };
+    if checks.len() > 100
+        || statuses.len() > 100
+        || run_count != checks.len() as u64
+        || status_count != statuses.len() as u64
+    {
+        return Err("incomplete or truncated observed checks".into());
+    }
+    if checks.is_empty() && statuses.is_empty() {
+        return Ok(None);
+    }
+    let mut failed = Vec::new();
+    for check in checks {
+        let name = string(check, "name")?;
+        if name.trim().is_empty() {
+            return Err("invalid check name".into());
+        }
+        match check["head_sha"].as_str() {
+            Some(sha) if sha == head => {}
+            None => return Ok(None),
+            _ => return Err("observed check belongs to another head".into()),
+        }
+        if string(check, "status")? != "completed" {
+            return Ok(None);
+        }
+        let Some(conclusion) = check["conclusion"].as_str() else {
+            return Ok(None);
+        };
+        if conclusion != "success" {
+            failed.push(format!("{name} ({conclusion})"));
+        }
+    }
+    for status in statuses {
+        let name = string(status, "context")?;
+        if name.trim().is_empty() {
+            return Err("invalid status context".into());
+        }
+        match string(status, "state")? {
+            "pending" => return Ok(None),
+            "success" => {}
+            "failure" | "error" => failed.push(name.to_owned()),
+            _ => return Err("invalid status state".into()),
+        }
+    }
+    Ok(Some(if failed.is_empty() {
+        "required checks unknown / all observed checks green".into()
+    } else {
+        format!(
+            "required checks unknown / observed checks failed: {}",
+            failed.join(", ")
+        )
+    }))
+}
+
 impl SweepTransport<'_> {
     async fn observe(
         &self,
@@ -319,14 +401,19 @@ impl SweepTransport<'_> {
                 }
             })
             .collect();
-        let required = self
+        let required = match self
             .get(
                 store,
                 root,
                 &format!("{repo}/branches/{branch}/protection/required_status_checks"),
                 token,
             )
-            .await?;
+            .await
+        {
+            Ok(required) => Some(required),
+            Err(ReadError::Http(403 | 404)) => None,
+            Err(error) => return Err(error.into()),
+        };
         let runs = self
             .get(
                 store,
@@ -349,7 +436,10 @@ impl SweepTransport<'_> {
         {
             return Err("too many checks to watch safely".into());
         }
-        out.checks = checks_result(&required, &runs, &combined)?;
+        out.checks = match required {
+            Some(required) => checks_result(&required, &runs, &combined)?,
+            None => observed_checks_result(&runs, &combined, &out.head)?,
+        };
         Ok(out)
     }
     pub(crate) async fn poll(
@@ -434,6 +524,7 @@ mod tests {
         runs: Value,
         calls: AtomicUsize,
         fail: bool,
+        protection_status: u16,
     }
     impl Fake {
         fn new() -> Self {
@@ -443,6 +534,7 @@ mod tests {
                 runs: json!({"total_count":1,"check_runs":[{"name":"CI","status":"completed","conclusion":"success"}]}),
                 calls: AtomicUsize::new(0),
                 fail: false,
+                protection_status: 200,
             }
         }
     }
@@ -469,8 +561,12 @@ mod tests {
                     panic!("unexpected URL {}", request.url)
                 };
                 Ok(GitHubResponse {
-                    status: 200,
-                    reason: "OK".into(),
+                    status: if request.url.contains("/protection/") {
+                        self.protection_status
+                    } else {
+                        200
+                    },
+                    reason: "fixture".into(),
                     body: serde_json::to_vec(&body).unwrap(),
                 })
             })
@@ -638,6 +734,172 @@ mod tests {
             .unwrap()
             .unwrap()
             .contains("passed"));
+    }
+    fn observe_fixture(s: &Arc<Store>, f: &Fake) -> Result<Observation, String> {
+        let waits = s.pr_wait_rows("o/r", 1).unwrap();
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(SweepTransport::new(f).observe(
+                s,
+                "https://api.test",
+                "o/r",
+                1,
+                "fixture",
+                &waits,
+            ))
+    }
+    fn observed_fake(code: u16) -> Fake {
+        let mut f = Fake::new();
+        f.protection_status = code;
+        f.runs["check_runs"][0]["head_sha"] = json!("abc");
+        f
+    }
+    #[test]
+    fn pr_wait_unreadable_policy_reports_observed_green_without_verified_required_claim() {
+        for code in [403, 404] {
+            let (_d, s) = store(&format!("pr-wait-unknown-green-{code}"));
+            register(&s, "one", Some("abc"));
+            let f = observed_fake(code);
+            assert_eq!(poll(&s, &f, 100.)["completed"], 1);
+            let pending = s.pr_wait_pending(100.).unwrap();
+            assert_eq!(pending.len(), 1);
+            assert_eq!(
+                pending[0].2,
+                "o/r#1 abc: required checks unknown / all observed checks green"
+            );
+            assert!(!pending[0].2.contains("required checks passed"));
+            assert!(!pending[0].2.contains("verified"));
+            assert_eq!(f.calls.load(Ordering::Relaxed), 4);
+        }
+    }
+    #[test]
+    fn pr_wait_unknown_policy_includes_nonrequired_failures_and_strict_conclusions() {
+        for case in ["optional-check", "optional-status", "neutral", "skipped"] {
+            let (_d, s) = store(&format!("pr-wait-unknown-failed-{case}"));
+            register(&s, "one", Some("abc"));
+            let mut f = observed_fake(403);
+            match case {
+                "optional-check" => {
+                    f.runs["check_runs"].as_array_mut().unwrap().push(json!({"name":"optional lint","head_sha":"abc","status":"completed","conclusion":"failure"}));
+                    f.runs["total_count"] = json!(2);
+                }
+                "optional-status" => {
+                    f.status = json!({"total_count":1,"statuses":[{"context":"optional status","state":"failure"}]})
+                }
+                other => f.runs["check_runs"][0]["conclusion"] = json!(other),
+            }
+            assert_eq!(poll(&s, &f, 100.)["completed"], 1);
+            let text = &s.pr_wait_pending(100.).unwrap()[0].2;
+            assert!(
+                text.contains("required checks unknown / observed checks failed:"),
+                "{text}"
+            );
+            assert!(
+                text.contains(match case {
+                    "optional-check" => "optional lint",
+                    "optional-status" => "optional status",
+                    other => other,
+                }),
+                "{text}"
+            );
+        }
+    }
+    #[test]
+    fn pr_wait_unknown_policy_empty_missing_and_pending_remain_waiting() {
+        for case in [
+            "empty",
+            "run-pending",
+            "status-pending",
+            "missing-run-count",
+            "missing-status-count",
+            "missing-head",
+            "missing-conclusion",
+        ] {
+            let (_d, s) = store(&format!("pr-wait-unknown-waiting-{case}"));
+            register(&s, "one", Some("abc"));
+            let mut f = observed_fake(403);
+            match case {
+                "empty" => f.runs = json!({"total_count":0,"check_runs":[]}),
+                "run-pending" => f.runs["check_runs"][0]["status"] = json!("in_progress"),
+                "status-pending" => {
+                    f.status =
+                        json!({"total_count":1,"statuses":[{"context":"extra","state":"pending"}]})
+                }
+                "missing-run-count" => {
+                    f.runs.as_object_mut().unwrap().remove("total_count");
+                }
+                "missing-status-count" => {
+                    f.status.as_object_mut().unwrap().remove("total_count");
+                }
+                "missing-head" => {
+                    f.runs["check_runs"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("head_sha");
+                }
+                _ => f.runs["check_runs"][0]["conclusion"] = Value::Null,
+            }
+            // The existing count validation refuses a missing run count. Other incomplete
+            // observations remain unknown; none can emit a green ending notice.
+            let result = observe_fixture(&s, &f);
+            if case == "missing-run-count" {
+                assert!(result.is_err());
+            } else {
+                assert!(result.unwrap().checks.is_none(), "{case}");
+            }
+            assert!(s.pr_wait_pending(100.).unwrap().is_empty());
+        }
+    }
+    #[test]
+    fn pr_wait_unknown_policy_refuses_truncated_partial_and_wrong_head_data() {
+        for case in [
+            "too-many-runs",
+            "too-many-statuses",
+            "partial-runs",
+            "partial-statuses",
+            "wrong-head",
+        ] {
+            let (_d, s) = store(&format!("pr-wait-unknown-refused-{case}"));
+            register(&s, "one", Some("abc"));
+            let mut f = observed_fake(403);
+            match case {
+                "too-many-runs" => f.runs["total_count"] = json!(101),
+                "too-many-statuses" => f.status["total_count"] = json!(101),
+                "partial-runs" => f.runs["total_count"] = json!(2),
+                "partial-statuses" => f.status["total_count"] = json!(1),
+                _ => f.runs["check_runs"][0]["head_sha"] = json!("other"),
+            }
+            assert!(observe_fixture(&s, &f).is_err(), "{case}");
+        }
+    }
+    #[test]
+    fn pr_wait_other_protection_failures_never_use_observed_fallback() {
+        for code in [401, 429, 500] {
+            let (_d, s) = store(&format!("pr-wait-protection-error-{code}"));
+            register(&s, "one", Some("abc"));
+            let f = observed_fake(code);
+            assert!(observe_fixture(&s, &f).is_err());
+            assert_eq!(
+                f.calls.load(Ordering::Relaxed),
+                3,
+                "must not fetch checks after non-fallback error"
+            );
+        }
+    }
+    #[test]
+    fn pr_wait_readable_required_policy_keeps_existing_success_semantics() {
+        for conclusion in ["success", "neutral", "skipped"] {
+            let (_d, s) = store(&format!("pr-wait-readable-policy-{conclusion}"));
+            register(&s, "one", Some("abc"));
+            let mut f = Fake::new();
+            f.runs["check_runs"][0]["conclusion"] = json!(conclusion);
+            // This non-required status does not change the readable required set.
+            f.status = json!({"total_count":1,"statuses":[{"context":"extra","state":"failure"}]});
+            assert_eq!(
+                observe_fixture(&s, &f).unwrap().checks.as_deref(),
+                Some("required checks passed")
+            );
+        }
     }
 }
 
