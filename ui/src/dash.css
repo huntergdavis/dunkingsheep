@@ -587,3 +587,11 @@
 .project-information .info-provenance, .project-information .info-standing { margin: 0.25rem 0; font-size: 0.85rem; }
 .project-information .info-standing { color: var(--dash-warning, #b45309); }
 .project-information .info-body { white-space: pre-wrap; max-width: 100%; overflow-x: auto; }
+
+.lane-usage { margin-top: 0.25rem; max-width: 22rem; }
+.lane-usage-track { height: 4px; background: var(--dash-border, #ccc); border-radius: 2px; overflow: hidden; }
+.lane-usage-fill { height: 100%; background: var(--dash-accent, #3b82f6); }
+.lane-usage-label { display: block; font-size: 0.75rem; overflow-wrap: anywhere; }
+.lane-usage-stale .lane-usage-label, .lane-usage-unavailable .lane-usage-label { color: var(--dash-muted, #888); }
+.lane-usage-details summary { font-size: 0.75rem; cursor: pointer; }
+.lane-usage-details ul, .lane-usage-details p { font-size: 0.75rem; margin: 0.25rem 0; }
