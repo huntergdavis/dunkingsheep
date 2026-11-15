@@ -1,0 +1,56 @@
+# t5163 step 2: the desk's Playwright browser tests (ui/tests/*_browser.py) against the built ui/dist
+# with mocked API responses. Runs only when ui/ changes. Three shards; a failed test is retried once
+# and the retry is reported as a visible warning. Not a required check.
+# project_terminal_transport_browser.py is left out: it needs a built ds-desk binary and tmux.
+name: ui-browser
+
+on:
+  push:
+    branches: [main]
+    paths: ['ui/**', '.github/workflows/ui-browser.yml']
+  pull_request:
+    paths: ['ui/**', '.github/workflows/ui-browser.yml']
+
+jobs:
+  ui-browser:
+    name: ui browser (shard ${{ matrix.shard }}/3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build ui/dist
+        working-directory: ui
+        run: npm ci --no-audit --no-fund && npm run build
+      - name: Install Playwright and Chromium
+        run: |
+          python -m pip install --quiet playwright==1.63.0
+          python -m playwright install --with-deps chromium
+          echo "CHROMIUM_PATH=$(python -c 'from playwright.sync_api import sync_playwright as s; p=s().start(); print(p.chromium.executable_path); p.stop()')" >> "$GITHUB_ENV"
+      - name: Run shard ${{ matrix.shard }}
+        run: |
+          failed=0; i=0
+          for test in $(ls ui/tests/*_browser.py | sort); do
+            case "$test" in *project_terminal_transport_browser.py) continue;; esac
+            if [ $((i % 3)) -eq ${{ matrix.shard }} ]; then
+              echo "::group::$test"
+              if ! python "$test"; then
+                echo "::warning file=$test::failed once, retrying"
+                if ! python "$test"; then echo "::error file=$test::failed twice"; failed=1; fi
+              fi
+              echo "::endgroup::"
+            fi
+            i=$((i + 1))
+          done
+          exit $failed
