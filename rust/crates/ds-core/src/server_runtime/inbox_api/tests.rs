@@ -2027,3 +2027,124 @@ fn inbox_fetch_checks_parent_mailbox_before_destination_writes() {
     assert!(!status.to_string().contains("known private fixture bytes"));
     dispatcher.close();
 }
+
+#[test]
+fn inbox_status_is_visible_only_to_sender_recipient_or_privileged_roles() {
+    let (_dir, services) = make_services("status-mailbox-scope", factory(None), None);
+    let store = services.flock().stores().inbox.unwrap();
+    let incoming = store
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: "w1:p1",
+            sender: Some("w2:p2"),
+            body: Some("private incoming body"),
+            ..Default::default()
+        })
+        .unwrap();
+    let foreign = store
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: "owner",
+            sender: Some("w2:p2"),
+            body: Some("private foreign body"),
+            ..Default::default()
+        })
+        .unwrap();
+    let misleading_sender = store
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: "owner",
+            sender: Some("w1:p1 (%7)"),
+            body: Some("not the raw caller pane"),
+            ..Default::default()
+        })
+        .unwrap();
+    // Recipient aliases follow read's predicate. Sender matching is exact raw pane,
+    // not a mailbox label, suffix, route label or the recipient's pane_id column.
+    let db = rusqlite::Connection::open(store.path()).unwrap();
+    db.execute(
+        "UPDATE messages SET mailbox='w1:p1 (%7)' WHERE id=?",
+        [&incoming],
+    )
+    .unwrap();
+    db.execute("UPDATE messages SET pane_id='w1:p1' WHERE id=?", [&foreign])
+        .unwrap();
+    let (web, system) = services
+        .flock()
+        .with_roles(|roles, _| {
+            roles.register("w4:p4", "planner", None, None, None, None, None, None)?;
+            Ok((
+                roles.issue_token("web", Some("private-status-web"), None)?,
+                roles.issue_token("system", Some("private-status-system"), None)?,
+            ))
+        })
+        .unwrap();
+    let dispatcher = services.dispatcher(handlers());
+    let worker = request("w1:p1");
+    // Exercise a real send, not just a directly seeded sender column.
+    let sent = dispatcher
+        .dispatch(
+            "inbox_send",
+            &json!({
+                "to":"w2:p2", "body":"private sent body", "notify":false
+            }),
+            &worker,
+        )
+        .unwrap();
+    let sent_id = sent["message_id"].as_str().unwrap();
+    for id in [&incoming[..], sent_id] {
+        let status = dispatcher
+            .dispatch("inbox_status", &json!({"message_id":id}), &worker)
+            .unwrap();
+        assert_eq!(status["message_id"], id);
+        assert!(status.get("body").is_none());
+        assert!(status.get("subject").is_none());
+        assert!(!status.to_string().contains("private incoming body"));
+        assert!(!status.to_string().contains("private sent body"));
+    }
+    for id in [&foreign[..], &misleading_sender[..], "missing-status-id"] {
+        let error = dispatcher
+            .dispatch("inbox_status", &json!({"message_id":id}), &worker)
+            .unwrap_err();
+        assert_eq!(error.to_string(), format!("no message with id '{id}'"));
+    }
+    for (role, token) in [("web", web), ("system", system)] {
+        let context = RequestCtx {
+            service_token: Some(token),
+            socket_peer: Some(true),
+            socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
+            ..Default::default()
+        };
+        let status = dispatcher
+            .dispatch("inbox_status", &json!({"message_id":foreign}), &context)
+            .unwrap();
+        assert_eq!(
+            status["message_id"], foreign,
+            "{role} retains privileged scope"
+        );
+    }
+    let status = dispatcher
+        .dispatch(
+            "inbox_status",
+            &json!({"message_id":foreign}),
+            &request("w2:p2"),
+        )
+        .unwrap();
+    assert_eq!(status["message_id"], foreign);
+    let planner_message = store
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: "w4:p4",
+            body: Some("planner incoming"),
+            ..Default::default()
+        })
+        .unwrap();
+    let planner = request("w4:p4");
+    assert!(dispatcher
+        .dispatch(
+            "inbox_status",
+            &json!({"message_id":planner_message}),
+            &planner
+        )
+        .is_ok());
+    assert!(dispatcher
+        .dispatch("inbox_status", &json!({"message_id":foreign}), &planner)
+        .is_err());
+    dispatcher.close();
+}

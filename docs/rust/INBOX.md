@@ -233,4 +233,14 @@ Deploy daemon support before the matching desk. Neither S-F nor S-G is in the S5
 
 Attachment access follows its parent message's mailbox, using the same canonical and legacy-alias predicate as inbox reads. Ordinary lanes can fetch only attachments in their own mailbox; refusal happens before destination creation or copying bytes. Existing privileged owner/web/system read access remains available. Planners still have no fetch grant. The CLI/MCP request and successful response shapes are unchanged.
 
-`inbox status` remains an unscoped delivery-metadata lookup. It returns more than IDs and timestamps: mailbox/destination/pane/sender, state, body byte size, attachment counts and total size, reason, and notification state/reason/transport receipt metadata. It returns no message body or attachment contents. The attachment-scope change does not alter that existing status policy.
+`inbox status` returns delivery metadata to authorized senders, recipients and privileged roles. It returns more than IDs and timestamps: mailbox/destination/pane/sender, state, body byte size, attachment counts and total size, reason, and notification state/reason/transport receipt metadata. It returns no message body or attachment contents.
+
+## Status visibility
+
+Ordinary callers may query `inbox status` for messages in their own mailbox or
+messages they sent. Recipient matching uses the same canonical and legacy-alias
+predicate as reads; sender matching uses the recorded raw caller pane exactly.
+An unrelated message ID returns the same missing-message answer as an unknown ID.
+Owner, web and system roles retain full status access. Ordinary callers without
+an attributable pane cannot query status. Successful response fields stay the
+same, and status still omits the body and attachment bytes.

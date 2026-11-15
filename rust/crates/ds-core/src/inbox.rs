@@ -560,6 +560,18 @@ pub fn status_bound(
     message_id_repr: &str,
     now: f64,
 ) -> Result<Status, DunkError> {
+    status_scoped_bound(pool, message_id, message_id_repr, now, None)
+}
+
+/// Filter in the metadata query itself: ordinary callers may see their received
+/// mail or mail whose stored raw sender is their caller pane. None is privileged.
+pub(crate) fn status_scoped_bound(
+    pool: &ReadPool,
+    message_id: &rusqlite::types::Value,
+    message_id_repr: &str,
+    now: f64,
+    scope: Option<(&str, &str)>,
+) -> Result<Status, DunkError> {
     let sql = "SELECT id, state, mailbox, mailbox_label, pane_id, sender, created_at, read_at, \
                acked_at, archived_at, cancelled_at, length(CAST(body AS BLOB)) AS body_bytes, \
                reason, notify_state, notify_reason, notify_at, notify_transport_id, \
@@ -568,10 +580,18 @@ pub fn status_bound(
                (SELECT COALESCE(SUM(size), 0) FROM attachments a \
                 WHERE a.message_id = messages.id) AS bytes \
                FROM messages WHERE id = ?";
+    let mut sql = sql.to_string();
+    let mut parameters = vec![message_id.clone()];
+    if let Some((mailbox, sender_pane)) = scope {
+        let (predicate, boxes) = mailbox_where(mailbox, "messages.mailbox");
+        sql.push_str(&format!(" AND ({predicate} OR messages.sender = ?)"));
+        parameters.extend(boxes.into_iter().map(rusqlite::types::Value::Text));
+        parameters.push(rusqlite::types::Value::Text(sender_pane.to_owned()));
+    }
     pool.with(|connection: &Connection| {
-        let mut statement = connection.prepare(sql).map_err(map_sqlite)?;
+        let mut statement = connection.prepare(&sql).map_err(map_sqlite)?;
         let mut rows = statement
-            .query_map([message_id], |row| {
+            .query_map(rusqlite::params_from_iter(parameters.iter()), |row| {
                 let state: String = row.get("state")?;
                 let created_at: f64 = row.get("created_at")?;
                 let mailbox: String = row.get("mailbox")?;

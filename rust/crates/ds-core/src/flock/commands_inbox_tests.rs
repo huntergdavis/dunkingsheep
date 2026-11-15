@@ -378,7 +378,7 @@ fn archive_cancel_delete_pass_through_the_store() {
     assert_eq!(1, f.inbox_cancel(&e, &ids(&[&a])).unwrap().changed.len());
     assert_eq!(1, f.inbox_archive(&e, "Mine", None, None).unwrap().archived);
     assert_eq!(vec![b.clone()], f.inbox_delete(&e, &ids(&[&b])).unwrap());
-    assert!(f.inbox_status(&e, &b).is_err());
+    assert!(f.inbox_status(&e, &b, Some("w1:p1")).is_err());
 }
 
 #[test]
@@ -468,7 +468,7 @@ fn a_waiting_notice_is_folded_not_stacked() {
         e.nudges.lock().unwrap().is_empty(),
         "no second notice typed"
     );
-    let status = f.inbox_status(&e, &sent.message_id).unwrap();
+    let status = f.inbox_status(&e, &sent.message_id, Some("w1:p1")).unwrap();
     assert_eq!(Some("queued".to_string()), status.notify_state);
     assert_eq!(Some("folded into n7".to_string()), status.notify_reason);
 }
@@ -480,7 +480,7 @@ fn a_failed_nudge_is_recorded_and_the_mail_is_still_stored() {
     let f = flock(&d);
     let sent = f.inbox_send(&e, &send("w1:p2", Some("w1:p1"))).unwrap();
     assert!(!sent.notified);
-    let status = f.inbox_status(&e, &sent.message_id).unwrap();
+    let status = f.inbox_status(&e, &sent.message_id, Some("w1:p1")).unwrap();
     assert_eq!(Some("failed".to_string()), status.notify_state);
     assert_eq!(Some("pane gone".to_string()), status.notify_reason);
 }
@@ -866,7 +866,7 @@ fn quiet_recipient_alias_and_pane_still_store_unread_without_any_notice() {
         assert_eq!("codex-rust-owner", sent.mailbox);
         assert_eq!(Some("w1:p1".into()), sent.sender);
         assert!(e.nudges.lock().unwrap().is_empty());
-        let status = f.inbox_status(&e, &sent.message_id).unwrap();
+        let status = f.inbox_status(&e, &sent.message_id, Some("w1:p1")).unwrap();
         assert_eq!("queued", status.state);
         assert_eq!(None, status.read_at);
         assert_eq!(None, status.notify_state);
@@ -1089,4 +1089,19 @@ fn attachment_fetch_requires_an_attributable_mailbox_for_ordinary_callers() {
     assert!(error
         .to_string()
         .contains("no mailbox given and no caller pane"));
+}
+
+#[test]
+fn status_requires_a_pane_for_an_ordinary_caller() {
+    let (mut e, d) = (env("worker"), tempfile::tempdir().unwrap());
+    e.paneless = Some("worker");
+    let f = flock(&d);
+    let id = put(&e, "Mine", "fixture");
+    for message_id in [&id[..], "missing"] {
+        let error = f.inbox_status(&e, message_id, None).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("no message with id {message_id:?}")
+        );
+    }
 }
