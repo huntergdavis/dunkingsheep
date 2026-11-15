@@ -130,8 +130,14 @@ got=$(ds "$fixture/dscargo/repo/rust" TMPDIR=/tmp)
 got=$(ds "$fixture/dscargo/repo/rust" TMPDIR="$fixture/dscargo/lane-scratch-with-a-long-name")
 [[ $got == "TMPDIR=$short_home/workspace/.dunk-scratch/c/$key" ]] || { echo "a lane TMPDIR was kept: $got" >&2; exit 1; }
 # ...and DS_CARGO_TMPDIR is the one explicit override.
-got=$(ds "$fixture/dscargo/repo/rust" TMPDIR=/tmp DS_CARGO_TMPDIR="$fixture/dscargo/mine")
-[[ $got == "TMPDIR=$fixture/dscargo/mine" ]] || { echo "DS_CARGO_TMPDIR was not used: $got" >&2; exit 1; }
+got=$(ds "$fixture/dscargo/repo/rust" TMPDIR=/tmp DS_CARGO_TMPDIR="$short_home/m")
+[[ $got == "TMPDIR=$short_home/m" ]] || { echo "DS_CARGO_TMPDIR was not used: $got" >&2; exit 1; }
+[[ $(stat -c %a "$short_home/m") == 700 ]] || { echo "the override directory is not 0700" >&2; exit 1; }
+# The override is held to the same rules: absolute, and short enough.
+expect_exit 2 ds "$fixture/dscargo/repo/rust" DS_CARGO_TMPDIR=relative/dir 2> "$fixture/dscargo/relative.log"
+grep -q "must be an absolute path" "$fixture/dscargo/relative.log"
+expect_exit 2 ds "$fixture/dscargo/repo/rust" DS_CARGO_TMPDIR="$fixture/dscargo/$(printf 'x%.0s' {1..80})" 2> "$fixture/dscargo/override-long.log"
+grep -q "Unix socket paths under it would not fit" "$fixture/dscargo/override-long.log"
 # The fixture may itself sit inside a checkout: stop git looking above it.
 got=$(ds "$fixture/dscargo" TMPDIR=/tmp GIT_CEILING_DIRECTORIES="$fixture")
 [[ $got == "TMPDIR=/tmp" ]] || { echo "outside a checkout: $got" >&2; exit 1; }

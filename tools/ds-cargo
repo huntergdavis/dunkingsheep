@@ -18,16 +18,24 @@ export PROJ_CARGO_TIMEOUT_SECONDS=${DS_CARGO_TIMEOUT_SECONDS:-3600}
 # The lane's own TMPDIR is NOT kept: a new lane's TMPDIR is ~/workspace/.dunk-scratch/<name>-<hex>
 # (up to 60 bytes), which would leave 2 bytes of socket margin. DS_CARGO_TMPDIR=<dir> is the one
 # explicit override. Outside a git checkout nothing changes.
+scratch=
 if [[ -n ${DS_CARGO_TMPDIR:-} ]]; then
-    export TMPDIR=$DS_CARGO_TMPDIR
+    scratch=$DS_CARGO_TMPDIR
+    if [[ $scratch != /* ]]; then
+        echo "ds-cargo: DS_CARGO_TMPDIR must be an absolute path, not $scratch" >&2
+        exit 2
+    fi
 elif top=$(git rev-parse --show-toplevel 2>/dev/null); then
     key=$(printf '%s' "$top" | sha256sum | cut -c1-8)
     scratch=${HOME:?HOME is not set}/workspace/.dunk-scratch/c/$key
+    mkdir -p -m 700 -- "$HOME/workspace/.dunk-scratch" "$HOME/workspace/.dunk-scratch/c"
+fi
+if [[ -n $scratch ]]; then
+    # The same rule for the default and the override: short enough for socket paths under it.
     if (( ${#scratch} > ${DS_CARGO_TMP_MAX:-56} )); then
-        echo "ds-cargo: scratch directory $scratch is ${#scratch} bytes, over ${DS_CARGO_TMP_MAX:-56}; Unix socket paths under it would not fit. Set DS_CARGO_TMPDIR to a shorter directory." >&2
+        echo "ds-cargo: scratch directory $scratch is ${#scratch} bytes, over ${DS_CARGO_TMP_MAX:-56}; Unix socket paths under it would not fit. Set DS_CARGO_TMPDIR to a shorter absolute directory." >&2
         exit 2
     fi
-    mkdir -p -m 700 -- "$HOME/workspace/.dunk-scratch" "$HOME/workspace/.dunk-scratch/c"
     mkdir -p -m 700 -- "$scratch"
     export TMPDIR=$scratch
 fi
