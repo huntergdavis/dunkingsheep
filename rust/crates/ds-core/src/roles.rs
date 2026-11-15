@@ -100,12 +100,14 @@ pub const WORKER_EXTRA: [&str; 29] = [
 pub const WORKER_ONLY: [&str; 1] = ["task_batch_claim"];
 
 /// `ALLOW["system"]` minus `READ_ONLY`.
-pub const SYSTEM_EXTRA: [&str; 33] = [
+pub const SYSTEM_EXTRA: [&str; 35] = [
     "context_add",
     "flush_box",
     "gh_token",
+    "inbox_ack",
     "inbox_fetch",
     "inbox_read",
+    "inbox_recover",
     "inbox_send",
     "inbox_send_agent_only",
     "owner_conversation",
@@ -137,10 +139,11 @@ pub const SYSTEM_EXTRA: [&str; 33] = [
 ];
 
 /// `ALLOW["desk"]` minus `READ_ONLY`.
-pub const DESK_EXTRA: [&str; 17] = [
+pub const DESK_EXTRA: [&str; 18] = [
     "inbox_ack",
     "inbox_fetch",
     "inbox_read",
+    "inbox_recover",
     "owner_conversation",
     "owner_handoff",
     "owner_outbox",
@@ -158,8 +161,10 @@ pub const DESK_EXTRA: [&str; 17] = [
 ];
 
 /// `ALLOW["planner"]` minus `READ_ONLY`.
-pub const PLANNER_EXTRA: [&str; 9] = [
+pub const PLANNER_EXTRA: [&str; 11] = [
+    "inbox_ack",
     "inbox_read",
+    "inbox_recover",
     "inbox_send",
     "inbox_send_agent_only",
     "task_add",

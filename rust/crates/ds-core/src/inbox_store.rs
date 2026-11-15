@@ -1007,6 +1007,49 @@ impl Store {
         })
     }
 
+    /// Atomically mark a prepared batch read and retain its response-loss receipt.
+    /// A failed commit leaves message states and the previous receipt unchanged.
+    pub fn mark_read_with_receipt(
+        &self,
+        mailbox: &str,
+        message_ids: &[String],
+        now: Option<f64>,
+    ) -> Result<usize, DunkError> {
+        let ids = message_ids.to_vec();
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let mailbox = mailbox.to_owned();
+        let now = now.unwrap_or_else(now_s);
+        self.writer.call(move |connection| {
+            let tx = connection.transaction().map_err(map_sqlite)?;
+            let (scope, boxes) = mailbox_where(&mailbox, "mailbox");
+            let mut changed = 0;
+            for id in &ids {
+                let belongs: bool = tx.query_row(
+                    &format!("SELECT EXISTS(SELECT 1 FROM messages WHERE id = ? AND {scope})"),
+                    rusqlite::params![id, boxes[0], boxes[1]],
+                    |row| row.get(0),
+                ).map_err(map_sqlite)?;
+                if !belongs {
+                    return Err(refuse("delivery contains unavailable or foreign mail"));
+                }
+                changed += tx.execute(
+                    "UPDATE messages SET state = 'read', read_at = ? WHERE id = ? AND state = 'queued'",
+                    rusqlite::params![now, id],
+                ).map_err(map_sqlite)?;
+            }
+            tx.execute(
+                "INSERT INTO deliveries (mailbox, message_ids, delivered_at) VALUES (?,?,?) \
+                 ON CONFLICT(mailbox) DO UPDATE SET message_ids = excluded.message_ids, \
+                 delivered_at = excluded.delivered_at",
+                rusqlite::params![mailbox, json_list(&ids), now],
+            ).map_err(map_sqlite)?;
+            tx.commit().map_err(map_sqlite)?;
+            Ok(changed)
+        })
+    }
+
     /// `record_delivery`: remember the latest delivered batch for a mailbox (ONE batch per
     /// mailbox; a newer read overwrites it). Blank ids are dropped; an empty batch records
     /// nothing and leaves an existing receipt alone. Returns the number of ids recorded.
@@ -1044,7 +1087,7 @@ impl Store {
     }
 
     /// `recover_delivery`: replay the receipt batch whatever its read state. Only ids that
-    /// still exist come back, in queue order; vanished ids shrink the receipt, and a
+    /// still exist in this mailbox come back, in queue order; unavailable ids shrink the receipt, and a
     /// receipt with no survivors is dropped. No receipt answers empty, not an error.
     pub fn recover_delivery(&self, mailbox: &str) -> Result<Vec<Message>, DunkError> {
         let mailbox = mailbox.to_string();
@@ -1054,16 +1097,17 @@ impl Store {
             };
             let now = now_s();
             let placeholders = vec!["?"; receipt.message_ids.len()].join(",");
+            let (scope, boxes) = mailbox_where(&mailbox, "mailbox");
             let mut messages = {
                 let mut statement = connection
                     .prepare(&format!(
                         "SELECT {FULL_COLUMNS} FROM messages WHERE id IN ({placeholders}) \
-                         ORDER BY created_at"
+                         AND {scope} ORDER BY created_at"
                     ))
                     .map_err(map_sqlite)?;
                 let rows = statement
                     .query_map(
-                        rusqlite::params_from_iter(receipt.message_ids.iter()),
+                        rusqlite::params_from_iter(receipt.message_ids.iter().chain(boxes.iter())),
                         |row| full_from_row(row, now),
                     )
                     .map_err(map_sqlite)?;

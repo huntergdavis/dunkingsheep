@@ -15,6 +15,18 @@
   {
    "old": "TMUX_PANE (HERDR_PANE_ID on the herdr rollback). `dunkingsheep poll` is\nthe same batch for a human, and `dunkingsheep install` writes\n`~/.local/bin/dunk-poll`. The status half skips the terminal probe",
    "new": "TMUX_PANE (HERDR_PANE_ID on the herdr rollback). `dunkingsheep poll` is\nthe daemon's full batch for a human (the same as `dunk-poll --full`), and\n`dunkingsheep install` writes\n`~/.local/bin/dunk-poll`. The status half skips the terminal probe"
+  },
+  {
+   "old": "Since 2.70.32 a batch is marked read only after the result is built, so a\nread that fails no longer consumes the mail. A REPEATED batch after an error\nis the fix working, not a bug: the same messages are offered again until a\nread completes. `--peek` still marks nothing at all.\n",
+   "new": "A read prepares the complete response before atomically committing its read\nmarks and recovery receipt. A preparation or receipt-write failure leaves\nthe batch unread. A repeated batch after an error is safe redelivery, not\na new message. `--peek` still changes neither mail nor the recovery receipt.\n"
+  },
+  {
+   "old": "dunkingsheep inbox ack",
+   "new": "dunkingsheep inbox ack i42 i43"
+  },
+  {
+   "old": "Recover follows the read rule, not the ack rule: like inbox read it is\npermissive (inspecting a stranded mailbox is how the backlog gets drained),\nwhile ack stays scoped to the caller's own mailbox.\n",
+   "new": "Recover and ack use the same mailbox authorization as read. Every role\nthat can read inbox mail, including planners, can recover and acknowledge\nits own messages. Ordinary lanes cannot recover another lane's or the\nhuman owner's mailbox. Existing privileged read access is unchanged.\nOnly acknowledge IDs whose bodies you actually received and displayed; if\na read response is missing its bodies, recover first instead of acknowledging.\nEmpty reads preserve the last non-empty receipt. Recovery may be repeated\nafter another lost response; explicit acknowledgment clears only the\nacknowledged mail from the receipt. Normal reads still mark read without\nacknowledging, and the messages-only default remains unchanged.\n"
   }
  ]
 }
