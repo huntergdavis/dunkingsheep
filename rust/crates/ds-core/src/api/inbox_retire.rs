@@ -17,7 +17,13 @@ pub fn h_inbox_retire(context: &HandlerContext<'_>, _args: Args) -> Result<Value
         .ok_or_else(|| DunkError::Refused("inbox store is not wired".into()))?;
     let rows = store.mailbox_census()?;
     let mut identities = crate::inbox_retire::Identities::default();
-    for pane in context.env.list_panes_grouped() {
+    // Fail closed: a pane list that could not be read would make every live lane look gone.
+    let panes = context.env.try_authority_panes().map_err(|error| {
+        DunkError::Refused(format!(
+            "inbox retire: the live pane list could not be read, so live lanes cannot be told apart from retired ones: {error}"
+        ))
+    })?;
+    for pane in panes {
         for field in ["pane_id", "label", "tab_label", "agent_name", "name"] {
             if let Some(value) = pane
                 .get(field)

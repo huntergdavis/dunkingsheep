@@ -368,6 +368,66 @@ mod tests {
     }
 
     #[test]
+    fn a_next_job_and_a_renamed_mailbox_reopen_a_retired_mailbox() {
+        let (_dir, store) = store();
+        for mailbox in ["worker", "old-name"] {
+            send(&store, mailbox);
+            age(&store, mailbox, 20.0);
+        }
+        store
+            .retire_mailboxes(
+                &["worker".to_string()],
+                "test",
+                "%308",
+                crate::clock::now_s(),
+            )
+            .unwrap();
+        store
+            .ensure_next_job("nj-1", "worker", "%23", "next body", "Next task")
+            .unwrap();
+        assert_eq!(status(&store, "worker").as_deref(), Some("active"));
+        // The same next job again stores nothing new, and does not count as a second reopen.
+        store
+            .retire_mailboxes(
+                &["worker".to_string()],
+                "test",
+                "%308",
+                crate::clock::now_s(),
+            )
+            .unwrap();
+        assert_eq!(
+            status(&store, "worker").as_deref(),
+            Some("active"),
+            "it holds queued mail now"
+        );
+
+        // Mail moved into a retired mailbox by a rename reopens it.
+        send(&store, "renamed-to");
+        age(&store, "renamed-to", 20.0);
+        store
+            .retire_mailboxes(
+                &["renamed-to".to_string()],
+                "test",
+                "%308",
+                crate::clock::now_s(),
+            )
+            .unwrap();
+        assert_eq!(store.rename_mailbox("old-name", "renamed-to").unwrap(), 1);
+        assert_eq!(status(&store, "renamed-to").as_deref(), Some("active"));
+        // A rename that moves nothing changes nothing.
+        store
+            .retire_mailboxes(
+                &["renamed-to".to_string()],
+                "test",
+                "%308",
+                crate::clock::now_s(),
+            )
+            .unwrap();
+        assert_eq!(store.rename_mailbox("nobody", "renamed-to").unwrap(), 0);
+        assert_eq!(status(&store, "renamed-to").as_deref(), Some("retired"));
+    }
+
+    #[test]
     fn the_census_reads_counts_without_bodies() {
         let (_dir, store) = store();
         send(&store, "a");
