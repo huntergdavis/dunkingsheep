@@ -224,6 +224,12 @@ pub const LAUNCH_IDENTITY_KEYS: [&str; 6] = [
 /// and the plain wrappers `nice`, `nohup` and `setsid`. t3912 starts lanes as
 /// `env TMPDIR=<dir> <program> ...`, so the first word is not the agent.
 pub fn launched_program(argv: &[String]) -> Option<&str> {
+    let token = argv.get(launched_program_index(argv)?)?;
+    Some(token.rsplit('/').next().unwrap_or(token))
+}
+
+/// Where `launched_program` is in `argv`: everything before it is the `env`/wrapper prefix.
+pub fn launched_program_index(argv: &[String]) -> Option<usize> {
     let mut index = 0;
     while let Some(token) = argv.get(index) {
         let program = token.rsplit('/').next().unwrap_or(token);
@@ -248,7 +254,7 @@ pub fn launched_program(argv: &[String]) -> Option<&str> {
                     index += if next == "-n" { 2 } else { 1 };
                 }
             }
-            _ => return Some(program),
+            _ => return Some(index),
         }
     }
     None

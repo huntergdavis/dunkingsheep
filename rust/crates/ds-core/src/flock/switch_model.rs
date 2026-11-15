@@ -142,6 +142,21 @@ pub fn switch_argv(
     model: Option<&str>,
     effort: Option<&str>,
 ) -> Result<Vec<String>, String> {
+    // t3912: a lane started as `env TMPDIR=<dir> <program> ...` keeps that prefix; the switch is
+    // worked out on the program's own argv.
+    let start = super::launched_program_index(argv).unwrap_or(0);
+    let (prefix, program) = argv.split_at(start);
+    let mut out = prefix.to_vec();
+    out.extend(switch_program_argv(program, session, model, effort)?);
+    Ok(out)
+}
+
+fn switch_program_argv(
+    argv: &[String],
+    session: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<Vec<String>, String> {
     let Some(exe) = argv.first() else {
         return Err("the launch command is empty".into());
     };
@@ -422,6 +437,51 @@ mod tests {
                 "b"
             ])
         );
+    }
+
+    #[test]
+    fn an_env_prefixed_launch_keeps_its_prefix_and_switches_the_program() {
+        // t3912: start-agent records `env TMPDIR=<dir> <program> ...`.
+        let switched = switch_argv(
+            &v(&[
+                "env",
+                "TMPDIR=/w/.dunk-scratch/a-1f2e3d",
+                "codex",
+                "--no-daemon",
+                "-m",
+                "old",
+            ]),
+            "s-9",
+            Some("new"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            switched,
+            v(&[
+                "env",
+                "TMPDIR=/w/.dunk-scratch/a-1f2e3d",
+                "codex",
+                "resume",
+                "--no-daemon",
+                "-m",
+                "new",
+                "s-9"
+            ])
+        );
+        let claude = switch_argv(
+            &v(&["env", "TMPDIR=/t", "claude", "--model", "a"]),
+            "s",
+            Some("b"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(&claude[..3], &v(&["env", "TMPDIR=/t", "claude"])[..]);
+        assert!(claude.contains(&"--resume".to_string()));
+        // The prefix is not read as a positional argument of the agent.
+        assert!(switch_argv(&v(&["env", "TMPDIR=/t", "A=b", "codex"]), "s", None, None).is_ok());
+        // Only an env prefix and no program: still refused.
+        assert!(switch_argv(&v(&["env", "TMPDIR=/t"]), "s", None, None).is_err());
     }
 
     #[test]

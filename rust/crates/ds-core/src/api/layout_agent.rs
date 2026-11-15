@@ -138,11 +138,11 @@ pub enum LaneScratch {
 
 /// What start-agent does about TMPDIR for this argv and role.
 pub fn lane_scratch(argv: &[String], role: Option<&str>) -> LaneScratch {
-    if let Some(value) = argv
+    // Every assignment in the env prefix, before the program (`env -u X TMPDIR=... codex`).
+    let prefix_end = crate::flock::launched_program_index(argv).unwrap_or(argv.len());
+    if let Some(value) = argv[..prefix_end]
         .iter()
-        .skip_while(|token| token.rsplit('/').next() != Some("env"))
-        .skip(1)
-        .take_while(|token| token.contains('=') || token.starts_with('-'))
+        .rev()
         .find_map(|token| token.strip_prefix("TMPDIR="))
     {
         return LaneScratch::Explicit(value.to_string());
@@ -153,7 +153,8 @@ pub fn lane_scratch(argv: &[String], role: Option<&str>) -> LaneScratch {
     }
 }
 
-/// A file-name-safe form of an agent name: letters, digits, `-` and `_`, at most 40.
+/// A file-name-safe form of an agent name: letters, digits, `-` and `_`, at most 16, so the
+/// directory path stays short (Unix socket paths under it are limited to 107 bytes).
 fn scratch_stem(name: &str) -> String {
     let stem: String = name
         .chars()
@@ -164,7 +165,7 @@ fn scratch_stem(name: &str) -> String {
                 '-'
             }
         })
-        .take(40)
+        .take(16)
         .collect();
     let stem = stem.trim_matches('-');
     if stem.is_empty() {
@@ -174,6 +175,10 @@ fn scratch_stem(name: &str) -> String {
     }
 }
 
+/// The longest lane scratch path handed out, leaving at least 43 of the 107 bytes a Unix socket
+/// path may have for what tests and tools create under it.
+pub const LANE_SCRATCH_MAX_LEN: usize = 64;
+
 /// Create `<home>/workspace/.dunk-scratch/<name>-<6 hex>`, mode 0700, never reusing one that
 /// exists. The parent is created 0700 too.
 pub fn make_lane_scratch(
@@ -182,6 +187,14 @@ pub fn make_lane_scratch(
 ) -> std::io::Result<std::path::PathBuf> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     let base = home.join("workspace").join(".dunk-scratch");
+    // ~/workspace/.dunk-scratch/<16>-<6>: refuse rather than hand out a path that leaves too
+    // little room for socket names under it.
+    if base.as_os_str().len() + 1 + 16 + 1 + 6 > LANE_SCRATCH_MAX_LEN {
+        return Err(std::io::Error::other(format!(
+            "{} is too long for a lane scratch directory (at most {LANE_SCRATCH_MAX_LEN} bytes with its name)",
+            base.display()
+        )));
+    }
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -455,6 +468,11 @@ mod tests {
             super::LaneScratch::Explicit("/mine".into()),
             "an explicit TMPDIR wins, and is only recorded"
         );
+        // An assignment after an env option is still the caller's.
+        assert_eq!(
+            super::lane_scratch(&v(&["env", "-u", "X", "TMPDIR=/mine", "codex"]), None),
+            super::LaneScratch::Explicit("/mine".into())
+        );
         // TMPDIR as an argument of the agent itself is not an environment setting.
         assert_eq!(
             super::lane_scratch(&v(&["codex", "TMPDIR=/x"]), None),
@@ -476,6 +494,11 @@ mod tests {
             );
             let name = dir.file_name().unwrap().to_str().unwrap();
             assert!(name.starts_with("ds-writer----x-"), "{name}");
+            assert!(
+                dir.as_os_str().len() <= home.path().as_os_str().len() + 26 + 16 + 7,
+                "{}",
+                dir.display()
+            );
             assert_eq!(
                 std::fs::metadata(dir).unwrap().permissions().mode() & 0o777,
                 0o700
