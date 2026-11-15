@@ -556,17 +556,19 @@ fn inbox_status_cache_ttl_validates_captured_startup_config() {
 }
 
 /// t4644: mail the web desk sends with its service token is recorded as from `owner-desk`. A
-/// pane-less caller with any other token role, and a caller with a pane, are unchanged.
+/// Owner-token callers use the registered agent label; system callers and pane callers keep
+/// their existing identities. Recipient-side reads carry the same attributed sender.
 #[test]
 fn inbox_send_from_the_web_role_without_a_pane_is_stamped_as_the_owner_desk() {
     let (_dir, services) = make_services("desk-sender", factory(None), None);
     let dispatcher = services.dispatcher(handlers());
-    let (web, system) = services
+    let (web, system, owner) = services
         .flock()
         .with_roles(|roles, _| {
             Ok((
                 roles.issue_token("web", Some("desk"), None)?,
                 roles.issue_token("system", Some("timers"), None)?,
+                roles.issue_token("owner", Some("VP fixture"), None)?,
             ))
         })
         .unwrap();
@@ -588,6 +590,41 @@ fn inbox_send_from_the_web_role_without_a_pane_is_stamped_as_the_owner_desk() {
     assert_eq!(send(&token_ctx(&web))["sender"], "owner-desk");
     assert_eq!(send(&token_ctx(&system))["sender"], json!(null));
     assert_eq!(send(&request("w1:p1"))["sender"], "w1:p1");
+    let attributed = send(&token_ctx(&owner));
+    assert_eq!(attributed["sender"], "VP fixture");
+    let read = dispatcher
+        .dispatch("inbox_read", &json!({"peek":true}), &request("w1:p1"))
+        .unwrap();
+    let received = read["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["message_id"] == attributed["message_id"])
+        .unwrap();
+    assert_eq!(received["sender"], "VP fixture");
+    let store = services.flock().stores().inbox.unwrap();
+    let thread = store
+        .thread_info(attributed["message_id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(thread["sender_kind"], "agent");
+    assert_eq!(thread["sender_route_kind"], "vp");
+    let explicit = dispatcher
+        .dispatch(
+            "inbox_send",
+            &json!({"to":"owner","body":"system notice","system_sender":"watchdog","notify":false}),
+            &token_ctx(&owner),
+        )
+        .unwrap();
+    assert_eq!(explicit["sender"], "watchdog");
+    assert_eq!(
+        store
+            .thread_info(explicit["message_id"].as_str().unwrap())
+            .unwrap()
+            .unwrap()["sender_kind"],
+        "system"
+    );
+    dispatcher.close();
 }
 
 #[test]
@@ -1670,6 +1707,52 @@ fn inbox_vp_recipient_snapshot_is_independent_of_service_token_role() {
             recipient == "human"
         );
     }
+    let owner_token = services
+        .flock()
+        .with_roles(|roles, _| roles.issue_token("owner", Some("VP fixture"), None))
+        .unwrap();
+    let owner = RequestCtx {
+        service_token: Some(owner_token),
+        socket_peer: Some(true),
+        socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
+        ..Default::default()
+    };
+    let timer = RequestCtx {
+        service_token: Some(system.clone()),
+        socket_peer: Some(true),
+        socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
+        ..Default::default()
+    };
+    for (ctx, actor, visible) in [
+        (&owner, "agent", true),
+        (&request("w2:p2"), "agent", true),
+        (&timer, "system", false),
+    ] {
+        let sent = dispatcher
+            .dispatch(
+                "inbox_send",
+                &json!({"to":"owner","body":"explicit human recipient","notify":false}),
+                ctx,
+            )
+            .unwrap();
+        let id = sent["message_id"].as_str().unwrap();
+        let info = store.thread_info(id).unwrap().unwrap();
+        assert_eq!(info["sender_kind"], actor);
+        assert_eq!(info["conversation_kind"], "vp");
+        assert_eq!(info["recipient_route_kind"], "human");
+        assert_eq!(
+            store
+                .conversation_thread_cursor(
+                    100,
+                    None,
+                    crate::owner::ConversationFilter::HumanThreads
+                )
+                .unwrap()
+                .iter()
+                .any(|row| row["id"] == id),
+            visible
+        );
+    }
     dispatcher.close();
 }
 
@@ -1762,6 +1845,16 @@ fn inbox_thread_human_producers_require_the_registered_bridge_label() {
         )
         .unwrap();
     assert_eq!(human["thread"]["sender_kind"], "human");
+    let store = services.flock().stores().inbox.unwrap();
+    let rows = store
+        .conversation_thread_cursor(100, None, crate::owner::ConversationFilter::HumanThreads)
+        .unwrap();
+    for message in [
+        &accepted["message"]["message_id"],
+        &human["message"]["message_id"],
+    ] {
+        assert!(rows.iter().any(|row| &row["id"] == message));
+    }
     assert!(dispatcher
         .dispatch(
             "owner_ingest_thread",

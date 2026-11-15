@@ -375,6 +375,15 @@ tab renames its mailbox, so mail already waiting stays under the old name.
 The sender is the raw pane id (e.g. wS:p1), so two panes of the same type
 can never borrow each other's identity.
 
+To address a proactive message to the human, use the reserved `owner` mailbox:
+`dunkingsheep inbox send owner --subject 'Ready' 'The requested notice is ready.'`.
+This appears in Your inbox as an agent message, linked to its recorded thread.
+Addressing the VP's pane or lane name instead sends to the VP conversation.
+A pane-less caller authenticated by an owner-role service token is attributed to
+that token's registered label as an agent; it is never treated as human-origin.
+Only an authenticated human reply promotes the whole thread into Your inbox.
+The Inbox polls every five seconds; newly returned rows appear without reloading.
+
 Ack stamps `read_at` as well as `acked_at`, so a board that counts NULL
 read_at never reports drained mail as unread. A send to a pane id that no
 longer exists fails immediately instead of queueing for ever; queued mail
