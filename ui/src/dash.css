@@ -580,3 +580,10 @@
 .project-terminal-header { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
 .project-terminal-screen { height: min(60vh, 600px); min-height: 240px; background: #111; padding: 8px; overflow: auto; box-sizing: border-box; max-width: 100%; }
 .project-terminal-note { color: var(--dash-muted, #888); font-size: 0.85rem; }
+
+.project-information .info-controls { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 0.75rem; }
+.project-information .info-entry { border-top: 1px solid var(--dash-border); padding: 0.5rem 0; overflow-wrap: anywhere; }
+.project-information .info-entry h4 { margin: 0; }
+.project-information .info-provenance, .project-information .info-standing { margin: 0.25rem 0; font-size: 0.85rem; }
+.project-information .info-standing { color: var(--dash-warning, #b45309); }
+.project-information .info-body { white-space: pre-wrap; max-width: 100%; overflow-x: auto; }

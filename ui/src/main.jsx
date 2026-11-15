@@ -25,6 +25,7 @@ import { channelDisplayName, laneDisplayName } from './lane-label.js';
 import { channelDeliveryLabel, messageDeliveryLabel } from './delivery-label.js';
 import CharacterEditor from './CharacterEditor';
 import ProjectTerminal from './ProjectTerminal';
+import ProjectInformation from './ProjectInformation';
 import { nextTerminalList, OWNER_TERMINAL_NAME, terminalActionForLane, terminalListReason } from './project-terminal-targets.js';
 import { agoText, laneMailText, unroutedSection } from './project-fleet.js';
 import { canonicalDashLocation, DASH_HOME, DASH_ROUTES, requestedPane, resolveDashRoute, viewForPath } from './dash-route.js';
@@ -1310,6 +1311,7 @@ function Projects({ standalone = false }) {
         ? <button type="button" onClick={() => setTerminalTarget(action.target)}>{action.label}</button>
         : <small className="lane-terminal-reason"> {action.reason}</small>)(terminalActionForLane(terminalList, lane.pane_id))}</td><td>{lane.state || 'Unknown'}</td><td>{(mail => <span title={mail.reason || undefined}>{mail.text}</span>)(laneMailText(fleet, lane.pane_id))}</td><td>{lane.task ? [lane.task.id, lane.task.title].filter(Boolean).join(' · ') : 'Unknown'}</td><td data-lane-model={lane.pane_id}>{(model => <>{model.text}<small> {model.detail}</small></>)(laneModel(lane.model))}</td></tr>)}</tbody></table></div></section>)}
     </>}
+    <ProjectInformation api={api} />
     <details className="project-unrouted">
       <summary>{unrouted.title}</summary>
       {!unrouted.known ? <p className="dash-muted">{unrouted.reason}</p> : <>

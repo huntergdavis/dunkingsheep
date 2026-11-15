@@ -211,6 +211,7 @@ pub struct Desk {
     system: SystemConfig,
     ui_dist: PathBuf,
     scheme: RequestScheme,
+    project_context: Arc<crate::routes::project_context::ProjectContextConfig>,
 }
 
 impl Desk {
@@ -314,6 +315,17 @@ impl Desk {
             system,
             ui_dist: config.ui_dist,
             scheme: config.scheme,
+            // t3250: the owner-written map lives beside the other owner config; the global
+            // context store is `<config>/context`, as the context CLI resolves it.
+            project_context: Arc::new(crate::routes::project_context::ProjectContextConfig {
+                global_store: config.config_dir.join("context"),
+                config_dir: config.config_dir,
+                // The desk's own user: the owner of this process's /proc entry. Unknown means no
+                // map can match, so nothing is read from one.
+                uid: std::fs::metadata("/proc/self")
+                    .map(|meta| std::os::unix::fs::MetadataExt::uid(&meta))
+                    .unwrap_or(u32::MAX),
+            }),
         })
     }
 
@@ -462,6 +474,11 @@ impl Desk {
             )
             .merge(ops_board::router(board, auth.clone(), scheme))
             .merge(terminal_stream)
+            .merge(crate::routes::project_context::router(
+                self.project_context.clone(),
+                auth.clone(),
+                scheme,
+            ))
             .merge(dash::router(dash, auth, scheme))
             .fallback(move |request: Request| {
                 let root = ui_dist.clone();
