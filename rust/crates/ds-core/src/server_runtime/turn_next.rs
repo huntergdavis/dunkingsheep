@@ -384,6 +384,7 @@ mod tests {
             source: None,
             caller: None,
             handoff_id: Some("i1".into()),
+            mail_continuing: false,
         };
         assert!(hooks.observe_turn("w1:p1", &state).is_err());
         assert!(adapter

@@ -39,6 +39,8 @@ pub struct TurnState {
     pub source: Option<String>,
     pub caller: Option<Value>,
     pub handoff_id: Option<String>,
+    /// Claude Stop feedback keeps this generation busy until its continuation stops.
+    pub mail_continuing: bool,
 }
 
 /// The turn table (`self.turns`).
@@ -202,6 +204,7 @@ impl Flock {
             source: source.map(String::from),
             caller: self.current_caller(),
             handoff_id: handoff_id.map(String::from),
+            mail_continuing: false,
         };
         self.turn_states
             .lock()
@@ -249,7 +252,7 @@ impl Flock {
             .or(self_pane_id.filter(|p| !p.is_empty()))
             .ok_or_else(|| DunkError::Refused("turn end requires a pane".into()))?;
         let now = crate::clock::now_s();
-        let state = {
+        let mut state = {
             let mut turns = self
                 .turn_states
                 .lock()
@@ -283,10 +286,67 @@ impl Flock {
                 }));
             }
             let state = turns.get_mut(pane_id).expect("checked above");
-            state.ended_at = Some(now);
-            state.expires_at = 0.0;
+            // Claude Stop feedback is still the same model turn. Keep it active
+            // while obtaining the offer; callbacks must not run under this lock.
+            if !(authenticated && state.source.as_deref() == Some("claude-hook-mail-v1")) {
+                state.ended_at = Some(now);
+                state.expires_at = 0.0;
+            }
             state.clone()
         };
+        let claude = authenticated && state.source.as_deref() == Some("claude-hook-mail-v1");
+        let mut claude_notice = None;
+        if claude {
+            if state.mail_continuing && reason == "stop" {
+                return Ok(
+                    json!({"pane_id":pane_id,"ended":false,"reason":"mail_continuation_active",
+                    "dispatch":skip("turn.end", "mail_continuation_active")}),
+                );
+            }
+            if reason == "stop" || reason == "stop-continuation" {
+                let edge = if reason == "stop" {
+                    "claude-stop"
+                } else {
+                    "claude-finish"
+                };
+                match hooks.mail_notice(pane_id, &state.turn_id, edge, now) {
+                    Ok(notice) => claude_notice = notice,
+                    Err(error) => eprintln!("mail-first offer failed pane={pane_id}: {error}"),
+                }
+            }
+            let continuing = claude_notice
+                .as_ref()
+                .is_some_and(|n| n["action"] == "offer");
+            {
+                let mut turns = self.turn_states.lock().unwrap_or_else(|p| p.into_inner());
+                let Some(current) = turns.get_mut(pane_id).filter(|s| {
+                    s.turn_id == state.turn_id
+                        && s.mail_continuing == state.mail_continuing
+                        && s.ended_at.is_none()
+                        && s.expires_at > now
+                }) else {
+                    return Ok(
+                        json!({"pane_id":pane_id,"ended":false,"reason":"turn_changed",
+                        "dispatch":skip("turn.end", "turn_changed")}),
+                    );
+                };
+                if continuing {
+                    current.mail_continuing = true;
+                } else {
+                    current.ended_at = Some(now);
+                    current.expires_at = 0.0;
+                }
+                state = current.clone();
+            }
+            if continuing {
+                eprintln!("mail-first pane={pane_id} action=continue generation_retained=true");
+                hooks.renew_leases(pane_id, state.caller.as_ref(), now);
+                return Ok(
+                    json!({"pane_id":pane_id,"ended":false,"reason":"mail_notice",
+                    "dispatch":skip("turn.end", "mail_continuation_active"),"mail_notice":claude_notice}),
+                );
+            }
+        }
         self.set_turn(
             pane_id,
             Turn {
@@ -306,7 +366,9 @@ impl Flock {
             Some(duration),
         );
         hooks.renew_leases(pane_id, self.current_caller().as_ref(), now);
-        let notice = if authenticated && super::mail_notice::hook_source(state.source.as_deref()) {
+        let notice = if claude {
+            claude_notice
+        } else if authenticated && super::mail_notice::hook_source(state.source.as_deref()) {
             match hooks.mail_notice(pane_id, &state.turn_id, "end", now) {
                 Ok(notice) => notice,
                 Err(error) => {
@@ -359,9 +421,8 @@ impl Flock {
                 .iter()
                 .filter(|(_, state)| {
                     let hook_idle_grace = super::mail_notice::hook_source(state.source.as_deref())
-                        && state
-                            .ended_at
-                            .is_some_and(|ended| now - ended < super::mail_notice::IDLE_FALLBACK_S);
+                        && now - state.ended_at.unwrap_or(state.expires_at)
+                            < super::mail_notice::IDLE_FALLBACK_S;
                     state.expires_at <= now && !hook_idle_grace
                 })
                 .map(|(pane, _)| pane.clone())

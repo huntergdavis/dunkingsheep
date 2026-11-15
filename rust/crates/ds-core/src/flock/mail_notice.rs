@@ -19,6 +19,8 @@ pub(crate) struct NoticeOffer {
     offers: u8,
     last_edge: String,
     observed_at: f64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    claude_continued: bool,
 }
 
 pub(crate) fn hook_source(source: Option<&str>) -> bool {
@@ -100,6 +102,8 @@ impl Flock {
         }
         let count = ids.len();
         let batch = format!("{:x}", Sha256::digest(ids.join("\n").as_bytes()));
+        let claude_finish = edge == "claude-finish";
+        let claude_stop = edge == "claude-stop";
         let edge = format!("{turn}:{edge}");
         let result = {
             let mut outbox = outbox_lock(&self.outbox);
@@ -114,6 +118,7 @@ impl Flock {
                 offers: 0,
                 last_edge: String::new(),
                 observed_at: now,
+                claude_continued: false,
             });
             if state.batch != batch {
                 *state = NoticeOffer {
@@ -121,6 +126,7 @@ impl Flock {
                     offers: 0,
                     last_edge: String::new(),
                     observed_at: now,
+                    claude_continued: false,
                 };
             }
             if state.last_edge == edge {
@@ -128,10 +134,15 @@ impl Flock {
             }
             state.last_edge = edge;
             state.observed_at = now;
-            if state.offers >= OFFER_LIMIT {
+            if claude_finish {
+                json!({"action":"fallback", "batch":batch, "unread":count, "reason":"claude_continuation_finished"})
+            } else if claude_stop && state.claude_continued {
+                json!({"action":"fallback", "batch":batch, "unread":count, "reason":"claude_continuation_used"})
+            } else if state.offers >= OFFER_LIMIT {
                 json!({"action":"fallback", "batch":batch, "unread":count, "reason":"unread_after_two_offers"})
             } else {
                 state.offers += 1;
+                state.claude_continued |= claude_stop;
                 json!({"action":"offer", "batch":batch, "unread":count,
                     "text":format!("[inbox] You have {count} unread message(s) in this batch. Read them with: dunkingsheep inbox read"),
                     "offers":state.offers})
@@ -140,7 +151,7 @@ impl Flock {
         // Persist the offer before returning stdout. It proves only an offer, never consumption.
         self.save()?;
         if result["action"] == "fallback" {
-            eprintln!("mail-first pane={pane} batch={batch} action=fallback reason=unread_after_two_offers idle_bound_s={IDLE_FALLBACK_S}");
+            eprintln!("mail-first pane={pane} batch={batch} action=fallback reason={} idle_bound_s={IDLE_FALLBACK_S}", result["reason"].as_str().unwrap_or("unknown"));
         } else {
             eprintln!("mail-first pane={pane} batch={batch} action=offer unread={count}");
         }
