@@ -133,7 +133,84 @@ packaging/rust-release/uninstall-release.sh --prefix DIR --bin-dir DIR --unit-di
 - A symbolic link at the drop-in or at a launcher path is refused before anything is written,
   and a restore refuses a link too. Writing through a link would change another file.
 
-## Activation gate (not part of this change)
+## Reviewed three-unit packet (t4699, second slice)
+
+`tools/rust_rollout.sh` also accepts a coordinated, already-staged packet:
+
+```sh
+RUST_RELEASE_OPERATOR=/absolute/reviewed/bin/ds-release \
+  tools/rust_rollout.sh plan --packet /absolute/packet --packet-sha SHA256SUMS_SHA
+# Authorized operator only, after tooling and packet review and a current GO:
+RUST_RELEASE_OPERATOR=/absolute/reviewed/bin/ds-release \
+  tools/rust_rollout.sh activate --packet /absolute/packet --packet-sha SHA256SUMS_SHA --apply
+```
+
+Build `ds-release` from the independently reviewed revision with the managed
+Cargo wrapper (`build --locked --release -p ds-cli --bin ds-release`, in `rust/`).
+The entrypoint never builds or installs its helper automatically. Pin an absolute,
+regular executable with `RUST_RELEASE_OPERATOR`, or install it as `ds-release` on
+PATH. Do not mix packet flags with legacy `--sha`, `--unit` or artifact flags.
+`plan`, `activate`, `verify` and `rollback` are dry-run by default: they validate
+packet/artifact hashes without host commands, locks or writes. `plan --apply`
+remains dry-run. `verify --apply` performs live checks without restarting units;
+it writes only the private operation lock. No packet operation starts timers.
+
+The packet contract follows the accepted t5007 procedure (`operate.py` SHA256
+`487b4835f99df2770937e7ac1aff9d8f6b33b6d2df1293b6e7b6543e55553144`).
+`STAGING-MANIFEST.json` records the full source commit, operator, exact three
+units, immutable source/stage/release artifact hashes, baseline PIDs, executables,
+unit-file hashes and `DropInPaths`, candidate drop-in/snippet paths, before/after
+CLI hashes, unchanged poll hashes, dedicated Telegram token path and the three
+reviewed downgrade trigger names. `SHA256SUMS` covers the manifest, artifacts,
+snippets, `launcher.before`, `launcher.pending` and `rollback-triggers.sql`.
+The required `lan_authority` is the reviewed LAN Host header for terminal probes;
+the TCP connection remains loopback. The digest supplied on the command line is
+the SHA256 of `SHA256SUMS` itself.
+The SQL file is review evidence; the native executor permits only the three
+specific t5007 message sidecar trigger removals and retains all tables and rows.
+
+The separate private `state/ACTIVATION-GO.json` must contain `packet_sha256`,
+`authority_message`, RFC3339 `valid_from`/`valid_until`, `no_terminal_confirmed:
+true`, nonempty `rollback_triggers` and `observations_only` arrays, and the explicit
+boolean `rollback_on_apply_failure: true`. `state/REVIEW-ACCEPTANCE.json` must
+contain the same packet digest, `accepted: true`, a nonempty `reviewer` different
+from the manifest operator, and `evidence_message`. These records express the
+coordinator's authorization; same-user files are not a privilege boundary.
+The tooling author never activates their own change. A different authorized
+operator must execute the independently reviewed tooling and packet.
+
+Activation records its one attempt before changing anything, then switches
+daemon/CLI, web and Telegram in that order. It checks live executable bytes,
+restart counts, unchanged poll, daemon CLI reads, exact served UI bytes, terminal
+authentication/Host gates and the bridge's dedicated token-file environment.
+The token must be a same-user regular 0600 file registered as exactly
+`telegram-bridge system`; the helper never reads its contents or issues tokens.
+It checks actual attached tmux control clients before activation and immediately
+before switching web, while ignoring usage-provider children.
+
+An apply failure attempts rollback in reverse order. An incomplete rollback
+returns failure with instructions to wait/detach as needed and rerun the same
+`rollback --packet ... --packet-sha ... --apply` command. Recovery uses the GO
+captured in `ACTIVATION-START.json`, including after its activation window expires;
+it never opens a second activation attempt. Recovery validates its manifest,
+snippets, saved old launcher, old executables, baseline configuration, poll and
+snapshot rather than disposable build outputs or staged candidate artifacts.
+Activation and verification retain full source/stage/release validation.
+A completed first SQLite snapshot is
+published without replacement and retained across retries. Recovery accepts
+already-dropped triggers and restarts an old unit left inactive after overlay
+removal. Drift causes refusal before removing that overlay. Inspect the private
+state receipts and the reviewed release-specific observation window separately;
+the executor does not infer extra rollback triggers from prose or monitor later
+timer/delivery events.
+
+This slice deliberately preserves legacy drop-ins and refuses a candidate that
+does not sort after the recorded baseline drop-ins. A stable single drop-in with
+reviewed backup/migration, release listing and retention, packet authoring, and a
+real three-unit release by a different operator remain parent-task gates. There
+is no live activation as part of this tooling PR.
+
+## Legacy activation gate
 
 Switching the live units or launchers to a release requires, before the cutover:
 the owner's authorization, a cutover data check on copies (SQLite backup API or

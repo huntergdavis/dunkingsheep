@@ -59,6 +59,7 @@ pub mod report;
 #[rustfmt::skip]
 pub mod registry;
 pub mod release_identity;
+pub mod release_packet;
 pub mod retry;
 pub mod review;
 pub mod roles;

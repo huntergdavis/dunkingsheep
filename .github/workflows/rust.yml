@@ -189,6 +189,8 @@ jobs:
         run: python3 tools/restore_python_oracle.py
       - name: script syntax
         run: sh -n tools/rust_rollout.sh
+      - name: reviewed packet routing (private helper)
+        run: sh tests/test_release_packet_route.sh
       - name: poll-only install and rollback (scratch)
         run: sh packaging/poll-only/test.sh
       - name: rollout unit tests (fake HOME, stub tools)
