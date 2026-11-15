@@ -48,7 +48,8 @@ def api(route):
         value = {'source_filter': 'human_threads', 'include_internal': False, 'view_revision': 0,
                  'next_before': None, 'items': [{'id': 1, 'message_id': 'i1', 'sender': 'Fixture',
                     'role': 'agent', 'body': 'Timestamp fixture', 'created_at': ISO,
-                    'mailbox': 'owner', 'audience': None, 'thread_version': 1, 'parent_id': None,
+                    'mailbox': 'owner', 'audience': None, 'conversation_source': 'human',
+                    'thread_version': 1, 'parent_id': None,
                     'root_id': 'i1', 'conversation_kind': 'human', 'sender_kind': 'agent'}]}
     elif path == '/api/tasks':
         value = {'scope': 'global', 'view': 'active', 'legacy_limited': False,
