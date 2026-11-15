@@ -238,6 +238,29 @@ pub fn allows(
     Ok(false)
 }
 
+/// t4473: does the planner `planner` hold a PROJECT grant whose project is the explicit project
+/// membership of the lane `lane`? Both are bound to their verified process identity. A global
+/// grant does not count here: switching a lane's model restarts it, and only a grant that names
+/// the lane's own project authorises that.
+pub fn project_grant_covers_lane(
+    db: &Connection,
+    planner: (&str, i64, &str),
+    lane: (&str, i64, &str),
+) -> rusqlite::Result<bool> {
+    let project: Option<String> = db
+        .query_row(
+            "SELECT project FROM planner_scope_grants WHERE pane_id=?1 AND pane_pid=?2 AND proc_start=?3 AND scope_kind='project'",
+            params![planner.0, planner.1, planner.2],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(project) = project else {
+        return Ok(false);
+    };
+    let membership = super::lane_project::get(db, lane.0, lane.1, lane.2)?;
+    Ok(membership.is_some_and(|m| m.scope == ProjectScope::Project(project)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,27 +644,4 @@ mod tests {
         revoke_grant(&db, "%2").unwrap();
         assert!(!allows(&db, "%2", 22, "start", "project").unwrap());
     }
-}
-
-/// t4473: does the planner `planner` hold a PROJECT grant whose project is the explicit project
-/// membership of the lane `lane`? Both are bound to their verified process identity. A global
-/// grant does not count here: switching a lane's model restarts it, and only a grant that names
-/// the lane's own project authorises that.
-pub fn project_grant_covers_lane(
-    db: &Connection,
-    planner: (&str, i64, &str),
-    lane: (&str, i64, &str),
-) -> rusqlite::Result<bool> {
-    let project: Option<String> = db
-        .query_row(
-            "SELECT project FROM planner_scope_grants WHERE pane_id=?1 AND pane_pid=?2 AND proc_start=?3 AND scope_kind='project'",
-            params![planner.0, planner.1, planner.2],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(project) = project else {
-        return Ok(false);
-    };
-    let membership = super::lane_project::get(db, lane.0, lane.1, lane.2)?;
-    Ok(membership.is_some_and(|m| m.scope == ProjectScope::Project(project)))
 }
