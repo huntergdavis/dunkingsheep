@@ -6,8 +6,7 @@
 .tasks-view button { cursor: pointer; min-height: 40px; }
 .tasks-view button:disabled { cursor: default; opacity: .55; }
 .tasks-view :focus-visible { outline: 2px solid var(--dash-accent); outline-offset: 3px; }
-.tasks-tabs, .tasks-paging > div { display: flex; gap: 8px; flex-wrap: wrap; }
-.tasks-tabs button[aria-pressed="true"] { border-color: var(--dash-accent); background: var(--dash-panel-2); font-weight: 700; }
+.tasks-paging > div { display: flex; gap: 8px; flex-wrap: wrap; }
 .tasks-metrics { padding: 16px; border: 1px solid var(--dash-border); background: var(--dash-panel); }
 .tasks-metrics h2 { font-size: 1.1rem; }
 .tasks-metrics dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 16px 0; }

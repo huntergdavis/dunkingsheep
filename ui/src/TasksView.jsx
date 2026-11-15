@@ -69,14 +69,18 @@ export default function TasksView({ api }) {
   const [filters, setFilters] = useState({ view: 'active', status: '', priority: '', assignee: '' });
   const [assignee, setAssignee] = useState('');
   const [revision, setRevision] = useState(0);
-  const statuses = filters.view === 'closed' ? ['done', 'cancelled'] : ['open', 'in_progress', 'blocked'];
+  const statuses = ['active', 'open', 'in_progress', 'blocked', 'closed', 'done', 'cancelled'];
   const change = (key, value) => setFilters(previous => ({ ...previous, [key]: value }));
+  const changeStatus = status => setFilters(previous => ({
+    ...previous,
+    view: ['closed', 'done', 'cancelled'].includes(status) ? 'closed' : 'active',
+    status: ['active', 'closed'].includes(status) ? '' : status,
+  }));
   return <div className="tasks-view">
     <header className="tasks-heading"><div><h1>Tasks</h1><p>Current work and closed tasks. Read-only.</p></div><button onClick={() => setRevision(value => value + 1)}>Refresh</button></header>
-    <nav className="tasks-tabs" aria-label="Task views">{[['active', 'Active'], ['closed', 'Closed']].map(([view, label]) => <button key={view} aria-pressed={filters.view === view} onClick={() => setFilters(previous => ({ ...previous, view, status: '' }))}>{label}</button>)}</nav>
     <TaskMetrics api={api} revision={revision} />
     <form className="tasks-filters" onSubmit={event => { event.preventDefault(); change('assignee', assignee.trim()); }}>
-      <label>Status<select aria-label="Status" value={filters.status} onChange={event => change('status', event.target.value)}><option value="">All {filters.view}</option>{statuses.map(status => <option key={status} value={status}>{status.replaceAll('_', ' ')}</option>)}</select></label>
+      <label>Status<select aria-label="Status" value={filters.status || filters.view} onChange={event => changeStatus(event.target.value)}>{statuses.map(status => <option key={status} value={status}>{['active', 'closed'].includes(status) ? `All ${status}` : status.replaceAll('_', ' ')}</option>)}</select></label>
       <label>Priority<select aria-label="Priority" value={filters.priority} onChange={event => change('priority', event.target.value)}><option value="">All priorities</option>{['urgent', 'high', 'medium', 'low'].map(priority => <option key={priority} value={priority}>{priority}</option>)}</select></label>
       <label>Assignee<input aria-label="Assignee" value={assignee} maxLength={256} placeholder="Pane ID, e.g. %311" onChange={event => setAssignee(event.target.value)} /></label><button type="submit">Apply assignee</button>
       {filters.assignee && <button type="button" onClick={() => { setAssignee(''); change('assignee', ''); }}>Clear assignee</button>}

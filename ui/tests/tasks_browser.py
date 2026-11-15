@@ -56,9 +56,17 @@ try:
             page.get_by_role('heading',name='Tasks',exact=True).wait_for()
             page.get_by_text(active[0]['title'],exact=True).wait_for()
             page.get_by_text('Waiting for private fixture approval',exact=True).first.wait_for()
-            assert page.get_by_role('navigation',name='Task views').get_by_role('button').all_text_contents()==['Active','Closed']
+            assert page.get_by_role('button',name=re.compile(r'^(Active|Closed)$')).count()==0
+            status=page.get_by_label('Status',exact=True)
+            expect(status).to_have_value('active')
+            status.select_option('done')
+            page.get_by_text(closed[0]['title'],exact=True).wait_for()
+            status.select_option('cancelled')
+            page.get_by_text(closed[1]['title'],exact=True).wait_for()
+            status.select_option('open')
+            page.get_by_text(active[0]['title'],exact=True).wait_for()
             assert page.get_by_role('button',name='Next page',exact=True).is_disabled()
-            page.get_by_role('button',name='Closed',exact=True).click()
+            page.get_by_label('Status',exact=True).select_option('closed')
             page.get_by_text(closed[0]['title'],exact=True).wait_for()
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'),width
             if os.environ.get('TASKS_SCREENSHOT_DIR'):
@@ -91,7 +99,7 @@ try:
             page.get_by_text('No tasks match these filters.',exact=True).wait_for()
             page.get_by_role('button',name='Clear assignee',exact=True).click()
             page.get_by_label('Priority',exact=True).select_option('')
-            page.get_by_role('button',name='Active',exact=True).click()
+            page.get_by_label('Status',exact=True).select_option('active')
             page.get_by_text(active[0]['title'],exact=True).wait_for()
             legacy=True
             page.get_by_role('button',name='Refresh',exact=True).click()
@@ -102,7 +110,7 @@ try:
                 page.get_by_role('button',name='Refresh',exact=True).click()
             page.get_by_text('Loading tasks…',exact=True).wait_for()
             assert pending
-            page.get_by_role('button',name='Closed',exact=True).click()
+            page.get_by_label('Status',exact=True).select_option('closed')
             page.get_by_text(closed[0]['title'],exact=True).wait_for()
             for route in pending:
                 try: fulfill(route,{'scope':'global','view':'active','tasks':active,'total':17,'next_cursor':None,'checked_at':now,'legacy_limited':False})
