@@ -25,6 +25,20 @@ if [[ -n ${DS_CARGO_TMPDIR:-} ]]; then
         echo "ds-cargo: DS_CARGO_TMPDIR must be an absolute path, not $scratch" >&2
         exit 2
     fi
+    if [[ ${scratch%/} == /tmp || $scratch == /tmp/* ]]; then
+        echo "ds-cargo: DS_CARGO_TMPDIR may not be under /tmp (the small shared tmpfs): $scratch" >&2
+        exit 2
+    fi
+    # On the workspace disk (~/workspace) or under a root named in DS_CARGO_TMP_ROOTS (colon list).
+    allowed=0
+    IFS=: read -r -a roots <<< "${HOME:?HOME is not set}/workspace${DS_CARGO_TMP_ROOTS:+:$DS_CARGO_TMP_ROOTS}"
+    for root in "${roots[@]}"; do
+        [[ -n $root && ( $scratch == "${root%/}" || $scratch == "${root%/}"/* ) ]] && allowed=1
+    done
+    if (( ! allowed )); then
+        echo "ds-cargo: DS_CARGO_TMPDIR must be under ~/workspace or a root in DS_CARGO_TMP_ROOTS: $scratch" >&2
+        exit 2
+    fi
 elif top=$(git rev-parse --show-toplevel 2>/dev/null); then
     key=$(printf '%s' "$top" | sha256sum | cut -c1-8)
     scratch=${HOME:?HOME is not set}/workspace/.dunk-scratch/c/$key
