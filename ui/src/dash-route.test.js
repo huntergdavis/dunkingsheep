@@ -52,7 +52,8 @@ test('an unregistered dashboard is reported unknown, not silently replaced', () 
 test('main.jsx routes through this module and the brand link opens the landing view', () => {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const src = readFileSync(path.join(here, 'main.jsx'), 'utf8');
-  assert.match(src, /className="dash-nav-brand" href=\{DASH_HOME\}/);
+  const shell = readFileSync(path.join(here, 'DeskShared.jsx'), 'utf8');
+  assert.match(shell, /className="dash-nav-brand" href=\{DASH_HOME\}/);
   assert.match(src, /viewForPath\(/);
   assert.doesNotMatch(src, /const DASH_ROUTES = \{/);
   assert.doesNotMatch(src, /: 'cos'\}? known=/);
