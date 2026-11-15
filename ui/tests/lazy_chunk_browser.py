@@ -43,6 +43,15 @@ try:
         for chunk in ('ProjectsView', 'ProjectTerminal'):
             page = browser.new_page()
             page.route('**/api/**', api)
+            connections = []
+
+            def websocket(ws):
+                connections.append(ws)
+                ws.send(b'RECOVERED\r\n')
+                ws.on_message(lambda data: None)
+
+            # Install the synthetic transport before navigation, including reload.
+            page.route_web_socket('**/api/terminals/*/stream**', websocket)
             pattern = re.compile(r'/assets/' + chunk + r'-[^/]+\.js$')
             failures = []
 
@@ -70,10 +79,10 @@ try:
             assert urlsplit(page.url).path == '/dash/projects'
             assert page.get_by_role('alert').count() == 0
             if chunk == 'ProjectTerminal':
-                page.route_web_socket('**/api/terminals/*/stream**', lambda ws: ws.send(b'RECOVERED\r\n'))
                 page.get_by_role('button', name='Open terminal').click()
                 page.get_by_text('Connected', exact=True).wait_for()
                 page.get_by_text('RECOVERED', exact=False).first.wait_for()
+                assert len(connections) == 1, len(connections)
             page.close()
         browser.close()
 finally:
