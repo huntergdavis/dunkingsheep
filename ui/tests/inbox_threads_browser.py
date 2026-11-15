@@ -45,7 +45,8 @@ try:
    page=browser.new_page(viewport={'width':width,'height':900});errors=[];page.on('pageerror',lambda e:errors.append(str(e)));page.route('**/api/**',mock)
    page.goto(base+'/dash/cos',wait_until='domcontentloaded')
    reader=page.get_by_role('article',name='Selected conversation');reader.get_by_role('heading',name='Conversation i1',exact=True).wait_for()
-   for body in ('ROOT QUESTION','LANE ANSWER','HUMAN FOLLOW UP'):assert reader.get_by_text(body,exact=True).count()==1
+   for body in ('ROOT QUESTION','LANE ANSWER','HUMAN FOLLOW UP'):
+    reader.get_by_text(body,exact=True).wait_for();assert reader.get_by_text(body,exact=True).count()==1
    assert reader.locator('p').filter(has_text=__import__('re').compile('^Reply to i2$')).count()==1
    form=page.get_by_role('form',name='Reply to message');text=form.get_by_role('textbox',name='Reply message');send=form.get_by_role('button',name='Send reply',exact=True)
    text.fill('KEPT REPLY DRAFT');send.click();form.get_by_role('alert').filter(has_text='Synthetic refused reply').wait_for();assert text.input_value()=='KEPT REPLY DRAFT'
@@ -59,11 +60,11 @@ try:
    vp.append({**row(13,'SYSTEM ALERT EVENT',kind='vp',root=13,sender='system'),'audience':'agent','kind_labels':['System','Alert','Agent-only']})
    nav=page.get_by_role('navigation',name='Inbox views');nav.get_by_role('button',name='VP',exact=True).click();nav.get_by_role('button',name='Your inbox',exact=True).click()
    reader=page.get_by_role('article',name='Selected conversation');reader.get_by_role('heading',name='Conversation i10',exact=True).wait_for()
-   assert reader.get_by_text('VP FOLLOW UP',exact=True).count()==1
+   reader.get_by_text('VP FOLLOW UP',exact=True).wait_for();assert reader.get_by_text('VP FOLLOW UP',exact=True).count()==1
    assert reader.get_by_text('VP ROOT',exact=True).count()==0
    reader.get_by_role('button',name='Open VP thread i10',exact=True).click()
    page.get_by_role('heading',name='Conversation i10',exact=True).wait_for()
-   assert reader.get_by_text('VP ROOT',exact=True).count()==1
+   reader.get_by_text('VP ROOT',exact=True).wait_for();assert reader.get_by_text('VP ROOT',exact=True).count()==1
    page.locator('.owner-inbox-row').filter(has_text='SYSTEM ALERT EVENT').click()
    reader.get_by_text('System · Agent-only · Alert',exact=True).first.wait_for()
    page.locator('.owner-inbox-row').filter(has_text='VP FOLLOW UP').click()
