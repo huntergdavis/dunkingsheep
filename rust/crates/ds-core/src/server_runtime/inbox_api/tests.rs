@@ -2311,3 +2311,98 @@ fn threaded_lane_read_then_reply_records_explicit_handling() {
         true
     );
 }
+
+#[test]
+fn authenticated_turn_result_offers_own_mail_without_a_terminal_send() {
+    use std::sync::Mutex;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let captures = events.clone();
+    let terminal_factory: LoopTerminalFactory = Arc::new(move || {
+        let mut terminal = FakeTerminal::new();
+        terminal.panes = vec![crate::terminal::Pane {
+            pane_id: "w1:p1".into(),
+            pane_pid: Some(std::process::id() as i64),
+            ..Default::default()
+        }];
+        terminal.raw_events = captures.clone();
+        Box::new(terminal)
+    });
+    let (_dir, services) = make_services("hook-mail-api", terminal_factory, None);
+    let flock = services.flock();
+    let store = flock.stores().inbox.unwrap();
+    let id = store
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: "w1:p1",
+            body: Some("private own mail"),
+            ..Default::default()
+        })
+        .unwrap();
+    store
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: "w2:p2",
+            body: Some("private foreign mail"),
+            ..Default::default()
+        })
+        .unwrap();
+    let mut notice = crate::flock::sends::Message::new(
+        "m-private-hook",
+        "w1:p1",
+        "private",
+        "[inbox] private notice",
+        "inbox",
+    );
+    notice.is_notice = true;
+    notice.notify_for = vec![id.clone()];
+    flock
+        .outbox
+        .lock()
+        .unwrap()
+        .insert("w1:p1".into(), vec![notice]);
+    let mut handlers = handlers();
+    handlers.register_status_whoami_turn_start();
+    handlers.register_turn_end_poll_roster();
+    let dispatcher = services.dispatcher(handlers);
+    let pid = std::process::id() as i64;
+    let caller = RequestCtx {
+        caller: Some(crate::proc::Caller::new(
+            Some(pid),
+            crate::proc::process_start(pid),
+            Some("codex".into()),
+            Some("w1:p1".into()),
+            "agent",
+        )),
+        self_pane_id: Some("w1:p1".into()),
+        socket_peer: Some(true),
+        socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
+        ..Default::default()
+    };
+    let started = dispatcher
+        .dispatch(
+            "turn_start",
+            &json!({"source":"codex-hook-mail-v1"}),
+            &caller,
+        )
+        .unwrap();
+    assert_eq!(started["mail_notice"]["unread"], 1);
+    assert_eq!(started["mail_notice"]["action"], "offer");
+    assert!(dispatcher
+        .dispatch(
+            "turn_start",
+            &json!({"pane":"w2:p2","source":"codex-hook-mail-v1"}),
+            &caller
+        )
+        .is_err());
+    let ended = dispatcher
+        .dispatch("turn_end", &json!({"turn_id":started["turn_id"]}), &caller)
+        .unwrap();
+    assert_eq!(ended["mail_notice"]["offers"], 2);
+    assert_eq!(store.get_message(&id).unwrap().summary.state, "queued");
+    assert!(crate::inbox::pending_delivery(store.read_pool(), "w1:p1")
+        .unwrap()
+        .is_none());
+    assert!(!events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|event: &serde_json::Value| event[0] == "typed"));
+}

@@ -105,3 +105,51 @@ fn python_flock_blocks_native_producer() {
     assert!(blocked, "native hook ignored Python flock");
     assert!(path.join("calls").exists());
 }
+
+#[test]
+fn mail_offer_is_hook_context_and_stop_continuation_without_terminal_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+    let cli = path.join("fake-cli");
+    fs::write(&cli, r##"#!/bin/sh
+case "$3" in
+start) printf '%s\n' "$*" >> "$CALLS"; echo '{"turn_id":"token-1","pane_id":"%private","mail_notice":{"action":"offer","text":"[inbox] You have 2 unread messages. Read with: dunkingsheep inbox read"}}' ;;
+end) echo '{"ended":true,"mail_notice":{"action":"offer","text":"[inbox] You have 2 unread messages. Read with: dunkingsheep inbox read"}}' ;;
+esac
+"##).unwrap();
+    fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+    let event = path.join("event.json");
+    fs::write(
+        &event,
+        serde_json::json!({"session_id":"mail-session","turn_id":"mail-turn","cwd":path})
+            .to_string(),
+    )
+    .unwrap();
+    let output=Command::new("/bin/bash").args(["-c","exec -a codex /bin/bash -c '\"$HOOK\" start < \"$EVENT\"; \"$HOOK\" end < \"$EVENT\"; \"$HOOK\" end < \"$EVENT\"'"])
+        .env("HOOK",env!("CARGO_BIN_EXE_dunk-codex-turn")).env("EVENT",&event).env("DUNKINGSHEEP_BIN",&cli)
+        .env("DUNKINGSHEEP_CODEX_STATE_DIR",path.join("state")).env("DUNKINGSHEEP_CODEX_END_WAIT_S","0").env("CALLS",path.join("calls")).output().unwrap();
+    assert!(output.status.success());
+    let rows: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        rows.len(),
+        2,
+        "duplicate stop cannot offer or continue again"
+    );
+    assert_eq!(
+        rows[0]["hookSpecificOutput"]["hookEventName"],
+        "UserPromptSubmit"
+    );
+    assert!(rows[0]["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("2 unread"));
+    assert_eq!(rows[1]["decision"], "block");
+    assert!(rows[1]["reason"].as_str().unwrap().contains("inbox read"));
+    assert!(fs::read_to_string(path.join("calls"))
+        .unwrap()
+        .contains("--source codex-hook-mail-v1"));
+}

@@ -7316,3 +7316,6 @@ fn the_long_ladder_presses_once_more_for_our_collapsed_paste_and_records_it() {
         pane.submit_metrics.last()
     );
 }
+
+#[cfg(test)]
+mod hook_mail_notice;

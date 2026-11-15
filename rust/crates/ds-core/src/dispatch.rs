@@ -496,6 +496,7 @@ pub fn next_job_plan(input: &NextJob<'_>) -> Value {
         return plan;
     };
     if unread != 0 {
+        plan["action"] = json!("mail");
         plan["reason"] = json!("unread_mail");
         return plan;
     }
