@@ -220,10 +220,43 @@ pub const LAUNCH_IDENTITY_KEYS: [&str; 6] = [
 /// `process_pid` and `process_start` name the started process (its pid and kernel start time,
 /// both or neither), so a reader can tell whether the record still describes what runs in the
 /// pane. A value that is not known is null, which `record_launch` does not store.
+/// The program a launch argv really runs: past `env` (its options and `VAR=value` assignments)
+/// and the plain wrappers `nice`, `nohup` and `setsid`. t3912 starts lanes as
+/// `env TMPDIR=<dir> <program> ...`, so the first word is not the agent.
+pub fn launched_program(argv: &[String]) -> Option<&str> {
+    let mut index = 0;
+    while let Some(token) = argv.get(index) {
+        let program = token.rsplit('/').next().unwrap_or(token);
+        match program {
+            "env" => {
+                index += 1;
+                while let Some(next) = argv.get(index) {
+                    if next.starts_with('-') || (next.contains('=') && !next.starts_with('=')) {
+                        index += if matches!(next.as_str(), "-u" | "--unset" | "-C" | "--chdir") {
+                            2
+                        } else {
+                            1
+                        };
+                    } else {
+                        break;
+                    }
+                }
+            }
+            "nice" | "nohup" | "setsid" => {
+                index += 1;
+                while let Some(next) = argv.get(index).filter(|next| next.starts_with('-')) {
+                    index += if next == "-n" { 2 } else { 1 };
+                }
+            }
+            _ => return Some(program),
+        }
+    }
+    None
+}
+
 pub fn launch_identity(argv: &[String], process: Option<i64>) -> Vec<(&'static str, Value)> {
-    let kind = argv
-        .first()
-        .map(|exe| exe.rsplit('/').next().unwrap_or(exe).to_lowercase())
+    let kind = launched_program(argv)
+        .map(str::to_lowercase)
         .filter(|kind| crate::state::AGENT_EXES.contains(&kind.as_str()));
     let flag = |names: &[&str]| {
         crate::state::flag(argv, names)
@@ -1052,3 +1085,29 @@ pub mod respawn;
 pub mod switch_model;
 
 pub mod context_mutations;
+
+#[cfg(test)]
+mod launched_program_tests {
+    use super::{launch_identity, launched_program};
+
+    #[test]
+    fn the_real_program_is_found_past_env_and_wrappers() {
+        let v = |a: &[&str]| a.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+        assert_eq!(launched_program(&v(&["codex", "-m", "x"])), Some("codex"));
+        assert_eq!(launched_program(&v(&["/usr/bin/claude"])), Some("claude"));
+        assert_eq!(
+            launched_program(&v(&["env", "TMPDIR=/s/x", "codex", "--no-daemon"])),
+            Some("codex")
+        );
+        assert_eq!(
+            launched_program(&v(&["env", "-u", "X", "A=b", "nice", "-n", "5", "pi"])),
+            Some("pi")
+        );
+        assert_eq!(launched_program(&v(&["env", "A=b"])), None);
+        assert_eq!(launched_program(&[]), None);
+        // The launch record's provider is the real program, not 'env'.
+        let identity = launch_identity(&v(&["env", "TMPDIR=/s/x", "codex", "--model", "m"]), None);
+        assert_eq!(identity[0], ("provider", serde_json::json!("codex")));
+        assert_eq!(identity[1], ("model", serde_json::json!("m")));
+    }
+}

@@ -281,7 +281,7 @@ steps are in the t3229 task notes. These scripts only prepare the artifacts.
 ## Desk/daemon switch checklist
 
 - [ ] Confirm whether the deployed health implementation includes PR 976 (t3912).
-- [ ] Once PR 976 is deployed: health unit exit 2 on a disk-only problem (root >= 85% until < 80%) is an OBSERVATION, never a rollback trigger.
+- [ ] Once PR 976 is deployed: health unit exit 2 on a disk-only problem (root >= 85% until < 80%, or since t3912 slice 1 /tmp >= 85% of blocks or inodes until < 80%) is an OBSERVATION, never a rollback trigger.
 
 Confirm that the health report identifies only the root-disk condition before
 applying this exception, and record the observation in the postcheck evidence.

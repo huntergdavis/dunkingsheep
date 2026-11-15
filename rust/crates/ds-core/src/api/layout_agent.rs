@@ -125,6 +125,104 @@ pub fn worker_codex_argv(
     )
 }
 
+/// t3912 slice 2: where a new lane's temporary files go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaneScratch {
+    /// The caller's command already sets TMPDIR (`env TMPDIR=...`): recorded, not changed.
+    Explicit(String),
+    /// The owner or the VP seat: never given a scratch directory by default.
+    Skip,
+    /// Give it `~/workspace/.dunk-scratch/<name>-<suffix>`.
+    Default,
+}
+
+/// What start-agent does about TMPDIR for this argv and role.
+pub fn lane_scratch(argv: &[String], role: Option<&str>) -> LaneScratch {
+    if let Some(value) = argv
+        .iter()
+        .skip_while(|token| token.rsplit('/').next() != Some("env"))
+        .skip(1)
+        .take_while(|token| token.contains('=') || token.starts_with('-'))
+        .find_map(|token| token.strip_prefix("TMPDIR="))
+    {
+        return LaneScratch::Explicit(value.to_string());
+    }
+    match role.map(|role| role.trim().to_ascii_lowercase()).as_deref() {
+        Some("owner" | "vp") => LaneScratch::Skip,
+        _ => LaneScratch::Default,
+    }
+}
+
+/// A file-name-safe form of an agent name: letters, digits, `-` and `_`, at most 40.
+fn scratch_stem(name: &str) -> String {
+    let stem: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(40)
+        .collect();
+    let stem = stem.trim_matches('-');
+    if stem.is_empty() {
+        "lane".into()
+    } else {
+        stem.to_string()
+    }
+}
+
+/// Create `<home>/workspace/.dunk-scratch/<name>-<6 hex>`, mode 0700, never reusing one that
+/// exists. The parent is created 0700 too.
+pub fn make_lane_scratch(
+    home: &std::path::Path,
+    name: &str,
+) -> std::io::Result<std::path::PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let base = home.join("workspace").join(".dunk-scratch");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&base)?;
+    let stem = scratch_stem(name);
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64
+        ^ (u64::from(std::process::id()) << 32);
+    for attempt in 0..16u64 {
+        let suffix = format!(
+            "{:06x}",
+            (seed
+                .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                .wrapping_add(attempt))
+                & 0xff_ffff
+        );
+        let dir = base.join(format!("{stem}-{suffix}"));
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => {
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+                return Ok(dir);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "no free scratch directory name",
+    ))
+}
+
+/// `env TMPDIR=<dir>` before the command.
+pub fn with_tmpdir(argv: &[String], dir: &std::path::Path) -> Vec<String> {
+    let mut launched = vec!["env".to_string(), format!("TMPDIR={}", dir.display())];
+    launched.extend(argv.iter().cloned());
+    launched
+}
+
 pub fn h_start_agent(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let name = required(&args, "name")?;
     let command = required(&args, "command")?;
@@ -175,10 +273,25 @@ pub fn h_start_agent(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         let split=arg(&args,"split");
         if truthy(split) && split!= "right" && split!= "down" { return Err(DunkError::Refused("split must be 'right' or 'down'".into())); }
         let cwd=arg(&args,"cwd");
+        // t3912 slice 2: a new lane's temporary files go to its own directory on the workspace
+        // disk, not to the small shared /tmp.
+        let (argv, tmpdir, tmpdir_source) = match lane_scratch(&argv, role_arg.as_str().filter(|_| truthy(role_arg))) {
+            LaneScratch::Explicit(dir) => (argv.clone(), Some(dir), Some("explicit")),
+            LaneScratch::Skip => (argv.clone(), None, None),
+            LaneScratch::Default => {
+                let home = std::path::PathBuf::from(env.get("HOME").unwrap_or(""));
+                if home.as_os_str().is_empty() {
+                    (argv.clone(), None, None)
+                } else {
+                    let dir = make_lane_scratch(&home, &name).map_err(|error| DunkError::Refused(format!("could not create the lane's scratch directory: {error}")))?;
+                    (with_tmpdir(&argv, &dir), Some(dir.display().to_string()), Some("start-agent default"))
+                }
+            }
+        };
         let started=result(backend.start_agent_raw(&name,&argv,workspace_id.as_deref(),tab_id.as_deref(),optional(split).as_deref(),optional(cwd).as_deref(),python_bool_arg(&args,"focus",false)),&format!("the terminal backend could not start agent {}",super::python_value_repr(&json!(name))))?;
         let agent=started.get("agent").filter(|v|truthy(v)).cloned().unwrap_or_else(||json!({}));
         let pane_id=optional(&agent["pane_id"]);
-        let kind=argv[0].rsplit('/').next().unwrap_or("");
+        let kind=crate::flock::launched_program(&argv).unwrap_or("");
         let child_pid=agent_verify::verify_agent_started(verifier,&name,pane_id.as_deref(),Some(kind),verify_s)?;
         if let Some(id)=pane_id.as_deref() {
             let session=agent.get("agent_session").filter(|v|truthy(v)).cloned().unwrap_or_else(||json!({}));
@@ -189,6 +302,8 @@ pub fn h_start_agent(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
             ];
             // t4473: what was launched and which process it is.
             fields.extend(crate::flock::launch_identity(&argv,child_pid));
+            fields.push(("tmpdir",tmpdir.clone().map_or(Value::Null,Value::String)));
+            fields.push(("tmpdir_source",tmpdir_source.map_or(Value::Null,|source| json!(source))));
             context.flock.record_launch(id,&fields);
         }
         let mut role=Value::Null;
@@ -313,6 +428,70 @@ pub(super) fn split_command(text: &str) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_lane_gets_its_own_scratch_unless_it_sets_tmpdir_or_is_the_owner_or_vp() {
+        let v = |a: &[&str]| a.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            super::lane_scratch(&v(&["codex"]), Some("worker")),
+            super::LaneScratch::Default
+        );
+        assert_eq!(
+            super::lane_scratch(&v(&["claude"]), None),
+            super::LaneScratch::Default
+        );
+        for role in ["owner", " VP "] {
+            assert_eq!(
+                super::lane_scratch(&v(&["codex"]), Some(role)),
+                super::LaneScratch::Skip,
+                "{role}"
+            );
+        }
+        assert_eq!(
+            super::lane_scratch(
+                &v(&["env", "CODEX_HOME=/h", "TMPDIR=/mine", "codex"]),
+                Some("owner")
+            ),
+            super::LaneScratch::Explicit("/mine".into()),
+            "an explicit TMPDIR wins, and is only recorded"
+        );
+        // TMPDIR as an argument of the agent itself is not an environment setting.
+        assert_eq!(
+            super::lane_scratch(&v(&["codex", "TMPDIR=/x"]), None),
+            super::LaneScratch::Default
+        );
+    }
+
+    #[test]
+    fn the_lane_scratch_directory_is_private_unique_and_prefixed_with_env() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let first = super::make_lane_scratch(home.path(), "ds writer/../x").unwrap();
+        let second = super::make_lane_scratch(home.path(), "ds writer/../x").unwrap();
+        assert_ne!(first, second);
+        for dir in [&first, &second] {
+            assert_eq!(
+                dir.parent().unwrap(),
+                home.path().join("workspace/.dunk-scratch")
+            );
+            let name = dir.file_name().unwrap().to_str().unwrap();
+            assert!(name.starts_with("ds-writer----x-"), "{name}");
+            assert_eq!(
+                std::fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        let mode = std::fs::metadata(home.path().join("workspace/.dunk-scratch"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0, "the parent is private too");
+        let v = |a: &[&str]| a.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+        let launched = super::with_tmpdir(&v(&["codex", "--no-daemon"]), &first);
+        assert_eq!(launched[0], "env");
+        assert_eq!(launched[1], format!("TMPDIR={}", first.display()));
+        assert_eq!(crate::flock::launched_program(&launched), Some("codex"));
+    }
 
     #[test]
     fn worker_and_reviewer_codex_get_no_daemon_and_nobody_else_does() {
