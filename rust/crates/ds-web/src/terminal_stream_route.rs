@@ -810,7 +810,9 @@ async fn run(
     let mut deadline = Instant::now() + Duration::from_secs(5);
     let mut queue: VecDeque<u8> = VecDeque::new();
     let mut control_queue: VecDeque<Vec<u8>> = VecDeque::new();
-    let mut buf = [0u8; 8192];
+    // A read returns as soon as any bytes are available; this is a capacity,
+    // not a fill target. Small echoes never wait for the rest of the batch.
+    let mut buf = [0u8; 32 * 1024];
     let close_reason = 'stream: loop {
         tokio::select! {
             _ = tick.tick() => {
@@ -834,7 +836,7 @@ async fn run(
                 let Ok(n) = read else { break 'stream "tmux_read_failed" }; if n == 0 { break 'stream "tmux_eof"; }
                 let Ok(batch) = lines.push(&buf[..n]) else { break 'stream "tmux_line_invalid" };
                 // ControlLines bounds each partial line; this read is at most
-                // 8192 bytes. A byte-bounded batch can legitimately contain many
+                // 32 KiB. A byte-bounded batch can legitimately contain many
                 // short output notifications, especially while typing quickly.
                 control_queue.extend(batch);
             }
