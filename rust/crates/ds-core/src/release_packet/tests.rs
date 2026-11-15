@@ -326,6 +326,7 @@ fn inconsistent_recovery_inputs_are_refused_before_host_commands() {
         } else {
             manifest["rollback_triggers"] = json!(["unrelated_trigger"]);
         }
+        fs::remove_file(&path).unwrap();
         put(&path, &serde_json::to_vec(&manifest).unwrap(), 0o444);
         let sums = f.root.join("SHA256SUMS");
         let rewritten = fs::read_to_string(&sums)
@@ -339,6 +340,7 @@ fn inconsistent_recovery_inputs_are_refused_before_host_commands() {
                 }
             })
             .collect::<String>();
+        fs::remove_file(&sums).unwrap();
         put(&sums, rewritten.as_bytes(), 0o444);
         f.digest = hash(&sums).unwrap();
         let error = f.run("activate", true).unwrap_err();
