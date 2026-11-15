@@ -3284,6 +3284,50 @@
  },
  {
   "argv": [
+   "inbox",
+   "retire"
+  ],
+  "namespace": {
+   "command": "inbox",
+   "inbox_command": "retire",
+   "json": false,
+   "no_start_daemon": false,
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "inbox",
+   "retire",
+   "--json"
+  ],
+  "namespace": {
+   "command": "inbox",
+   "inbox_command": "retire",
+   "json": true,
+   "no_start_daemon": false,
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "--json",
+   "inbox",
+   "retire"
+  ],
+  "namespace": {
+   "command": "inbox",
+   "inbox_command": "retire",
+   "json": true,
+   "no_start_daemon": false,
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
    "context",
    "init"
   ],

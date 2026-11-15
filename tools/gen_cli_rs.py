@@ -76,6 +76,9 @@ def load_parser():
     queue.add_argument("queue_id", type=int)
     queue.add_argument("--path", required=True, help="exact source path")
     queue.add_argument("--reason", required=True)
+    # t5014: the mailbox retirement dry run is Rust-only.
+    inbox_actions = next(a for a in root.choices["inbox"]._actions if isinstance(a, argparse._SubParsersAction))
+    inbox_actions.add_parser("retire", help="dry run: which mailboxes could be retired, and why the others stay (read-only)")
     # t4648: the backlog query is Rust-only; the Python CLI had no project mapping to count by.
     task = root.choices["task"]
     task_actions = next(a for a in task._actions if isinstance(a, argparse._SubParsersAction))

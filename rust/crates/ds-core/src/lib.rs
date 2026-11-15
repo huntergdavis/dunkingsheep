@@ -33,6 +33,7 @@ pub mod health;
 pub mod help;
 pub mod http;
 pub mod inbox;
+pub mod inbox_retire;
 pub mod inbox_store;
 pub mod load;
 pub mod lock;

@@ -31,6 +31,7 @@ use crate::inbox::{
     RETENTION_S, SCHEMA, STATES,
 };
 
+pub mod mailbox_status;
 pub(crate) mod pr_wait;
 mod retired;
 pub use retired::RetiredArchiveOptions;
@@ -212,6 +213,9 @@ impl Store {
                 .map_err(|e| captured.sqlite(e, &db_path, "inbox_schema"))?;
             connection.execute_batch(pr_wait::SCHEMA).map_err(map_sqlite)?;
             connection.execute_batch(threads::SCHEMA).map_err(map_sqlite)?;
+            connection
+                .execute_batch(mailbox_status::SCHEMA)
+                .map_err(map_sqlite)?;
             Ok(())
         })?;
         let readers = ReadPool::open_context(path, DEFAULT_READ_POOL, context)?;
@@ -556,6 +560,7 @@ impl Store {
                     ],
                 )
                 .map_err(map_sqlite)?;
+            mailbox_status::reopen_on_mail(&transaction, &mailbox, created)?;
             if agent_only {
                 transaction
                     .execute(
@@ -656,6 +661,7 @@ impl Store {
                     ],
                 )
                 .map_err(map_sqlite)?;
+            mailbox_status::reopen_on_mail(&transaction, &mailbox, created)?;
             for (index, blob) in stored.iter().enumerate() {
                 transaction
                     .execute(
@@ -868,6 +874,7 @@ impl Store {
                     .map_err(map_sqlite)?;
                 id
             };
+            mailbox_status::reopen_on_mail(&transaction, &mailbox, now)?;
             if agent_only {
                 transaction
                     .execute(

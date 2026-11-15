@@ -628,12 +628,15 @@ pub struct MailboxStats {
     pub oldest_unread_s: Option<i64>,
 }
 
+/// Per-mailbox counts for live views. A retired mailbox (t5014) is left out; its mail is
+/// still stored and searchable, and new mail reopens it.
 pub fn stats(pool: &ReadPool, now: f64) -> Result<Vec<MailboxStats>, DunkError> {
     let sql = "SELECT mailbox, mailbox_label, COUNT(*) AS total, \
                SUM(state = 'queued') AS unread, SUM(state = 'archived') AS archived, \
                SUM(state = 'undeliverable') AS undeliverable, \
                MIN(CASE WHEN state = 'queued' THEN created_at END) AS oldest \
                FROM messages WHERE state != 'cancelled' \
+               AND mailbox NOT IN (SELECT mailbox FROM mailbox_status WHERE status = 'retired') \
                GROUP BY mailbox ORDER BY unread DESC, mailbox";
     pool.with(|connection: &Connection| {
         let mut statement = connection.prepare(sql).map_err(map_sqlite)?;

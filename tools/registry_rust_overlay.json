@@ -1189,6 +1189,19 @@
    "roles": [
     "system"
    ]
+  },
+  "inbox_retire": {
+   "new": true,
+   "description": "Mailbox retirement dry run (read-only): every mailbox with its class (active, human, vp, ambiguous, retired) and why. 'retired' lists the candidates: no live pane or registry entry, nothing unread or waiting, no mail for 14 days. Nothing is changed.",
+   "params": [],
+   "required": [],
+   "mcp_required": [],
+   "mcp": false,
+   "owner_only": true,
+   "roles": [
+    "owner"
+   ],
+   "after": "inbox_stats"
   }
  },
  "groups": {

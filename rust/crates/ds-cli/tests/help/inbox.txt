@@ -18,6 +18,8 @@ positional arguments:
     delete      delete messages and their attachments
     stats       unread counts for every mailbox
     fetch       write an attachment to a local directory
+    retire      dry run: which mailboxes could be retired, and why the others
+                stay (read-only)
 
 options:
   -h, --help    show this help message and exit
