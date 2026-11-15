@@ -19,6 +19,16 @@ select-pane) if [ "$4" = '-T' ]; then printf '%s' "$5" > title; fi ;;
 esac
 "#.replace("__SEP__", crate::terminal::parse::pane_separator())).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // t4724: a freshly written script can fail to exec with ETXTBSY while a parallel test's fork
+    // still holds the write descriptor. `list_panes` reads a failed tmux call as "no panes", so
+    // the split case then failed with "tab @1 has no pane to split". One no-op run (no subcommand
+    // matches) waits out only that error, as the respawn fixtures do (t3579). It leaves a line in
+    // `calls`, which is removed so the assertions see only the backend's calls.
+    crate::testsupport::exec_retrying_busy(|| {
+        std::process::Command::new(&script).arg("warm-up").status()
+    })
+    .expect("settle the fake tmux");
+    std::fs::remove_file(dir.path().join("calls")).unwrap();
     let backend = TmuxBackend::with_registry(script, dir.path().join("registry.json"));
     (dir, backend)
 }
