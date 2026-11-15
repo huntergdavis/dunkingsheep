@@ -216,7 +216,39 @@ pub fn h_poll(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
 
 /// `dunk_api.h_roster`.
 pub fn h_roster(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
-    let mut result = crate::flock::roster::roster(context.env.roster_env()?, context.env.now_s())
+    // t4706: the raw roster is reused for up to 5 s while the panes, the lane and role registries
+    // and the launch records are unchanged; the caller's own filter is applied after, per call.
+    let now = context.env.now_s();
+    let panes: Vec<(String, Option<i64>, String, String)> = match context.env.terminal().lock() {
+        Ok(terminal) => terminal
+            .list_panes()
+            .into_iter()
+            .map(|pane| (pane.pane_id, pane.pane_pid, pane.command, pane.label))
+            .collect(),
+        // Without a pane table the key cannot be trusted: build fresh.
+        Err(_) => vec![(
+            "unreadable".into(),
+            Some(now.to_bits() as i64),
+            String::new(),
+            String::new(),
+        )],
+    };
+    let roles_path = context
+        .flock
+        .with_roles(|roles, _| Ok(roles.path.clone()))
+        .ok();
+    let key = crate::flock::roster_cache::key(
+        &panes,
+        &context.flock.lane_registry_path,
+        roles_path.as_deref(),
+        &context.flock.launches_fingerprint(),
+    );
+    let mut result = context
+        .flock
+        .roster_cache
+        .get_or_build(key, now, || {
+            crate::flock::roster::roster(context.env.roster_env().map_err(|e| e.to_string())?, now)
+        })
         .map_err(DunkError::Refused)?;
     filter_project(&mut result, args.get("project"))?;
     Ok(result)

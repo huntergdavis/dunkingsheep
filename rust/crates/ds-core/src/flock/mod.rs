@@ -117,6 +117,8 @@ type LaunchMap =
 /// The flock. Slice 1 holds launch memory, the lane registry path and caller state.
 #[derive(Debug)]
 pub struct Flock {
+    /// t4706: the last raw roster and what it was built from.
+    pub(crate) roster_cache: roster_cache::RosterCache,
     pub launches_file: PathBuf,
     pub lane_registry_path: PathBuf,
     pub persist_enabled: bool,
@@ -287,12 +289,19 @@ pub fn launch_identity(argv: &[String], process: Option<i64>) -> Vec<(&'static s
 
 impl Flock {
     /// `Flock.__init__` (the launches part): `_load_launches` runs when persisting.
+    /// t4706: the launch records as text, for the roster cache's key.
+    pub fn launches_fingerprint(&self) -> String {
+        let launches = self.launches.lock().expect("launches lock");
+        serde_json::to_string(&*launches).unwrap_or_default()
+    }
+
     pub fn new(
         launches_file: impl Into<PathBuf>,
         lane_registry_path: impl Into<PathBuf>,
         persist: bool,
     ) -> Flock {
         let flock = Flock {
+            roster_cache: roster_cache::RosterCache::default(),
             review_sweep: Mutex::new(()),
             launches_file: launches_file.into(),
             lane_registry_path: lane_registry_path.into(),
@@ -1038,6 +1047,7 @@ pub mod retire;
 mod retired;
 pub mod roles_gate;
 pub mod roster;
+pub mod roster_cache;
 pub mod send_keys;
 pub mod sends;
 pub mod status;
