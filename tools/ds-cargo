@@ -25,15 +25,27 @@ if [[ -n ${DS_CARGO_TMPDIR:-} ]]; then
         echo "ds-cargo: DS_CARGO_TMPDIR must be an absolute path, not $scratch" >&2
         exit 2
     fi
-    if [[ ${scratch%/} == /tmp || $scratch == /tmp/* ]]; then
+    # A plain path only: no '.' or '..' component and no '//', so the checks below read what is
+    # really meant (review t5290: '~/workspace/../../../tmp/x' and '//tmp/x' got through).
+    if [[ $scratch == *//* || /$scratch/ == */./* || /$scratch/ == */../* ]]; then
+        echo "ds-cargo: DS_CARGO_TMPDIR must be a plain absolute path without '.', '..' or '//': $scratch" >&2
+        exit 2
+    fi
+    # Compared resolved (symbolic links followed), so a link cannot lead back into /tmp.
+    resolved=$(realpath -m -- "$scratch")
+    if [[ $resolved == /tmp || $resolved == /tmp/* ]]; then
         echo "ds-cargo: DS_CARGO_TMPDIR may not be under /tmp (the small shared tmpfs): $scratch" >&2
         exit 2
     fi
-    # On the workspace disk (~/workspace) or under a root named in DS_CARGO_TMP_ROOTS (colon list).
+    # On the workspace disk (~/workspace) or under a root named in DS_CARGO_TMP_ROOTS (colon list);
+    # '/' is never a root.
     allowed=0
     IFS=: read -r -a roots <<< "${HOME:?HOME is not set}/workspace${DS_CARGO_TMP_ROOTS:+:$DS_CARGO_TMP_ROOTS}"
     for root in "${roots[@]}"; do
-        [[ -n $root && ( $scratch == "${root%/}" || $scratch == "${root%/}"/* ) ]] && allowed=1
+        [[ -n $root ]] || continue
+        root=$(realpath -m -- "$root")
+        [[ $root == / ]] && continue
+        [[ $resolved == "$root" || $resolved == "$root"/* ]] && allowed=1
     done
     if (( ! allowed )); then
         echo "ds-cargo: DS_CARGO_TMPDIR must be under ~/workspace or a root in DS_CARGO_TMP_ROOTS: $scratch" >&2
