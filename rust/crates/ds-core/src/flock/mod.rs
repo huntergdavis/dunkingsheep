@@ -292,7 +292,15 @@ impl Flock {
     /// t4706: the launch records as text, for the roster cache's key.
     pub fn launches_fingerprint(&self) -> String {
         let launches = self.launches.lock().expect("launches lock");
-        serde_json::to_string(&*launches).unwrap_or_default()
+        // The map type has no Serialize: write each record as `pane=json;`.
+        let mut text = String::new();
+        for (pane, record) in launches.iter() {
+            text.push_str(pane);
+            text.push('=');
+            text.push_str(&Value::Object(record.clone()).to_string());
+            text.push(';');
+        }
+        text
     }
 
     pub fn new(
