@@ -1,6 +1,7 @@
 //! Guarded, durable declarations; an ordinary CI observer is never an author.
 use super::*;
 mod correction;
+pub(super) mod refresh;
 
 type LeaseProof = (
     String,
@@ -96,6 +97,8 @@ impl Tasks {
                 tx.execute("INSERT INTO task_events(task_id,event,at,actor,meta) VALUES (?1,'note',?2,?3,?4)",params![task,now,pane,json!({"kind":"evidence","reason":format!("Declared PR authorship: {repo}#{pr} @ {head}"),"pr_authorship":{"repo":repo,"pr":pr,"head":head,"pane":pane,"binding_before":{"repo":bound_repo,"pr":bound_pr},"binding_after":{"repo":repo,"pr":pr}}}).to_string()]).map_err(db::map_sqlite)?;
             }
             let result=attribution(&tx,&repo,pr,&head)?.expect("declaration exists");
+            // Do not depend on a later sync: draft/conflict/closed PRs may be skipped there.
+            refresh::declared(&tx,&repo,pr,&head,&result,now)?;
             tx.commit().map_err(db::map_sqlite)?;
             Ok(result)
         }).await
@@ -406,3 +409,6 @@ mod tests {
 
 #[cfg(test)]
 mod tightening_tests;
+
+#[cfg(test)]
+mod refresh_tests;
