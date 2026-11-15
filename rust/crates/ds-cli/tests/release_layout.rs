@@ -4,6 +4,11 @@
 //! explicitly, and their PATH is fixed. Nothing reaches the real home, systemd or a
 //! live state directory.
 
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../ds-core/src/testsupport_exec.rs"
+));
+
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -264,8 +269,7 @@ fn install_writes_an_immutable_release_launchers_and_drop_in() {
     ok(&sandbox.install("t3229-test"));
     // The same id with different bytes is refused, because releases are immutable.
     let other = sandbox.root.join("other-binary");
-    std::fs::write(&other, "#!/bin/sh\necho different\n").expect("other binary");
-    std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    write_fake_shell(&other, "#!/bin/sh\necho different\n", 0o755).expect("other binary");
     let poll_path = PathBuf::from(env!("CARGO_BIN_EXE_dunk-poll"));
     let refused = run_script(
         "install-release.sh",
@@ -426,17 +430,19 @@ fn native_poll_install_does_not_require_python_in_path() {
     let sandbox = Sandbox::new();
     ok(&sandbox.install("rel-py"));
     let cli = sandbox.release("rel-py").join("dunkingsheep");
-    let output = Command::new(&cli)
-        .args([
-            "install",
-            "--bin-dir",
-            sandbox.bin.to_str().expect("utf-8 path"),
-        ])
-        .current_dir(&sandbox.root)
-        .env("PATH", "")
-        .env("HOME", &sandbox.root)
-        .output()
-        .expect("run install with a relative PATH entry");
+    let output = exec_retrying_busy(|| {
+        Command::new(&cli)
+            .args([
+                "install",
+                "--bin-dir",
+                sandbox.bin.to_str().expect("utf-8 path"),
+            ])
+            .current_dir(&sandbox.root)
+            .env("PATH", "")
+            .env("HOME", &sandbox.root)
+            .output()
+    })
+    .expect("run install with a relative PATH entry");
     assert!(
         output.status.success(),
         "{}",
@@ -1023,25 +1029,23 @@ fn installed_release_serves_status_and_task_list_against_copied_state() {
     let socket = state.join("runtime.sock");
     let state_file = state.join("dunks.json");
     let tmux = state.join("tmux-fixture");
-    std::fs::write(
+    write_fake_shell(
         &tmux,
         // A separate process: it cannot share this test's token, so it reads the separator
         // from the -F format it is given, as tmux expands it.
-        "#!/bin/sh\nfmt=\"\"; prev=\"\"; for a in \"$@\"; do if [ \"$prev\" = \"-F\" ]; then fmt=\"$a\"; fi; prev=\"$a\"; done\nsep=$(printf '%s' \"$fmt\" | sed -e 's/^#{[a-z_]*}//' -e 's/#{.*$//')\nprintf \"%%99${sep}\\$1${sep}@1${sep}/tmp${sep}bash${sep}fixture${sep}1${sep}fixture${sep}fixture${sep}0${sep}0${sep}1${sep}80${sep}24\\n\"\n",
-    )
+        "#!/bin/sh\nfmt=\"\"; prev=\"\"; for a in \"$@\"; do if [ \"$prev\" = \"-F\" ]; then fmt=\"$a\"; fi; prev=\"$a\"; done\nsep=$(printf '%s' \"$fmt\" | sed -e 's/^#{[a-z_]*}//' -e 's/#{.*$//')\nprintf \"%%99${sep}\\$1${sep}@1${sep}/tmp${sep}bash${sep}fixture${sep}1${sep}fixture${sep}fixture${sep}0${sep}0${sep}1${sep}80${sep}24\\n\"\n", 0o755)
     .expect("tmux fixture");
-    std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 
     let serve_log = std::fs::File::create(state.join("serve.log")).expect("serve log");
+    let mut command = isolated(&cli, &sandbox.root, &config, &socket, &tmux);
+    command
+        .args(["serve", "--state-file"])
+        .arg(&state_file)
+        .arg("--no-log-file")
+        .stdout(Stdio::from(serve_log.try_clone().expect("clone serve log")))
+        .stderr(Stdio::from(serve_log));
     let mut daemon = CleanupChild(Some(
-        isolated(&cli, &sandbox.root, &config, &socket, &tmux)
-            .args(["serve", "--state-file"])
-            .arg(&state_file)
-            .arg("--no-log-file")
-            .stdout(Stdio::from(serve_log.try_clone().expect("clone serve log")))
-            .stderr(Stdio::from(serve_log))
-            .spawn()
-            .expect("spawn installed release serve"),
+        exec_retrying_busy(|| command.spawn()).expect("spawn installed release serve"),
     ));
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -1065,10 +1069,12 @@ fn installed_release_serves_status_and_task_list_against_copied_state() {
     }
 
     for args in [&["status"][..], &["task", "list"][..]] {
-        let output = isolated(&cli, &sandbox.root, &config, &socket, &tmux)
-            .args(args)
-            .output()
-            .expect("run installed CLI");
+        let output = exec_retrying_busy(|| {
+            isolated(&cli, &sandbox.root, &config, &socket, &tmux)
+                .args(args)
+                .output()
+        })
+        .expect("run installed CLI");
         assert_eq!(
             Some(0),
             output.status.code(),
@@ -1078,10 +1084,12 @@ fn installed_release_serves_status_and_task_list_against_copied_state() {
         assert!(!output.stdout.is_empty(), "{args:?} printed nothing");
     }
 
-    let shutdown = isolated(&cli, &sandbox.root, &config, &socket, &tmux)
-        .args(["--self-pane", "%99", "shutdown"])
-        .output()
-        .expect("shutdown through the installed CLI");
+    let shutdown = exec_retrying_busy(|| {
+        isolated(&cli, &sandbox.root, &config, &socket, &tmux)
+            .args(["--self-pane", "%99", "shutdown"])
+            .output()
+    })
+    .expect("shutdown through the installed CLI");
     assert_eq!(Some(0), shutdown.status.code(), "{shutdown:?}");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -1147,12 +1155,14 @@ fn rollback_restores_real_legacy_python_poller() {
         )
         .unwrap();
     });
-    let output = Command::new(&launcher)
-        .args(["--socket", socket.to_str().unwrap(), "--compact"])
-        .env("HOME", &sandbox.root)
-        .env_remove("DUNKINGSHEEP_SOCKET")
-        .output()
-        .unwrap();
+    let output = exec_retrying_busy(|| {
+        Command::new(&launcher)
+            .args(["--socket", socket.to_str().unwrap(), "--compact"])
+            .env("HOME", &sandbox.root)
+            .env_remove("DUNKINGSHEEP_SOCKET")
+            .output()
+    })
+    .unwrap();
     assert!(
         output.status.success(),
         "{}",

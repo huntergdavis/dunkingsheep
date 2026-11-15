@@ -5,8 +5,13 @@
 //! a port gets wrong - the ARGV (which is the contract with tmux) and the mapping of
 //! exit codes to "empty world" versus "failure".
 
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../ds-core/src/testsupport_exec.rs"
+));
+
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+
 use std::path::{Path, PathBuf};
 
 use ds_core::flock::lanes::TerminalEnv;
@@ -44,10 +49,8 @@ fn fake_tmux(dir: &Path, stdout: &str, code: i32) -> PathBuf {
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\ncat <<'OUT'\n{stdout}\nOUT\nexit {code}\n",
         log = log.display()
     );
-    fs::write(&script, body).expect("write fake tmux");
-    let mut permissions = fs::metadata(&script).expect("stat").permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&script, permissions).expect("chmod");
+    write_fake_shell(&script, body, 0o755).expect("write fake tmux");
+
     script
 }
 
@@ -333,21 +336,16 @@ fn enter_waits_for_the_text_to_settle() {
     let dir = tempdir();
     let script = dir.path().join("tmux");
     let log = dir.path().join("stamps.txt");
-    std::fs::write(
+    write_fake_shell(
         &script,
         format!(
             "#!/bin/sh\nprintf '%s %s\\n' \"$(date +%s%N)\" \"$*\" >> {log}\nexit 0\n",
             log = log.display()
         ),
+        0o755,
     )
     .expect("script");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = std::fs::metadata(&script).expect("stat").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&script, permissions).expect("chmod");
-    }
+
     let mut backend = isolated_backend(script);
     backend.send_text_and_enter("%2", "short").expect("sent");
     let stamps: Vec<String> = std::fs::read_to_string(&log)
@@ -382,16 +380,10 @@ fn read_pane_strips_leading_newlines() {
     let listing = pane_line("%2", "$2", "@2", "bash", "2202");
     let script = dir.path().join("tmux2");
     // One script that answers list-panes with the pane, capture-pane with a blank first line.
-    std::fs::write(&script, format!(
-        "#!/bin/sh\ncase \"$1\" in\n  list-panes) printf '%s\\n' '{listing}' ;;\n  capture-pane) printf '\\n\\nhello\\n' ;;\n  *) exit 0 ;;\nesac\n"))
+    write_fake_shell(&script, format!(
+        "#!/bin/sh\ncase \"$1\" in\n  list-panes) printf '%s\\n' '{listing}' ;;\n  capture-pane) printf '\\n\\nhello\\n' ;;\n  *) exit 0 ;;\nesac\n"), 0o755)
         .expect("script");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = std::fs::metadata(&script).expect("stat").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&script, permissions).expect("chmod");
-    }
+
     let backend = isolated_backend(script);
     let screen = backend
         .read_pane("%2", 40, false)
@@ -500,10 +492,8 @@ fn fake_tmux_that_resizes(dir: &Path, before: &str, after: &str) -> PathBuf {
         listing = listing.display(),
         after = after
     );
-    fs::write(&script, body).expect("write fake tmux");
-    let mut permissions = fs::metadata(&script).expect("stat").permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&script, permissions).expect("chmod");
+    write_fake_shell(&script, body, 0o755).expect("write fake tmux");
+
     script
 }
 
@@ -623,10 +613,8 @@ fn fake_tmux_with_window(dir: &Path, cols: i64, rows: i64) -> PathBuf {
         state = state.display(),
         template = template.display(),
     );
-    fs::write(&script, body).expect("write fake tmux");
-    let mut permissions = fs::metadata(&script).expect("stat").permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&script, permissions).expect("chmod");
+    write_fake_shell(&script, body, 0o755).expect("write fake tmux");
+
     script
 }
 

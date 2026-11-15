@@ -120,8 +120,7 @@ esac
 exit 0
 "#
     );
-    std::fs::write(&binary, script).unwrap();
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::testsupport::write_fake_shell(&binary, script, 0o755).unwrap();
     let path = dir.path().join("registry.json");
     let mut first = TmuxBackend::with_registry(&binary, &path);
     first.create_workspace(Some("fleet"), None, false).unwrap();
@@ -211,7 +210,7 @@ fn parent_close_requires_successful_complete_nonempty_inventory() {
     let dir = tempfile::tempdir().unwrap();
     let binary = dir.path().join("tmux");
     let root = crate::terminal::tmux::shell_join(&[dir.path().to_str().unwrap()]);
-    std::fs::write(
+    crate::testsupport::write_fake_shell(
         &binary,
         format!(
             r#"#!/bin/sh
@@ -222,9 +221,9 @@ list-panes) cat inventory; if test -f fail; then echo 'inventory failed' >&2; ex
 esac
 "#
         ),
+        0o755,
     )
     .unwrap();
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
     let path = dir.path().join("registry.json");
     let registry = Registry::new(&path);
     let owned =

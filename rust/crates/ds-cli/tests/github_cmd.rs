@@ -3,6 +3,11 @@
 //! Expected behaviour was recorded from the real Python `dunk_github_wrappers_install` run in
 //! the same kind of sandbox (result dict, file mode, resulting git config, idempotence).
 
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../ds-core/src/testsupport_exec.rs"
+));
+
 use std::os::unix::fs::PermissionsExt;
 
 use ds_cli::github_cmd::{render_wrappers, wrappers_install, GH_WRAPPER};
@@ -13,8 +18,7 @@ fn the_wrapper_install_matches_the_pythons_behaviour_in_a_sandbox() {
     let real_dir = t.path().join("realbin");
     std::fs::create_dir_all(&real_dir).unwrap();
     let real = real_dir.join("gh");
-    std::fs::write(&real, "#!/bin/sh\necho real\n").unwrap();
-    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_fake_shell(&real, "#!/bin/sh\necho real\n", 0o755).unwrap();
     let bin_dir = t.path().join("bin");
     let cfg = t.path().join("gitconfig");
     std::fs::write(

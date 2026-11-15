@@ -2,6 +2,11 @@
 //! here starts herdr or tmux or types into a pane: every CLI call is answered by a script in the
 //! sandbox, and every process gets its environment from the test, not from this process.
 
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../ds-core/src/testsupport_exec.rs"
+));
+
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -25,9 +30,7 @@ echo "real herdr ran"
 "#;
 
 fn write_script(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, body).expect("write fake script");
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    write_fake_shell(path, body, 0o755).expect("write fake script");
 }
 
 struct Fixture {

@@ -567,14 +567,12 @@ mod tests {
 
     #[test]
     fn a_stuck_git_times_out_with_the_pythons_reason() {
-        use std::os::unix::fs::PermissionsExt;
         let scratch_dir = crate::testsupport::dir("views-stuck");
         let dir = scratch_dir.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         let fake = dir.join("fakegit");
-        std::fs::write(&fake, "#!/bin/sh\nsleep 30\n").unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testsupport::write_fake_shell(&fake, "#!/bin/sh\nsleep 30\n", 0o755).unwrap();
         let started = std::time::Instant::now();
         let out = git_merges_with(dir.to_str().unwrap(), 10, fake.to_str().unwrap(), 0.3);
         assert!(

@@ -30,22 +30,9 @@ fn settle_executable(path: &std::path::Path) {
         .expect("settle the fake executable");
 }
 
-// fs::copy closes its handles before returning. CI can still report transient ETXTBSY
-// when executing the freshly copied inode. Retry only that error, within a fixed budget.
-fn spawn_fixture_child(
-    mut spawn: impl FnMut() -> std::io::Result<Child>,
-) -> std::io::Result<Child> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
-    loop {
-        match spawn() {
-            Err(error)
-                if error.raw_os_error() == Some(26) && std::time::Instant::now() < deadline =>
-            {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            result => return result,
-        }
-    }
+// Keep copied-agent process setup on the same bounded retry as shell fixtures.
+fn spawn_fixture_child(spawn: impl FnMut() -> std::io::Result<Child>) -> std::io::Result<Child> {
+    crate::testsupport::exec_retrying_busy(spawn)
 }
 
 #[test]

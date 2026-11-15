@@ -1687,22 +1687,21 @@ pub fn agent_launch(command: &str) -> String {
 #[cfg(test)]
 mod bounded_recovery_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn timeout_after_partial_key_is_unconfirmed_and_child_is_reaped() {
         let dir = tempfile::tempdir().unwrap();
         let executable = dir.path().join("fake-tmux");
         let marker = dir.path().join("sent");
-        std::fs::write(
+        crate::testsupport::write_fake_shell(
             &executable,
             format!(
                 "#!/bin/sh\nprintf x > '{}'\nexec sleep 30\n",
                 marker.display()
             ),
+            0o755,
         )
         .unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut backend = TmuxBackend::new(executable);
         let started = Instant::now();
         let result = backend.send_recovery_key("%1", "Enter");

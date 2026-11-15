@@ -1,5 +1,10 @@
 //! Generic `--json` daemon output through the actual Rust CLI process and an isolated fake socket.
 
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../ds-core/src/testsupport_exec.rs"
+));
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
@@ -15,24 +20,6 @@ fn ordered_result() -> Value {
     result.insert("zeta".into(), Value::Object(nested));
     result.insert("alpha".into(), json!("second"));
     Value::Object(result)
-}
-
-/// Run `exec` again while the kernel reports the executable busy (ETXTBSY). A child forked while
-/// a copy of this file was still open for writing keeps that descriptor until it execs, so the
-/// first exec can race it; once our descriptor is closed the retry only waits that child out.
-fn exec_retrying_busy<T>(mut exec: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
-    let mut attempts = 0;
-    loop {
-        match exec() {
-            Err(error)
-                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 400 =>
-            {
-                attempts += 1;
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            other => return other,
-        }
-    }
 }
 
 fn run_cli(socket: &str, command: &[&str]) -> Output {
@@ -242,6 +229,7 @@ fn write_guard_fixture(path: &Path, contents: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, contents).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    warm_up_executable(path).unwrap();
 }
 
 #[cfg(unix)]
@@ -1558,13 +1546,12 @@ fn cli_route_56_mcp_setup() {
     std::fs::create_dir_all(&bin).unwrap();
     let capture = temp.path().join("claude-argv");
     let claude = bin.join("claude");
-    std::fs::write(
+    write_fake_shell(
         &claude,
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE\"\nexit 7\n",
+        0o755,
     )
     .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
     let original_path = std::env::var("PATH").unwrap_or_default();
     let path = std::env::join_paths(
         std::iter::once(bin.clone()).chain(std::env::split_paths(&original_path)),
@@ -1637,11 +1624,6 @@ fn cli_route_56_mcp_setup() {
         std::fs::metadata(source_executable).unwrap().permissions(),
     )
     .unwrap();
-    // The copy is synced and closed before the first exec (see `exec_retrying_busy`).
-    std::fs::File::open(&quoted_executable)
-        .unwrap()
-        .sync_all()
-        .unwrap();
     let run_quoted = |harness: &str| {
         exec_retrying_busy(|| {
             Command::new(&quoted_executable)

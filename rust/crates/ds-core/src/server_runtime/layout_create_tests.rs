@@ -389,10 +389,10 @@ fn layout_create_registry_parent_file_is_thrown_after_creation_before_writeback(
         tmux_registry::{RegistryError, RegistryOperation},
         Terminal,
     };
-    use std::os::unix::fs::PermissionsExt;
+
     let disk = tempfile::tempdir().unwrap();
     let script = disk.path().join("tmux");
-    std::fs::write(&script,r#"#!/bin/sh
+    crate::testsupport::write_fake_shell(&script,r#"#!/bin/sh
 cd "$(dirname "$0")" || exit 1
 printf '%s\n' "$@" >> calls
 case "$1" in
@@ -404,8 +404,7 @@ list-panes)
   printf '%%1__SEP__$1__SEP__@1__SEP__/work__SEP__bash__SEP__new__SEP__1__SEP__new__SEP__tab__SEP__0__SEP__0__SEP__1__SEP__80__SEP__24\n'
   ;;
 esac
-"#.replace("__SEP__", crate::terminal::parse::pane_separator())).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+"#.replace("__SEP__", crate::terminal::parse::pane_separator()), 0o755).unwrap();
     let parent = disk.path().join("parent");
     std::fs::write(&parent, b"file").unwrap();
     let registry = parent.join("registry.json");

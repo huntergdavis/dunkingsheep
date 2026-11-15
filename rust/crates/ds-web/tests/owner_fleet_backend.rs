@@ -1,3 +1,8 @@
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../ds-core/src/testsupport_exec.rs"
+));
+
 #[path = "../src/ops_summary.rs"]
 mod ops_summary;
 mod roster {
@@ -434,7 +439,6 @@ async fn get_json(app: &Router, uri: &str) -> (StatusCode, Value) {
 
 /// One codex process, its session file, and a tmux pane pid, all owned by the test user.
 fn write_codex_process(dir: &Path) {
-    use std::os::unix::fs::PermissionsExt;
     let pid = 43210u32;
     let process = dir.join("proc").join(pid.to_string());
     fs::create_dir_all(process.join("fd")).unwrap();
@@ -453,8 +457,12 @@ fn write_codex_process(dir: &Path) {
     fs::write(&session, "fixture only").unwrap();
     symlink(&session, process.join("fd/3")).unwrap();
     let script = dir.join("tmux-fixture");
-    fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' '%9 {pid}'\n")).unwrap();
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fake_shell(
+        &script,
+        format!("#!/bin/sh\nprintf '%s\\n' '%9 {pid}'\n"),
+        0o700,
+    )
+    .unwrap();
 }
 
 #[tokio::test]

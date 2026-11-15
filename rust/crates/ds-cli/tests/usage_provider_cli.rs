@@ -1,6 +1,11 @@
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../ds-core/src/testsupport_exec.rs"
+));
+
 use serde_json::Value;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+
 use std::process::Command;
 
 #[test]
@@ -35,12 +40,12 @@ fn native_provider_output_and_usage_runner_contract() {
     assert_eq!(value["status"], "ok");
     assert_eq!(value["windows"][0]["percent_remaining"], 60.0);
     let opencode = dir.path().join("opencode");
-    fs::write(
+    write_fake_shell(
         &opencode,
         "#!/bin/sh\nprintf 'Sessions 3\\nMessages 7\\n'\n",
+        0o700,
     )
     .unwrap();
-    fs::set_permissions(&opencode, fs::Permissions::from_mode(0o700)).unwrap();
     let out = Command::new(bin)
         .args(["usage-provider", "opencode"])
         .env("HOME", dir.path())

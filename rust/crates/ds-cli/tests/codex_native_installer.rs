@@ -1,4 +1,9 @@
 //! Fresh-home installer smoke; never touches user configuration.
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../ds-core/src/testsupport_exec.rs"
+));
+
 use std::fs;
 use std::process::Command;
 
@@ -9,14 +14,13 @@ fn installs_into_private_home_and_refuses_existing_trust() {
     fs::create_dir(&home).unwrap();
     fs::write(home.join("auth-sentinel"), b"preserve").unwrap();
     let installer = env!("CARGO_BIN_EXE_dunk-codex-install");
-    use std::os::unix::fs::PermissionsExt;
     let binary = dir.path().join("fake-producer");
-    fs::write(
+    write_fake_shell(
         &binary,
         b"#!/bin/sh\nprintf called > \"$INSTALL_TEST_CALLED\"\n",
+        0o700,
     )
     .unwrap();
-    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
     let run = || {
         Command::new(installer)
             .arg(&home)
@@ -30,6 +34,8 @@ fn installs_into_private_home_and_refuses_existing_trust() {
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
+    // The installer copies the producer to a new inode; settle that copy too.
+    warm_up_executable(home.join("dunk-codex-turn")).unwrap();
     let before = fs::read(home.join("hooks.json")).unwrap();
     let doc: serde_json::Value = serde_json::from_slice(&before).unwrap();
     for (event, action) in [("UserPromptSubmit", "start"), ("Stop", "end")] {

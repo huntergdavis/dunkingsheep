@@ -19,23 +19,9 @@ pub fn dir(tag: &str) -> tempfile::TempDir {
         .expect("create a scratch directory")
 }
 
-/// Run `exec` again while the kernel reports the executable busy (ETXTBSY), for up to two
-/// seconds. Once the writer's descriptor is closed, a fork can no longer inherit it, so the retry
-/// only waits out children forked before that close.
-pub fn exec_retrying_busy<T>(mut exec: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
-    let mut attempts = 0;
-    loop {
-        match exec() {
-            Err(error)
-                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 400 =>
-            {
-                attempts += 1;
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            other => return other,
-        }
-    }
-}
+#[path = "testsupport_exec.rs"]
+mod exec;
+pub use exec::{exec_retrying_busy, write_fake_shell};
 
 /// A value together with the directory it lives in. The value is dropped FIRST (a store's
 /// connection closes before its files are removed), then the directory.
@@ -80,6 +66,52 @@ impl<T> DerefMut for Scratch<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn executable_retry_preserves_non_busy_errors_and_retries_busy_only() {
+        use std::io::{Error, ErrorKind};
+        let mut attempts = 0;
+        let error = exec_retrying_busy(|| {
+            attempts += 1;
+            Err::<(), _>(Error::new(ErrorKind::PermissionDenied, "fixture refusal"))
+        })
+        .unwrap_err();
+        assert_eq!(attempts, 1);
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "fixture refusal");
+        let mut attempts = 0;
+        let value = exec_retrying_busy(|| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(Error::from_raw_os_error(26))
+            } else {
+                Ok(7)
+            }
+        })
+        .unwrap();
+        assert_eq!((value, attempts), (7, 3));
+    }
+
+    #[test]
+    fn executable_warmup_skips_body_then_normal_invocation_preserves_arguments() {
+        let dir = dir("exec-warmup");
+        let script = dir.path().join("fixture");
+        let marker = dir.path().join("marker");
+        write_fake_shell(
+            &script,
+            "#!/bin/sh\nprintf '%s' \"$1\" > \"$2\"\nexit 7\n",
+            0o700,
+        )
+        .unwrap();
+        assert!(!marker.exists());
+        let result = std::process::Command::new(&script)
+            .arg("actual argument")
+            .arg(&marker)
+            .status()
+            .unwrap();
+        assert_eq!(result.code(), Some(7));
+        assert_eq!(std::fs::read(marker).unwrap(), b"actual argument");
+    }
 
     #[test]
     fn a_scratch_dir_is_removed_when_it_drops() {

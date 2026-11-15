@@ -455,11 +455,11 @@ fn layout_agent_raw_numbers_and_composites_preserve_python_strings() {
 #[test]
 fn layout_rename_runtime_returns_pre_save_item_without_rereading() {
     use crate::terminal::tmux::TmuxBackend;
-    use std::os::unix::fs::PermissionsExt;
+
     for previously_managed in [false, true] {
         let disk = tempfile::tempdir().unwrap();
         let script = disk.path().join("tmux");
-        std::fs::write(&script,r#"#!/bin/sh
+        crate::testsupport::write_fake_shell(&script,r#"#!/bin/sh
 cd "$(dirname "$0")" || exit 1
 case "$1" in
 select-pane) printf '%s' "$5" > title ;;
@@ -467,8 +467,7 @@ list-panes)
  printf 'w2:p2__SEP__$old__SEP__@old__SEP__/work__SEP__bash__SEP__owner__SEP__1__SEP__owner__SEP__owner__SEP__0__SEP__0__SEP__2202__SEP__80__SEP__24\n'
  printf '%%2__SEP__$1__SEP__@2__SEP__/work__SEP__codex__SEP__%s__SEP__1__SEP__work__SEP__tab__SEP__0__SEP__0__SEP__1__SEP__80__SEP__24\n' "$(cat title 2>/dev/null)" ;;
 esac
-"#.replace("__SEP__", crate::terminal::parse::pane_separator())).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+"#.replace("__SEP__", crate::terminal::parse::pane_separator()), 0o755).unwrap();
         let path = disk.path().join("registry.json");
         let initial = if previously_managed {
             json!({"panes":{"%2":{"name":"old-agent"}},"tabs":{},"workspaces":{}})

@@ -936,6 +936,10 @@ async fn run(
 
 #[cfg(test)]
 mod tests {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../ds-core/src/testsupport_exec.rs"
+    ));
     use super::*;
     use crate::routes::auth::{AuthError, AuthFuture};
     use futures_util::{SinkExt, StreamExt};
@@ -1383,10 +1387,8 @@ mod tests {
         let cancel_resize = std::env::var_os("T62_CANCEL_RESIZE").is_some();
         let slow_resize = cancel_resize || std::env::var_os("T62_SLOW_RESIZE").is_some();
         let tmux_program = if slow_resize {
-            use std::os::unix::fs::PermissionsExt;
             let wrapper = dir.path().join("private-tmux-wrapper");
-            std::fs::write(&wrapper, b"#!/bin/sh\nmarker=${0%/*}/resize-slept\nfor arg in \"$@\"; do if [ \"$arg\" = if-shell ] && [ ! -e \"$marker\" ]; then : > \"$marker\"; sleep 5; break; fi; done\nexec /usr/bin/tmux \"$@\"\n").unwrap();
-            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+            write_fake_shell(&wrapper, b"#!/bin/sh\nmarker=${0%/*}/resize-slept\nfor arg in \"$@\"; do if [ \"$arg\" = if-shell ] && [ ! -e \"$marker\" ]; then : > \"$marker\"; sleep 5; break; fi; done\nexec /usr/bin/tmux \"$@\"\n", 0o700).unwrap();
             wrapper
         } else {
             std::path::PathBuf::from("tmux")

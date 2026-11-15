@@ -1,6 +1,11 @@
 //! Isolated Codex ancestry and concurrent-stop smoke; no daemon or live hooks.
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../ds-core/src/testsupport_exec.rs"
+));
+
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+
 use std::process::Command;
 
 #[test]
@@ -8,8 +13,7 @@ fn concurrent_stops_consume_one_token() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path();
     let cli = path.join("fake-cli");
-    fs::write(&cli, "#!/bin/sh\ncase \"$3\" in start) echo '{\"turn_id\":\"token-1\",\"pane_id\":\"%scratch\"}' ;; end) echo \"$5\" >> \"$CALLS\"; echo '{\"ended\":true}' ;; esac\n").unwrap();
-    fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fake_shell(&cli, "#!/bin/sh\ncase \"$3\" in start) echo '{\"turn_id\":\"token-1\",\"pane_id\":\"%scratch\"}' ;; end) echo \"$5\" >> \"$CALLS\"; echo '{\"ended\":true}' ;; esac\n", 0o700).unwrap();
     let event = path.join("event.json");
     fs::write(
         &event,
@@ -42,8 +46,7 @@ fn python_flock_blocks_native_producer() {
     let state = path.join("state");
     fs::create_dir(&state).unwrap();
     let cli = path.join("fake-cli");
-    fs::write(&cli, "#!/bin/sh\necho invoked > \"$CALLS\"\necho '{\"turn_id\":\"token-1\",\"pane_id\":\"%scratch\"}'\n").unwrap();
-    fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fake_shell(&cli, "#!/bin/sh\necho invoked > \"$CALLS\"\necho '{\"turn_id\":\"token-1\",\"pane_id\":\"%scratch\"}'\n", 0o700).unwrap();
     let event = path.join("event.json");
     fs::write(
         &event,
@@ -111,13 +114,12 @@ fn mail_offer_is_hook_context_and_stop_continuation_without_terminal_input() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path();
     let cli = path.join("fake-cli");
-    fs::write(&cli, r##"#!/bin/sh
+    write_fake_shell(&cli, r##"#!/bin/sh
 case "$3" in
 start) printf '%s\n' "$*" >> "$CALLS"; echo '{"turn_id":"token-1","pane_id":"%private","mail_notice":{"action":"offer","text":"[inbox] You have 2 unread messages. Read with: dunkingsheep inbox read"}}' ;;
 end) echo '{"ended":true,"mail_notice":{"action":"offer","text":"[inbox] You have 2 unread messages. Read with: dunkingsheep inbox read"}}' ;;
 esac
-"##).unwrap();
-    fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+"##, 0o700).unwrap();
     let event = path.join("event.json");
     fs::write(
         &event,

@@ -1,6 +1,11 @@
 //! Private synthetic Claude ancestry; no live hook or daemon.
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../ds-core/src/testsupport_exec.rs"
+));
+
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+
 use std::process::Command;
 
 #[test]
@@ -8,8 +13,7 @@ fn subagent_does_not_end_and_concurrent_stops_consume_once() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let cli = root.join("fake-cli");
-    fs::write(&cli, "#!/bin/sh\ncase \"$3\" in start) echo '{\"turn_id\":\"token-1\",\"pane_id\":\"%scratch\"}' ;; end) echo \"$5\" >> \"$CALLS\"; echo '{\"ended\":true}' ;; esac\n").unwrap();
-    fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fake_shell(&cli, "#!/bin/sh\ncase \"$3\" in start) echo '{\"turn_id\":\"token-1\",\"pane_id\":\"%scratch\"}' ;; end) echo \"$5\" >> \"$CALLS\"; echo '{\"ended\":true}' ;; esac\n", 0o700).unwrap();
     for (name, event) in [
         ("start", "UserPromptSubmit"),
         ("sub", "SubagentStop"),
@@ -40,8 +44,7 @@ fn python_flock_blocks_native_claude() {
     let state = path.join("state");
     fs::create_dir(&state).unwrap();
     let cli = path.join("fake-cli");
-    fs::write(&cli, "#!/bin/sh\necho invoked > \"$CALLS\"\necho '{\"turn_id\":\"token-1\",\"pane_id\":\"%scratch\"}'\n").unwrap();
-    fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fake_shell(&cli, "#!/bin/sh\necho invoked > \"$CALLS\"\necho '{\"turn_id\":\"token-1\",\"pane_id\":\"%scratch\"}'\n", 0o700).unwrap();
     let event = path.join("event.json");
     fs::write(
         &event,
@@ -109,12 +112,12 @@ fn consumes_existing_python_format_state() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let cli = root.join("fake-cli");
-    fs::write(
+    write_fake_shell(
         &cli,
         "#!/bin/sh\necho \"$5\" >> \"$CALLS\"\necho '{\"ended\":true}'\n",
+        0o700,
     )
     .unwrap();
-    fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
     fs::create_dir(root.join("state")).unwrap();
     let event = root.join("stop");
     fs::write(&event, format!("{{\"session_id\":\"session-1\",\"hook_event_name\":\"Stop\",\"stop_hook_active\":false,\"cwd\":\"{}\"}}", root.display())).unwrap();
@@ -137,8 +140,7 @@ fn early_stop_waits_for_start_and_next_turn_still_completes() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let cli = root.join("fake-cli");
-    fs::write(&cli, "#!/bin/sh\ncase \"$3\" in start) if [ -e \"$ROOT/count\" ]; then token=token-2; else token=token-1; : > \"$ROOT/count\"; fi; printf '{\"turn_id\":\"%s\",\"pane_id\":\"%%scratch\"}\\n' \"$token\" ;; end) echo \"$5\" >> \"$CALLS\"; echo '{\"ended\":true}' ;; esac\n").unwrap();
-    fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fake_shell(&cli, "#!/bin/sh\ncase \"$3\" in start) if [ -e \"$ROOT/count\" ]; then token=token-2; else token=token-1; : > \"$ROOT/count\"; fi; printf '{\"turn_id\":\"%s\",\"pane_id\":\"%%scratch\"}\\n' \"$token\" ;; end) echo \"$5\" >> \"$CALLS\"; echo '{\"ended\":true}' ;; esac\n", 0o700).unwrap();
     for (name, event) in [("start", "UserPromptSubmit"), ("stop", "Stop")] {
         fs::write(root.join(name), format!("{{\"session_id\":\"session-1\",\"hook_event_name\":\"{event}\",\"stop_hook_active\":false,\"cwd\":\"{}\"}}", root.display())).unwrap();
     }
@@ -166,15 +168,14 @@ fn mail_hook_context_single_continuation_and_refusal_are_safe() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let cli = root.join("fake-cli");
-    fs::write(&cli, r#"#!/bin/sh
+    write_fake_shell(&cli, r#"#!/bin/sh
 echo "$*" >> "$ROOT/calls"
 case "$3" in
 start) echo '{"turn_id":"token-1","pane_id":"%scratch","mail_notice":{"action":"offer","text":"read private inbox"}}' ;;
 end) if [ -e "$ROOT/refuse" ]; then echo '{"ended":false,"reason":"turn_changed","mail_notice":{"action":"offer","text":"must not print"}}'; elif [ "$7" = stop ]; then echo '{"ended":false,"reason":"mail_notice","mail_notice":{"action":"offer","text":"read private inbox"}}'; else echo '{"ended":true,"mail_notice":{"action":"offer","text":"must not chain"}}'; fi ;;
 *) exit 1 ;;
 esac
-"#).unwrap();
-    fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+"#, 0o700).unwrap();
     for (name, event, active, extra) in [
         ("start", "UserPromptSubmit", "false", ""),
         ("stop", "Stop", "false", ""),
@@ -257,14 +258,13 @@ fn killed_after_marker_before_stdout_cannot_repeat_continuation() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let cli = root.join("fake-cli");
-    fs::write(&cli,r#"#!/bin/sh
+    write_fake_shell(&cli,r#"#!/bin/sh
 echo "$*" >> "$ROOT/calls"
 case "$3" in
 start) echo '{"turn_id":"token-1","pane_id":"%scratch"}' ;;
 end) if [ "$7" = stop ]; then echo '{"ended":false,"reason":"mail_notice","mail_notice":{"action":"offer","text":"read private inbox"}}'; else echo '{"ended":true}'; fi ;;
 esac
-"#).unwrap();
-    fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+"#, 0o700).unwrap();
     for (name, event, active) in [
         ("start", "UserPromptSubmit", false),
         ("stop", "Stop", false),
@@ -338,14 +338,13 @@ fn legacy_default_discards_offer_and_preserves_source() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let cli = root.join("fake-cli");
-    fs::write(&cli,r#"#!/bin/sh
+    write_fake_shell(&cli,r#"#!/bin/sh
 echo "$*" >> "$ROOT/calls"
 case "$3" in
 start) echo '{"turn_id":"token-1","pane_id":"%scratch","mail_notice":{"action":"offer","text":"ignore"}}' ;;
 end) echo '{"ended":true,"mail_notice":{"action":"offer","text":"ignore"}}' ;;
 esac
-"#).unwrap();
-    fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+"#, 0o700).unwrap();
     for (name, event) in [("start", "UserPromptSubmit"), ("stop", "Stop")] {
         fs::write(root.join(name),format!("{{\"session_id\":\"session-1\",\"cwd\":\"{}\",\"hook_event_name\":\"{event}\",\"stop_hook_active\":false}}",root.display())).unwrap();
     }
@@ -378,7 +377,7 @@ fn terminal_refusals_after_restart_allow_next_prompt_to_declare_busy() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let cli = root.join("fake-cli");
-        fs::write(
+        write_fake_shell(
             &cli,
             r#"#!/bin/sh
 echo "$*" >> "$ROOT/calls"
@@ -404,9 +403,9 @@ end)
     ;;
 esac
 "#,
+            0o700,
         )
         .unwrap();
-        fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
         for (name, event) in [("start", "UserPromptSubmit"), ("stop", "Stop")] {
             fs::write(root.join(name),format!("{{\"session_id\":\"session-1\",\"cwd\":\"{}\",\"hook_event_name\":\"{event}\",\"stop_hook_active\":false}}",root.display())).unwrap();
         }

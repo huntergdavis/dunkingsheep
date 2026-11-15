@@ -4,6 +4,11 @@
 //! or namespace mistake that the `context_read` differential cannot see shows up here.
 //! Environment and cwd are process-wide, so the fixtures that change them share a lock.
 
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../ds-core/src/testsupport_exec.rs"
+));
+
 use ds_cli::args::try_parse;
 use ds_cli::dispatch::run;
 use serde_json::Value;
@@ -115,7 +120,6 @@ fn serve_options_are_parsed_for_the_daemon_entry() {
 #[cfg(unix)]
 #[test]
 fn ds_cli_serve_uses_temp_config_socket_and_exits_after_shutdown() {
-    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
@@ -136,14 +140,12 @@ fn ds_cli_serve_uses_temp_config_socket_and_exits_after_shutdown() {
     let socket = dir.path().join("runtime.sock");
     let state_file = dir.path().join("dunks.json");
     let tmux = dir.path().join("tmux-fixture");
-    std::fs::write(
+    write_fake_shell(
         &tmux,
         // A separate process: it cannot share this test's token, so it reads the separator
         // from the -F format it is given, as tmux expands it.
-        "#!/bin/sh\nfmt=\"\"; prev=\"\"; for a in \"$@\"; do if [ \"$prev\" = \"-F\" ]; then fmt=\"$a\"; fi; prev=\"$a\"; done\nsep=$(printf '%s' \"$fmt\" | sed -e 's/^#{[a-z_]*}//' -e 's/#{.*$//')\nprintf \"%%99${sep}\\$1${sep}@1${sep}/tmp${sep}bash${sep}fixture${sep}1${sep}fixture${sep}fixture${sep}0${sep}0${sep}1${sep}80${sep}24\\n\"\n",
-    )
+        "#!/bin/sh\nfmt=\"\"; prev=\"\"; for a in \"$@\"; do if [ \"$prev\" = \"-F\" ]; then fmt=\"$a\"; fi; prev=\"$a\"; done\nsep=$(printf '%s' \"$fmt\" | sed -e 's/^#{[a-z_]*}//' -e 's/#{.*$//')\nprintf \"%%99${sep}\\$1${sep}@1${sep}/tmp${sep}bash${sep}fixture${sep}1${sep}fixture${sep}fixture${sep}0${sep}0${sep}1${sep}80${sep}24\\n\"\n", 0o755)
     .unwrap();
-    std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::write(
         config.join("roles.json"),
         r#"{"default":"anonymous","lanes":{"%99":{"role":"owner"}}}"#,
@@ -310,13 +312,11 @@ fn secrets_check_runs_end_to_end_and_its_exit_code_is_what_hooks_branch_on() {
 #[test]
 fn github_wrappers_runs_end_to_end_in_a_sandbox() {
     let _env_lock = lock_env();
-    use std::os::unix::fs::PermissionsExt;
     let t = tempfile::tempdir().unwrap();
     let real_dir = t.path().join("realbin");
     std::fs::create_dir_all(&real_dir).unwrap();
     let real = real_dir.join("gh");
-    std::fs::write(&real, "#!/bin/sh\necho real\n").unwrap();
-    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_fake_shell(&real, "#!/bin/sh\necho real\n", 0o755).unwrap();
     let cfg = t.path().join("gitconfig");
     std::fs::write(
         &cfg,
@@ -362,7 +362,6 @@ fn github_wrappers_runs_end_to_end_in_a_sandbox() {
 #[test]
 fn github_protect_uses_fixture_app_and_fake_gh() {
     let _env_lock = lock_env();
-    use std::os::unix::fs::PermissionsExt;
 
     let t = tempfile::tempdir().unwrap();
     let config = t.path().join("config");
@@ -385,12 +384,10 @@ fn github_protect_uses_fixture_app_and_fake_gh() {
     let args_capture = t.path().join("gh-args.txt");
     let input_capture = t.path().join("gh-inputs.txt");
     let fake_gh = fake_bin.join("gh");
-    std::fs::write(
+    write_fake_shell(
         &fake_gh,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$DS_GH_ARGS_FILE\"\ncat >> \"$DS_GH_INPUTS_FILE\"\nprintf '\\n--END--\\n' >> \"$DS_GH_INPUTS_FILE\"\nif [ \"$3\" = PUT ]; then printf '{\"ok\":true}\\n'; exit 0; fi\nprintf 'fixture auto-merge refusal\\n' >&2\nexit 1\n",
-    )
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$DS_GH_ARGS_FILE\"\ncat >> \"$DS_GH_INPUTS_FILE\"\nprintf '\\n--END--\\n' >> \"$DS_GH_INPUTS_FILE\"\nif [ \"$3\" = PUT ]; then printf '{\"ok\":true}\\n'; exit 0; fi\nprintf 'fixture auto-merge refusal\\n' >&2\nexit 1\n", 0o755)
     .unwrap();
-    std::fs::set_permissions(&fake_gh, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let old_config = std::env::var_os("DUNKINGSHEEP_DIR");
     let old_path = std::env::var_os("PATH");
@@ -525,16 +522,18 @@ fn install_launcher_runs_end_to_end_in_a_sandbox() {
     let bin_dir = temp.path().join("bin");
     let bin_text = bin_dir.display().to_string();
     let path = format!("{bin_text}:/usr/bin:/bin");
-    let output = Command::new(&cli)
-        .args(["install", "--bin-dir", &bin_text])
-        .env("PATH", &path)
-        .env("HOME", temp.path())
-        .env_remove("DUNKINGSHEEP_DIR")
-        .env_remove("DUNKINGSHEEP_SOCKET")
-        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
-        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
-        .output()
-        .expect("run the release install command");
+    let output = exec_retrying_busy(|| {
+        Command::new(&cli)
+            .args(["install", "--bin-dir", &bin_text])
+            .env("PATH", &path)
+            .env("HOME", temp.path())
+            .env_remove("DUNKINGSHEEP_DIR")
+            .env_remove("DUNKINGSHEEP_SOCKET")
+            .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+            .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+            .output()
+    })
+    .expect("run the release install command");
     assert!(
         output.status.success(),
         "{}",
@@ -600,6 +599,7 @@ fn guard_install_actions_write_only_to_sandbox_and_keep_tmux_helper() {
     for path in [&herdr, &tmux] {
         std::fs::write(path, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        warm_up_executable(path).unwrap();
     }
     let old_home = std::env::var_os("HOME");
     let old_config = std::env::var_os("DUNKINGSHEEP_DIR");

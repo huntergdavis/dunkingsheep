@@ -4,6 +4,11 @@
 //! fake, and `gh` is an owned shell script. Nothing touches a live service or the network, and
 //! Python is never run.
 
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../ds-core/src/testsupport_exec.rs"
+));
+
 #[allow(dead_code)]
 #[path = "../src/ops_collector.rs"]
 mod ops_collector;
@@ -13,7 +18,7 @@ use std::{
     collections::{BTreeSet, HashMap},
     fs,
     io::{BufRead, BufReader, Write},
-    os::unix::{fs::PermissionsExt, net::UnixListener},
+    os::unix::net::UnixListener,
     path::{Path, PathBuf},
     rc::Rc,
     time::{Duration, Instant},
@@ -1160,8 +1165,7 @@ fn published_accounting_rejects_unreviewed_or_mismatched_inputs() {
 /// answers from the files the test wrote. Paths are absolute and contain no quotes.
 fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
-    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    write_fake_shell(&path, format!("#!/bin/sh\n{body}\n"), 0o755).unwrap();
     path
 }
 

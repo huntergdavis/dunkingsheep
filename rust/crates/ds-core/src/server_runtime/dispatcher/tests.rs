@@ -687,14 +687,11 @@ fn pane_lookup_refuses_a_missed_listing_with_no_grace_window() {
 /// A `tmux` that cannot reach a server: tmux 3.x's wording for a named socket that does not
 /// exist. Both sides of the t3464 parity test run their real `TmuxBackend` over this script.
 fn unreachable_tmux(dir: &std::path::Path) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let fake = dir.join("tmux");
-    std::fs::write(
+    crate::testsupport::write_fake_shell(
         &fake,
-        "#!/bin/sh\necho 'error connecting to /tmp/tmux-1000/no-such-server (No such file or directory)' >&2\nexit 1\n",
-    )
+        "#!/bin/sh\necho 'error connecting to /tmp/tmux-1000/no-such-server (No such file or directory)' >&2\nexit 1\n", 0o755)
     .unwrap();
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::create_dir_all(dir.join("no-guard")).unwrap();
     fake
 }
