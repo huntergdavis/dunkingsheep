@@ -1553,6 +1553,20 @@ impl Store {
         Ok(ids)
     }
 
+    /// Metadata-only permission lookup using the same alias predicate as mailbox reads.
+    pub fn attachment_in_mailbox_bound(
+        &self,
+        attachment_id: &rusqlite::types::Value,
+        mailbox: &str,
+    ) -> Result<bool, DunkError> {
+        let (scope, boxes) = mailbox_where(mailbox, "m.mailbox");
+        self.read_pool().with(|connection| connection.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=? AND {scope})"),
+            rusqlite::params![attachment_id, boxes[0], boxes[1]],
+            |row| row.get(0),
+        ).map_err(map_sqlite))
+    }
+
     /// Validate fetch lookup/blob failures without touching a destination.
     pub fn validate_fetch_source_bound(
         &self,

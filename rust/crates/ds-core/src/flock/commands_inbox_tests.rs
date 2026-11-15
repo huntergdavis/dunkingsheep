@@ -386,7 +386,7 @@ fn fetch_of_an_unknown_attachment_is_a_plain_refusal() {
     let (e, d) = (env("worker"), tempfile::tempdir().unwrap());
     let f = flock(&d);
     let err = f
-        .inbox_fetch(&e, "nope", Some(d.path()))
+        .inbox_fetch(&e, "nope", Some(d.path()), Some("w1:p1"))
         .unwrap_err()
         .to_string();
     assert_eq!("no attachment with id 'nope'", err);
