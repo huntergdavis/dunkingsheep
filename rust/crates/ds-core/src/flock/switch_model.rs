@@ -50,7 +50,7 @@ fn strip(argv: &[String], with_value: &[&str], bare: &[&str]) -> Vec<String> {
 /// The flags of each harness that take a value. Every other token after the executable must be
 /// a flag: a word that is not a flag's value is a positional argument (an initial prompt, a
 /// session id where codex expects one), which a resumed session would replay or misread.
-fn value_flags(kind: &str) -> &'static [&'static str] {
+pub(super) fn value_flags(kind: &str) -> &'static [&'static str] {
     match kind {
         "claude" => &[
             "--model",
@@ -320,7 +320,7 @@ impl Flock {
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| {
                 refusal(format!(
-                    "switch model refused: the session of {pane} is not recorded, so it cannot be resumed; a fresh session is never started instead"
+                    "switch model refused: the session of {pane} is not recorded, so it cannot be resumed; a fresh session is never started instead. No pane was changed. Use the harness's in-session model selection, or ask the owner to verify the existing session ID and perform a guarded explicit same-session relaunch once idle. Launch argv settings alone do not prove the active model."
                 ))
             })?
             .to_string();

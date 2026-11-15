@@ -9,6 +9,7 @@
 //! `_pane_info`, and the construction of the stores that have no Rust owner yet
 //! (Superusers, MemoryStore, NextJobs, Allocator, outbox/stuck state).
 
+mod launch_session;
 mod outbox_api;
 
 use std::cell::RefCell;
@@ -214,6 +215,8 @@ pub const LAUNCH_IDENTITY_KEYS: [&str; 6] = [
     // A model declared after the launch (slice C) belongs to that launch's process.
     "model_declared",
 ];
+const SESSION_IDENTITY_KEYS: [&str; 4] =
+    ["session", "session_id", "session_kind", "session_source"];
 
 /// The identity fields of one launch, for `record_launch`. `provider` is the command's
 /// executable when it is a known agent; `model` and `effort` are the command line's flags;
@@ -709,18 +712,47 @@ impl Flock {
         {
             let mut launches = self.launches.lock().expect("launches lock");
             let entry = launches.entry(pane_id.to_string()).or_default();
-            if fields
+            let new_argv = fields
                 .iter()
-                .any(|(key, value)| *key == "argv" && !value.is_null())
-            {
+                .find(|(key, value)| *key == "argv" && !value.is_null())
+                .map(|(_, value)| value);
+            let resumed = new_argv.and_then(launch_session::claude_resume);
+            if new_argv.is_some() {
                 for key in LAUNCH_IDENTITY_KEYS {
                     entry.remove(key);
+                }
+                let previous_session = entry
+                    .get("session")
+                    .or_else(|| entry.get("session_id"))
+                    .and_then(Value::as_str);
+                let same_session = resumed
+                    .as_deref()
+                    .zip(previous_session)
+                    .is_some_and(|(new, old)| new.eq_ignore_ascii_case(old));
+                // A same-session relaunch retains its session provenance. A
+                // different/unknown session must not inherit another history.
+                if new_argv.is_some_and(launch_session::is_claude) && !same_session {
+                    for key in SESSION_IDENTITY_KEYS {
+                        entry.remove(key);
+                    }
                 }
             }
             for (key, value) in fields {
                 if !value.is_null() {
                     entry.insert((*key).to_string(), value.clone());
                 }
+            }
+            // tmux does not supply agent_session. A verified start/respawn can
+            // still name its exact Claude session in the launch command. Record
+            // that explicit UUID here; never substitute a picker or cwd guess.
+            if let Some(session) =
+                resumed.filter(|_| entry.get("session").is_none_or(|v| v.is_null() || v == ""))
+            {
+                entry.insert("session".into(), json!(session));
+                entry.entry("session_kind").or_insert(json!("uuid"));
+                entry
+                    .entry("session_source")
+                    .or_insert(json!("explicit Claude resume argv"));
             }
             entry.insert("recorded_at".to_string(), json!(clock::now_s()));
         }
@@ -1060,6 +1092,8 @@ mod dunks_state_file_tests;
 mod dunks_tests;
 #[cfg(test)]
 mod lanes_tests;
+#[cfg(test)]
+mod launch_session_tests;
 #[cfg(test)]
 mod loops_push_tests;
 #[cfg(test)]
