@@ -146,7 +146,38 @@ fn assert_matches_python(args: &[&str]) {
             text.contains(old_owner),
             "archived guide's task ownership paragraph changed unexpectedly"
         );
-        text.replacen(old_owner, new_owner, 1).into_bytes()
+        let mut text = text.replacen(old_owner, new_owner, 1);
+        // t4695: three reviewed recovery-guide changes are Rust-only. Keep every
+        // other byte pinned to the frozen oracle and check each new paragraph too.
+        let overlay: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../tools/guide_rust_overlay.json"
+        )))
+        .unwrap();
+        let rust_guide = std::str::from_utf8(&rust.stdout).unwrap();
+        let mut recovery_changes = 0;
+        for entry in overlay["replacements"].as_array().unwrap() {
+            let old = entry["old"].as_str().unwrap();
+            if old.starts_with("Since 2.70.32 a batch")
+                || old == "dunkingsheep inbox ack"
+                || old.starts_with("Recover follows the read rule")
+            {
+                let new = entry["new"].as_str().unwrap();
+                assert_eq!(
+                    text.matches(old).count(),
+                    1,
+                    "archived recovery guide changed unexpectedly"
+                );
+                assert!(
+                    rust_guide.contains(new),
+                    "updated recovery guidance missing"
+                );
+                text = text.replacen(old, new, 1);
+                recovery_changes += 1;
+            }
+        }
+        assert_eq!(recovery_changes, 3);
+        text.into_bytes()
     } else {
         python.stdout
     };
