@@ -1,3 +1,4 @@
+import Timestamp from './Timestamp';
 import React, { useEffect, useState } from 'react';
 import MessageBody from './MessageBody';
 import InboxCompose from './InboxCompose';
@@ -5,10 +6,6 @@ import { normaliseMailbox } from './mailboxKey';
 import { laneDisplayName } from './lane-label.js';
 import './mailbox-browser.css';
 
-function stamp(seconds) {
-  const date = new Date(seconds * 1000);
-  return Number.isNaN(date.getTime()) ? 'Time unavailable' : date.toLocaleString();
-}
 function groupFor(row) {
   if (row.mapping === 'unavailable') return 'Membership unavailable';
   if (!row.lanes?.length) return 'Unmapped / history';
@@ -87,7 +84,7 @@ export default function MailboxBrowser({ api }) {
     return <li key={row.message_id}><button className="mailbox-message-row"
       aria-current={selected?.message_id === row.message_id ? 'true' : undefined} onClick={() => setSelectedId(row.message_id)}>
       <strong>{row.subject || '(No subject)'}</strong><span>{row.sender || 'Unknown sender'}</span>
-      <small>{stamp(row.created_at)} · {row.state}</small>
+      <small><Timestamp value={row.created_at} seconds /> · {row.state}</small>
     </button></li>;
   }
   return <div className="mailbox-browser">
@@ -117,7 +114,7 @@ export default function MailboxBrowser({ api }) {
       </section>
       <article className="mailbox-reader" aria-label="Selected mailbox message">
         {!selected && <p>Select a message to read it.</p>}
-        {selected && <><header><h2>{selected.subject || '(No subject)'}</h2><p>{selected.sender || 'Unknown sender'} · {stamp(selected.created_at)}</p><p>{selected.message_id} · {selected.state} · {selected.mailbox}</p></header>
+        {selected && <><header><h2>{selected.subject || '(No subject)'}</h2><p>{selected.sender || 'Unknown sender'} · <Timestamp value={selected.created_at} seconds /></p><p>{selected.message_id} · {selected.state} · {selected.mailbox}</p></header>
           {visibleBody.state === 'loading' && <p role="status">Loading message…</p>}
           {visibleBody.state === 'unavailable' && <p role="status">{visibleBody.error}</p>}
           {visibleBody.state === 'error' && <p role="alert">{visibleBody.error}</p>}

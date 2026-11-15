@@ -1,3 +1,4 @@
+import Timestamp from './Timestamp';
 import React, { useEffect, useState } from 'react';
 import { taskAge, taskQuery, taskPage, metricNumber } from './tasks-model.js';
 import './tasks.css';
@@ -19,7 +20,7 @@ function TaskMetrics({ api, revision }) {
     <h2>Fleet task metrics</h2>
     {error ? <p role="status">Metrics unavailable: {error}</p> : !data ? <p role="status">Loading metrics…</p> : <>
       <dl>{[['Open', data.current.by_status?.open], ['In progress', data.current.by_status?.in_progress], ['Blocked', data.current.by_status?.blocked], ['Completed in 24 hours', data.throughput.completed], ['Claimed in 24 hours', data.throughput.claimed]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{metricNumber(value)}</dd></div>)}</dl>
-      <small>Current counts cover the fleet queue. Activity: {new Date(data.window.since * 1000).toLocaleString()} – {new Date(data.window.until * 1000).toLocaleString()}.</small>
+      <small>Current counts cover the fleet queue. Activity: <Timestamp value={data.window.since} seconds /> – <Timestamp value={data.window.until} seconds />.</small>
     </>}
   </section>;
 }
@@ -57,11 +58,11 @@ function TaskResults({ api, filters }) {
         <td data-label="Status">{task.status.replaceAll('_', ' ')}</td>
         <td data-label="Priority">{task.priority}</td>
         <td data-label="Owner">{task.assignees.length ? task.assignees.join(', ') : 'Leader (unassigned)'}</td>
-        <td data-label="Age">{taskAge(task.created_at, page.checked_at)}</td>
+        <td data-label="Age">{taskAge(task.created_at, page.checked_at)}<small><Timestamp value={task.created_at} seconds /></small></td>
         <td data-label="Blocked reason">{task.status === 'blocked' ? task.block_reason || 'No reason recorded' : '—'}</td>
       </tr>)}</tbody>
     </table>}
-    {page && <p className="tasks-checked">Checked {new Date(page.checked_at * 1000).toLocaleString()}. The queue can change between pages.</p>}
+    {page && <p className="tasks-checked">Checked <Timestamp value={page.checked_at} seconds />. The queue can change between pages.</p>}
   </section>;
 }
 

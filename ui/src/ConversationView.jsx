@@ -1,3 +1,4 @@
+import Timestamp from './Timestamp';
 import React, { useEffect, useState } from 'react';
 import { useMessageScroll, mergeMessages } from './useMessageScroll';
 import { MessageList } from '@chatscope/chat-ui-kit-react';
@@ -50,7 +51,7 @@ function ChannelStandalone({ channel }) {
   }
   return <DashShell standalone view={channel} side={<>
       {selected && <span className="dash-meta">{channelDisplayName(selected)} · {selected.status}</span>}
-      <span className="dash-meta">updated {updated ? updated.toLocaleTimeString() : '—'}</span>
+      <span className="dash-meta">updated {updated ? <Timestamp value={updated} /> : '—'}</span>
     </>}>
     <div className="dash-body dash-conversation">
       {channel === 'cos' && <a href="/dash/cos">Back to Inbox</a>}

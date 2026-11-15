@@ -111,6 +111,8 @@ use crate::{
 /// temporary paths. Nothing is read from the environment here.
 #[derive(Clone)]
 pub struct DeskConfig {
+    /// Server IANA timezone captured at startup; None means unavailable.
+    pub time_zone: Option<String>,
     /// Desk data directory (`VP_DATA_DIR`): `messages.sqlite3`, `auth.json`, `uploads/`.
     pub data_dir: PathBuf,
     /// Config root (`DUNKINGSHEEP_DIR`): the owner's `lanes.json` lives here.
@@ -211,6 +213,7 @@ pub struct Desk {
     board: BoardRuntime,
     system: SystemConfig,
     ui_dist: PathBuf,
+    time_zone: Option<String>,
     scheme: RequestScheme,
     project_context: Arc<crate::routes::project_context::ProjectContextConfig>,
 }
@@ -315,6 +318,7 @@ impl Desk {
             board,
             system,
             ui_dist: config.ui_dist,
+            time_zone: config.time_zone,
             scheme: config.scheme,
             // t3250: the owner-written map lives beside the other owner config; the global
             // context store is `<config>/context`, as the context CLI resolves it.
@@ -439,7 +443,10 @@ impl Desk {
 
         let router = Router::new()
             .merge(system::router(self.system.clone(), auth.clone(), scheme))
-            .merge(crate::routes::auth::router_with_scheme(scheme).layer(Extension(auth.clone())))
+            .merge(
+                crate::routes::auth::router_with_time_zone(scheme, self.time_zone.clone())
+                    .layer(Extension(auth.clone())),
+            )
             .merge(
                 panes::router()
                     .layer(Extension(panes_state))

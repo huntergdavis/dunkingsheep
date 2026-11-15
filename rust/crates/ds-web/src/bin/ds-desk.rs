@@ -25,6 +25,45 @@ fn positive(name: &str, default: i64, minimum: i64) -> Result<i64, Box<dyn Error
         .unwrap_or(default)
         .max(minimum))
 }
+// Resolve the server's configured zone once, before serving requests. An explicit but
+// unsupported TZ remains unknown rather than silently using the host/browser zone.
+fn time_zone_name(
+    tz: Option<&str>,
+    localtime: Option<&Path>,
+    timezone_file: Option<&str>,
+) -> Option<String> {
+    let name = if let Some(tz) = tz {
+        if tz.is_empty() {
+            "UTC"
+        } else {
+            tz.strip_prefix(':').unwrap_or(tz)
+        }
+    } else if let Some(path) = localtime
+        .and_then(Path::to_str)
+        .and_then(|p| p.split_once("/zoneinfo/").map(|(_, name)| name))
+    {
+        path
+    } else {
+        timezone_file?.trim()
+    };
+    let name = name
+        .strip_prefix("posix/")
+        .or_else(|| name.strip_prefix("right/"))
+        .unwrap_or(name);
+    if name.is_empty()
+        || name.starts_with('/')
+        || name
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        || !name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"/_-+".contains(&c))
+    {
+        return None;
+    }
+    Some(name.to_owned())
+}
+
 fn make_config(root: &Path) -> Result<DeskConfig, Box<dyn Error>> {
     let home = PathBuf::from(value("HOME").ok_or("HOME is required")?);
     let config_dir = path("DUNKINGSHEEP_DIR", home.join(".config/dunkingsheep"));
@@ -55,7 +94,16 @@ fn make_config(root: &Path) -> Result<DeskConfig, Box<dyn Error>> {
         "https" => RequestScheme::Https,
         _ => return Err("DS_DESK_SCHEME must be http or https".into()),
     };
+    let tz = env::var("TZ").ok();
+    let localtime = std::fs::canonicalize("/etc/localtime").ok();
+    let timezone_file = std::fs::read_to_string("/etc/timezone").ok();
+    let time_zone = time_zone_name(
+        tz.as_deref(),
+        localtime.as_deref(),
+        timezone_file.as_deref(),
+    );
     Ok(DeskConfig {
+        time_zone,
         data_dir: data_dir.clone(),
         config_dir: config_dir.clone(),
         home: home.clone(),
@@ -134,4 +182,35 @@ fn main() -> Result<(), Box<dyn Error>> {
             .await
             .map_err(|e| -> Box<dyn Error> { e.to_string().into() })
     })
+}
+
+#[cfg(test)]
+mod time_zone_tests {
+    use super::*;
+    #[test]
+    fn configured_zone_precedes_host_and_missing_zone_is_not_guessed() {
+        let host = Path::new("/usr/share/zoneinfo/America/Los_Angeles");
+        assert_eq!(
+            time_zone_name(Some(":Europe/Paris"), Some(host), Some("UTC")),
+            Some("Europe/Paris".into())
+        );
+        assert_eq!(
+            time_zone_name(None, Some(host), Some("UTC")),
+            Some("America/Los_Angeles".into())
+        );
+        assert_eq!(
+            time_zone_name(None, None, Some("America/Los_Angeles\n")),
+            Some("America/Los_Angeles".into())
+        );
+        assert_eq!(
+            time_zone_name(Some(""), Some(host), None),
+            Some("UTC".into())
+        );
+        assert_eq!(time_zone_name(Some("../private"), Some(host), None), None);
+        assert_eq!(
+            time_zone_name(Some("/private/file"), Some(host), None),
+            None
+        );
+        assert_eq!(time_zone_name(None, None, None), None);
+    }
 }

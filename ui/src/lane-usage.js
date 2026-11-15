@@ -1,3 +1,4 @@
+import { formatTimestamp } from './timestamps.js';
 // The usage bar under each lane in the Projects view (t5043).
 //
 // Usage is read per provider ACCOUNT (the operations board's provider readings), never per lane:
@@ -34,7 +35,7 @@ export function providerFor(lane, budget) {
 }
 
 // Everything the lane row shows about usage.
-export function laneUsage(lane, budget, nowMs = Date.now()) {
+export function laneUsage(lane, budget, nowMs = Date.now(), timeZone) {
   const found = providerFor(lane, budget);
   const account = found.name ? `shared: ${found.name} account` : 'shared account';
   if (!found.provider) {
@@ -72,7 +73,7 @@ export function laneUsage(lane, budget, nowMs = Date.now()) {
     return { kind: 'unavailable', account, text: 'usage unavailable', detail: `${measured}: the reading has no usage window`, windows };
   }
   const percent = Math.max(0, Math.min(100, primary.percent_used));
-  const resets = primary.resets_at ? `, resets ${primary.resets_at}` : '';
+  const resets = primary.resets_at ? `, resets ${formatTimestamp(primary.resets_at, timeZone)}` : '';
   return {
     kind: 'bar',
     account,

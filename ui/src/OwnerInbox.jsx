@@ -1,3 +1,4 @@
+import Timestamp from './Timestamp';
 import React, { useEffect, useRef, useState } from 'react';
 import MessageBody from './MessageBody';
 import InboxCompose from './InboxCompose';
@@ -132,7 +133,7 @@ function OwnerInboxThread({ api, sourceFilter, controls, requestedRoot, openVpTh
         <ul>{rows.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE).map(item => <li key={item.id}>
           <button className="owner-inbox-row" aria-current={selected?.id === item.id ? 'true' : undefined} onClick={() => { setWantedRoot(null); setSelectedId(item.id); }}>
             <strong>{senderLabel(item)}</strong>
-            <time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time>
+            <Timestamp value={item.created_at} />
             <span className="owner-inbox-preview">{item.body?.trim().split('\n').find(line => line.trim()) || '(Empty message)'}</span>
             <small>{sourceFilter === 'historical' ? [HISTORICAL_REASONS[item.historical_reason], ...item.historical_labels].join(' · ') : [view.label, ...messageKindLabels(item)].join(' · ')}</small>
           </button>
@@ -140,7 +141,7 @@ function OwnerInboxThread({ api, sourceFilter, controls, requestedRoot, openVpTh
       </section>
       {selected && <article className="owner-inbox-reader" aria-label="Selected message" key={selected.id}>
         <header><h2>{senderLabel(selected)}</h2>
-          <p><time dateTime={selected.created_at}>{new Date(selected.created_at).toLocaleString()}</time> · {selected.message_id || selected.id}</p>
+          <p><Timestamp value={selected.created_at} /> · {selected.message_id || selected.id}</p>
           {sourceFilter === 'historical' && <p>{[HISTORICAL_REASONS[selected.historical_reason], ...selected.historical_labels].join(' · ')}</p>}
           {sourceFilter !== 'historical' && <p>{messageKindLabels(selected).join(' · ')}</p>}
           {sourceFilter === 'human_threads' && selected.conversation_kind === 'vp' && <button type="button" onClick={() => openVpThread(selected.root_id)}>Open VP thread {selected.root_id}</button>}

@@ -1,3 +1,4 @@
+import { ServerTimeZone } from './Timestamp';
 import './viewportReport';
 import React, { useEffect, useLayoutEffect, useState, lazy, Suspense } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -65,7 +66,9 @@ function App() {
   }
   useLayoutEffect(() => { document.documentElement.dataset.theme = theme; }, [theme]);
   const [authorized, setAuthorized] = useState(null);
-  useEffect(() => { api('/session').then(() => setAuthorized(true)).catch(() => setAuthorized(false)); }, []);
+  const [timeZone, setTimeZone] = useState(null);
+  const loadSession = () => api('/session').then(data => { setTimeZone(data.time_zone || null); setAuthorized(true); }).catch(() => setAuthorized(false));
+  useEffect(() => { loadSession(); }, []);
   useEffect(() => { const expired = () => setAuthorized(false); window.addEventListener('vp-auth-expired', expired); return () => window.removeEventListener('vp-auth-expired', expired); }, []);
   const [updateAvailable, setUpdateAvailable] = useState(false);
   useEffect(() => {
@@ -78,8 +81,8 @@ function App() {
   // Keep the owner on the conversations and boards in this desk.
   const content = authorized
     ? <ChunkErrorBoundary key={`${route.view}:${route.search}`}><Suspense fallback={<div className="splash" role="status">Loading dashboard…</div>}><StandaloneDesk view={route.view} known={route.known} /></Suspense></ChunkErrorBoundary>
-    : <Login onSuccess={() => setAuthorized(true)} />;
-  return <ThemeContext.Provider value={{ theme, chooseTheme, themeError }}>{updateAvailable && <div className="update-banner" role="status">A desk update is ready. Save any draft, then <button onClick={() => window.location.reload()}>Refresh now</button>.</div>}{content}</ThemeContext.Provider>;
+    : <Login onSuccess={loadSession} />;
+  return <ServerTimeZone.Provider value={timeZone}><ThemeContext.Provider value={{ theme, chooseTheme, themeError }}>{updateAvailable && <div className="update-banner" role="status">A desk update is ready. Save any draft, then <button onClick={() => window.location.reload()}>Refresh now</button>.</div>}{content}</ThemeContext.Provider></ServerTimeZone.Provider>;
 }
 
 createRoot(document.getElementById('root')).render(<App />);

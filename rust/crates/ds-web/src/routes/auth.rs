@@ -117,16 +117,26 @@ pub fn router() -> Router {
 /// terminates at a reverse proxy, the application must set this from its
 /// trusted proxy configuration rather than accepting client forwarding headers.
 pub fn router_with_scheme(scheme: RequestScheme) -> Router {
+    router_with_time_zone(scheme, None)
+}
+
+/// The production desk supplies its captured server timezone, never a client header.
+pub fn router_with_time_zone(scheme: RequestScheme, time_zone: Option<String>) -> Router {
     Router::new()
         .route("/api/session", get(session))
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
         .route("/api/password", post(change_password))
+        .layer(Extension(ServerTimeZone(time_zone)))
         .layer(Extension(scheme))
 }
 
+#[derive(Clone)]
+struct ServerTimeZone(Option<String>);
+
 /// Validate only the existing session/API identity; desk startup needs no channel roster.
 async fn session(
+    Extension(ServerTimeZone(time_zone)): Extension<ServerTimeZone>,
     Extension(backend): Extension<Arc<dyn AuthBackend>>,
     Extension(scheme): Extension<RequestScheme>,
     headers: HeaderMap,
@@ -137,7 +147,7 @@ async fn session(
         let bearer = bearer_value(&headers);
         let cookie = cookie_value(&headers, SESSION_COOKIE);
         match backend.identity(bearer.as_deref(), cookie.as_deref()).await {
-            Ok(_) => Json(json!({"ok": true})).into_response(),
+            Ok(_) => Json(json!({"ok": true, "time_zone": time_zone})).into_response(),
             Err(error) => error.response(),
         }
     };
@@ -727,7 +737,7 @@ mod tests {
                 .body(axum::body::Body::empty())
                 .unwrap();
             let response = block_on(
-                router_with_scheme(RequestScheme::Https)
+                router_with_time_zone(RequestScheme::Https, Some("America/Los_Angeles".into()))
                     .layer(Extension(backend))
                     .oneshot(request),
             )
@@ -740,7 +750,7 @@ mod tests {
             if expected == StatusCode::OK {
                 assert_eq!(
                     serde_json::from_str::<Value>(&text).unwrap(),
-                    json!({"ok":true})
+                    json!({"ok":true,"time_zone":"America/Los_Angeles"})
                 );
             }
             assert_eq!(
