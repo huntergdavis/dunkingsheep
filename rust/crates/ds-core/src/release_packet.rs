@@ -104,12 +104,19 @@ struct Baseline {
 }
 #[derive(Clone, Deserialize)]
 struct Unit {
+    #[serde(default = "selected_by_default")]
+    switch: bool,
     unit: String,
     binary: String,
     release: PathBuf,
     baseline: Baseline,
+    #[serde(default)]
     drop: PathBuf,
+    #[serde(default)]
     snippet: PathBuf,
+}
+fn selected_by_default() -> bool {
+    true
 }
 #[derive(Deserialize)]
 struct Artifact {
@@ -211,6 +218,10 @@ impl Packet {
             m.units.len() == 3 && ORDER.iter().all(|u| m.units.contains_key(*u)),
             "packet requires exactly daemon, web and telegram",
         )?;
+        fail(
+            m.units.values().any(|u| u.switch),
+            "packet selects no units",
+        )?;
         for (key, unit) in &m.units {
             let (service, binary) = match key.as_str() {
                 "daemon" => ("dunkingsheep.service", "dunkingsheep"),
@@ -221,9 +232,21 @@ impl Packet {
                 unit.unit == service && unit.binary == binary,
                 "unexpected unit or binary",
             )?;
-            for p in [&unit.release, &unit.drop, &unit.baseline.executable] {
+            for p in [&unit.release, &unit.baseline.executable] {
                 plain(p)?;
             }
+            if !unit.switch {
+                fail(
+                    unit.drop.as_os_str().is_empty() && unit.snippet.as_os_str().is_empty(),
+                    "untouched unit must not name a drop-in or snippet",
+                )?;
+                fail(
+                    unit.baseline.executable.parent() == Some(unit.release.as_path()),
+                    "untouched release differs from baseline",
+                )?;
+                continue;
+            }
+            plain(&unit.drop)?;
             fail(
                 unit.drop
                     .parent()
@@ -231,6 +254,18 @@ impl Packet {
                     .and_then(|s| s.to_str())
                     == Some(&format!("{service}.d")),
                 "drop-in must belong to its unit",
+            )?;
+        }
+        for row in &m.rows {
+            fail(
+                m.units.get(&row.unit).is_some_and(|u| u.switch),
+                "artifact belongs to an untouched or unknown unit",
+            )?;
+        }
+        if !m.units["daemon"].switch {
+            fail(
+                m.launcher.old_sha256 == m.launcher.new_sha256,
+                "untouched daemon requires an unchanged CLI launcher",
             )?;
         }
         plain(&m.launcher.path)?;
@@ -254,10 +289,40 @@ impl Packet {
                 "saved CLI differs from manifest",
             )?;
         }
-        for key in ORDER {
+        for key in packet.selected() {
             packet.candidate(key)?;
         }
         Ok(packet)
+    }
+    fn selected(&self) -> Vec<&'static str> {
+        ORDER
+            .into_iter()
+            .filter(|key| self.m.units[*key].switch)
+            .collect()
+    }
+    fn untouched(&self, host: &mut impl Host, key: &str) -> Result<()> {
+        let u = &self.m.units[key];
+        let pid = self.verify_unit(host, key, false)?;
+        fail(
+            pid.to_string() == u.baseline.pid,
+            format!("untouched PID differs: {key}"),
+        )?;
+        self.baseline_files(u)
+    }
+    fn check_untouched(&self, host: &mut impl Host) -> Result<()> {
+        for key in ORDER.into_iter().filter(|key| !self.m.units[*key].switch) {
+            self.untouched(host, key)?;
+        }
+        if !self.m.units["daemon"].switch {
+            fail(
+                hash(&self.m.launcher.path)? == self.m.launcher.old_sha256,
+                "untouched CLI launcher differs",
+            )?;
+        }
+        if !self.m.units["web"].switch {
+            self.web(host, false)?;
+        }
+        Ok(())
     }
     fn state(&self, name: &str) -> PathBuf {
         self.root.join("state").join(name)
@@ -286,7 +351,7 @@ impl Packet {
         if !recovery {
             required.insert("launcher.pending");
         }
-        for unit in self.m.units.values() {
+        for unit in self.m.units.values().filter(|u| u.switch) {
             required.insert(unit.snippet.to_str().ok_or("snippet path must be UTF-8")?);
         }
         let mut names = BTreeSet::new();
@@ -311,7 +376,7 @@ impl Packet {
                 format!("operational file is not covered: {name}"),
             )?;
         }
-        for u in self.m.units.values() {
+        for u in self.m.units.values().filter(|u| u.switch) {
             fail(
                 u.snippet.to_str().is_some_and(|p| names.contains(p)),
                 "unit snippet is not covered",
@@ -395,10 +460,12 @@ impl Packet {
                 )?;
             }
         }
-        fail(
-            go["no_terminal_confirmed"] == true,
-            "owner no-terminal confirmation required",
-        )?;
+        if self.m.units["web"].switch {
+            fail(
+                go["no_terminal_confirmed"] == true,
+                "owner no-terminal confirmation required",
+            )?;
+        }
         fail(
             go["rollback_triggers"]
                 .as_array()
@@ -546,11 +613,11 @@ impl Packet {
     }
     fn preflight(&self, host: &mut impl Host) -> Result<()> {
         regular(&self.m.launcher.path)?;
-        self.credentials(host)?;
         fail(
             hash(&self.m.launcher.path)? == self.m.launcher.old_sha256,
             "CLI baseline differs",
         )?;
+        self.credentials(host)?;
         for u in self.m.units.values() {
             let actual = host.status(&u.unit)?;
             fail(
@@ -558,8 +625,11 @@ impl Packet {
                 "baseline PID differs",
             )?;
             self.verify_unit(host, self.key(&u.unit)?, false)?;
-            fail(!u.drop.exists(), "candidate overlay already exists")?;
             self.baseline_files(u)?;
+            if !u.switch {
+                continue;
+            }
+            fail(!u.drop.exists(), "candidate overlay already exists")?;
             for path in u.baseline.dropins.split_whitespace() {
                 fail(
                     u.drop.file_name() > Path::new(path).file_name(),
@@ -603,6 +673,9 @@ impl Packet {
         Ok(())
     }
     fn check(&self, host: &mut impl Host, key: &str) -> Result<()> {
+        if !self.m.units[key].switch {
+            return self.untouched(host, key);
+        }
         let pid = self.verify_unit(host, key, true)?;
         match key {
             "daemon" => {
@@ -666,7 +739,9 @@ impl Packet {
             go["rollback_on_apply_failure"] == true,
             "GO must explicitly authorize rollback_on_apply_failure",
         )?;
-        self.no_terminal(host)?;
+        if self.m.units["web"].switch {
+            self.no_terminal(host)?;
+        }
         self.note(
             "ACTIVATION-START.json",
             &json!({"go":go,"attempt":1,"at_millis":host.now_millis()}),
@@ -674,7 +749,7 @@ impl Packet {
         )?;
         let result = (|| {
             self.backup()?;
-            for key in ORDER {
+            for key in self.selected() {
                 let u = &self.m.units[key];
                 if key == "web" {
                     self.no_terminal(host)?;
@@ -696,6 +771,7 @@ impl Packet {
                     self.wrapper(true)?;
                 }
                 self.check(host, key)?;
+                self.check_untouched(host)?;
                 for untouched in ORDER.iter().skip_while(|p| **p != key).skip(1) {
                     fail(
                         host.status(&self.m.units[*untouched].unit)?.pid.to_string()
@@ -736,7 +812,7 @@ impl Packet {
             cli == self.m.launcher.old_sha256 || cli == self.m.launcher.new_sha256,
             "CLI drift before rollback",
         )?;
-        for key in ORDER.iter().rev() {
+        for key in self.selected().iter().rev() {
             let u = &self.m.units[*key];
             self.baseline_files(u)?;
             if !u.drop.exists() {
@@ -811,6 +887,7 @@ impl Packet {
         for key in ORDER {
             self.verify_unit(host, key, false)?;
         }
+        self.check_untouched(host)?;
         self.web(host, false)?;
         self.poll(host)?;
         self.note(
@@ -1051,7 +1128,7 @@ fn execute_with_host(
     )?;
     let packet = Packet::open(root, digest, action == "rollback")?;
     if !apply || action == "plan" {
-        return Ok(json!({"dry_run":true,"action":action,"source_commit":packet.m.source_commit,"order":ORDER,"packet_sha256":digest,"note":"No services, files, locks, timers or host commands changed. Operator only after exact tooling/packet review and GO."}).to_string());
+        return Ok(json!({"dry_run":true,"action":action,"source_commit":packet.m.source_commit,"order":packet.selected(),"packet_sha256":digest,"note":"No services, files, locks, timers or host commands changed. Operator only after exact tooling/packet review and GO."}).to_string());
     }
     private_dir(&packet.root.join("state"))?;
     let lock = packet.state("operation.lock");
@@ -1065,10 +1142,21 @@ fn execute_with_host(
         "activate" => packet.activate(host)?,
         "rollback" => packet.rollback(host)?,
         _ => {
+            regular(&packet.m.launcher.path)?;
+            let expected = if packet.m.units["daemon"].switch {
+                &packet.m.launcher.new_sha256
+            } else {
+                &packet.m.launcher.old_sha256
+            };
+            fail(
+                hash(&packet.m.launcher.path)? == *expected,
+                "CLI differs before verification",
+            )?;
             packet.credentials(host)?;
             for key in ORDER {
                 packet.check(host, key)?;
             }
+            packet.check_untouched(host)?;
         }
     }
     Ok(json!({"action":action,"exit_code":0,"packet_sha256":digest}).to_string())

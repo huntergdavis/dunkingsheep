@@ -175,9 +175,30 @@ An empty list grants no downgrade DDL. The retained snapshot filename
 `inbox-before-trigger-drop.db` is historical and also serves snapshot-only packets;
 its first complete bytes are kept across recovery retries.
 
+A packet still records baselines for exactly `daemon`, `web` and `telegram`.
+Each unit can state `"switch": true` or `"switch": false`; omission retains the
+historical all-three-selected behavior. At least one unit must be selected.
+Selected units provide candidate artifacts, a `drop` and a relative `snippet`.
+Untouched units omit `drop` and `snippet`, set `release` to the baseline executable's
+directory, and provide no artifact rows. Their PID, executable hash and baseline
+configuration are verified unchanged throughout switching, verification and
+recovery. If daemon is untouched, both saved launcher hashes/files must describe
+the same current CLI bytes. The plan reports only the effective selected order.
+Selection is bound by the reviewed manifest digest; packet mode does not mix with
+the legacy `--unit` artifact-staging flags.
+
+Only selected units are switched in daemon/web/Telegram order, and only selected
+units are controlled during reverse-order rollback. A daemon-only packet leaves
+web and Telegram running; a web-only packet leaves daemon/CLI and Telegram running.
+No-terminal confirmation and live tmux-control detachment checks apply when web
+is selected, including immediately before its switch. They are not required for
+a daemon- or Telegram-only switch. Web HTTP/Host/auth gates are still checked
+when web remains at its baseline. Existing review, GO, one-attempt, rollback
+snapshot and consumer-floor compatibility requirements remain in force.
+
 The separate private `state/ACTIVATION-GO.json` must contain `packet_sha256`,
 `authority_message`, RFC3339 `valid_from`/`valid_until`, `no_terminal_confirmed:
-true`, nonempty `rollback_triggers` and `observations_only` arrays, and the explicit
+true` when web is selected, nonempty `rollback_triggers` and `observations_only` arrays, and the explicit
 boolean `rollback_on_apply_failure: true`. `state/REVIEW-ACCEPTANCE.json` must
 contain the same packet digest, `accepted: true`, a nonempty `reviewer` different
 from the manifest operator, and `evidence_message`. These records express the
@@ -186,7 +207,7 @@ The tooling author never activates their own change. A different authorized
 operator must execute the independently reviewed tooling and packet.
 
 Activation records its one attempt before changing anything, then switches
-daemon/CLI, web and Telegram in that order. It checks live executable bytes,
+selected daemon/CLI, web and Telegram units in that order. It checks live executable bytes,
 restart counts, unchanged poll, daemon CLI reads, exact served UI bytes, terminal
 authentication/Host gates and the bridge's dedicated token-file environment.
 The token must be a same-user regular 0600 file registered as exactly
@@ -272,8 +293,8 @@ packet fields in `ds-core::release_packet`; the packet executor is unchanged.
 Before another operator can perform a real native-path release, independently
 review its exact tooling head and supported packet, rehearse its actual switching
 and recovery order against the current consumer floor, and obtain current review
-acceptance and GO. The existing executor still switches daemon first and rolls
-back all three units in reverse order with the packet's explicit schema contract;
+acceptance and GO. The executor switches selected units in daemon/web/Telegram order and rolls
+those units back in reverse order with the packet's explicit schema contract;
 switching order and rollback-floor compatibility still need release-specific
 review or a separate fix.
 Stable single-drop-in migration, packet authoring, retention/removal and a real
