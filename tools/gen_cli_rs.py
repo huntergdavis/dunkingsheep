@@ -87,7 +87,10 @@ def load_parser():
     queue.add_argument("--reason", required=True)
     # t5014: the mailbox retirement dry run is Rust-only.
     inbox_actions = next(a for a in root.choices["inbox"]._actions if isinstance(a, argparse._SubParsersAction))
-    inbox_actions.add_parser("retire", help="dry run: which mailboxes could be retired, and why the others stay (read-only)")
+    retire = inbox_actions.add_parser("retire", help="dry run: which mailboxes could be retired, and why the others stay (read-only); --apply retires named mailboxes (owner only)")
+    retire.add_argument("--apply", action="store_true", help="owner only: retire the --mailbox names that are classed retired now")
+    retire.add_argument("--mailbox", dest="mailboxes", action="append", metavar="NAME", help="with --apply: an exact mailbox name (repeatable); there is no class-wide apply")
+    retire.add_argument("--reason", help="with --apply: why (recorded)")
     # t4648: the backlog query is Rust-only; the Python CLI had no project mapping to count by.
     task = root.choices["task"]
     task_actions = next(a for a in task._actions if isinstance(a, argparse._SubParsersAction))

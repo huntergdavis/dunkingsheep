@@ -1,4 +1,10 @@
-usage: dunkingsheep inbox retire [-h]
+usage: dunkingsheep inbox retire [-h] [--apply] [--mailbox NAME]
+                                 [--reason REASON]
 
 options:
-  -h, --help  show this help message and exit
+  -h, --help       show this help message and exit
+  --apply          owner only: retire the --mailbox names that are classed
+                   retired now
+  --mailbox NAME   with --apply: an exact mailbox name (repeatable); there is
+                   no class-wide apply
+  --reason REASON  with --apply: why (recorded)
