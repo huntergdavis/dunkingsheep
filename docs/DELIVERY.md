@@ -426,3 +426,66 @@ numbered 115,189 across 47 lanes, with 87.0% in five lanes. This is a different
 retained window from the research snapshot (117,027). The metrics schema has no
 message/dialog identity, so lane concentration cannot establish distinct dialog
 counts or exact repeat counts. Evidence: `311-t4702-evidence/dialog-concentration.json`.
+
+### Opt-in thread pages (Rust desk adapter)
+
+`owner_conversation` keeps its existing message-list response unless an owner/web
+adapter supplies the socket-only `thread_mode` field. These fields add no public
+CLI flags or MCP schema arguments. Old desks, including b24f6409, keep using the
+legacy response; enabling the new list in a desk is a separate integration.
+
+A first thread list uses:
+
+```json
+{"thread_mode":"heads","source_filter":"human_threads","limit":25}
+```
+
+The response has `threads`, `next_cursor`, `source_filter`, `include_internal:false`,
+`view_revision`, `page_revision`, and `thread_mode`. Each thread contains:
+
+- `thread_id`: trusted root ID, or the individual message ID in Historical.
+- `latest`: recorded routing/lineage and sender/time/state metadata, plus a preview
+  of at most 240 Unicode characters. No full message body is returned in a head.
+- `message_count` and `unread_count`: counts over visible, non-cancelled rows;
+  unread means `state = 'queued'`, matching existing mailbox counts.
+
+Views are exactly `human_threads`, `vp_threads`, or `historical`; internal-audience
+opt-in and legacy timestamp/message cursors cannot be mixed with thread pages.
+Apply recorded visibility before grouping. A human-addressed agent notice in a VP
+thread is visible on its own in Your inbox; it does not expose the rest of that VP
+thread. Only the existing authenticated human-participation producer promotes a
+whole thread. Historical rows remain separate and retain unknown lineage and
+senderless-reply ambiguity instead of inventing conversation links or authors.
+
+Opening a thread uses the same filter and a separate messages page:
+
+```json
+{"thread_mode":"messages","source_filter":"human_threads","root_id":"i42","limit":50}
+```
+
+`messages` are chronological within each page; the first page contains the newest
+messages and its continuation loads earlier messages. Prepend earlier pages when
+rendering the complete conversation. Full bodies are returned only in detail.
+Both modes bound `limit` to 1..100 and use `thread_cursor` for the returned opaque
+continuation. A cursor belongs to its mode, filter, root (detail), and page size;
+clients should not parse or construct it. A missing or out-of-view detail is
+unavailable. GET-style queries never consume, read, acknowledge, or notify mail.
+
+Thread pages use a fixed initial numeric-message-ID fence so later replies cannot
+move unseen threads past an older-page cursor, including across clock changes.
+Fresh first-page polling sees new replies/threads and merges by `thread_id`.
+One short read transaction keeps the fence, membership, counts and revisions
+consistent. Existing promotion revisions invalidate visibility changes. A separate
+page revision invalidates cancellation, deletion, or changes to an existing
+message timestamp; ordinary read/ack transitions refresh unread counts without
+reordering or invalidating the page. On a changed-history refusal, start again
+with no cursor. Keep the existing five-second refresh in the future UI adapter.
+
+The inbox store creates two additive `IF NOT EXISTS` covering indexes at startup:
+`message_threads_by_view` and `message_thread_routes_recipient`. There is no global
+message ordering index or per-request DDL. Two additive SQLite triggers maintain
+`counters.thread_page_revision` for head-affecting existing-message mutations.
+No table/column is replaced and no historical messages are rewritten. Older
+binaries ignore these indexes and the extra counter; their existing writes remain
+valid with the triggers present. A release still requires its normal private
+rollback proof before activation.

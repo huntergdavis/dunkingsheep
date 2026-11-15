@@ -1576,6 +1576,7 @@ pub fn group_map() -> BTreeMap<&'static str, &'static [(&'static str, &'static s
 /// Internal socket-only arguments; these do not enlarge public MCP schemas.
 pub fn socket_only_params(name: &str) -> &'static [&'static str] {
     match name {
+        "owner_conversation" => &["thread_mode", "thread_cursor", "root_id"],
         "task_list" => &["paged", "page_size", "cursor", "priority", "page_group"],
         _ => &[],
     }

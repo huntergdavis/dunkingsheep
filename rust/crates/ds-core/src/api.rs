@@ -2145,8 +2145,75 @@ pub fn h_owner_delivered(context: &HandlerContext<'_>, args: Args) -> Result<Val
     }))
 }
 
+/// Socket-only opt-in: the existing list shape remains the default for older desks.
+fn h_owner_thread_page(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    use crate::inbox_store::{ThreadPageMode, ThreadPageOptions};
+    if args.contains_key("before") || args.contains_key("before_id") {
+        return Err(DunkError::Refused(
+            "thread pages cannot combine legacy cursors".into(),
+        ));
+    }
+    let mode = match args.get("thread_mode").and_then(Value::as_str) {
+        Some("heads") => ThreadPageMode::Heads,
+        Some("messages") => ThreadPageMode::Messages,
+        _ => {
+            return Err(DunkError::Refused(
+                "thread_mode must be heads or messages".into(),
+            ))
+        }
+    };
+    let limit = match args.get("limit") {
+        None => {
+            if mode == ThreadPageMode::Heads {
+                25
+            } else {
+                50
+            }
+        }
+        Some(value) => value
+            .as_i64()
+            .ok_or_else(|| DunkError::Refused("thread limit must be an integer".into()))?,
+    };
+    let source = args
+        .get("source_filter")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused("thread pages require source_filter".into()))?;
+    if args
+        .get("include_internal")
+        .is_some_and(|value| value != &Value::Bool(false))
+    {
+        return Err(DunkError::Refused(
+            "thread pages do not accept include_internal".into(),
+        ));
+    }
+    let filter = crate::owner::ConversationFilter::parse(source, false)?;
+    let string = |key: &str| -> Result<Option<String>, DunkError> {
+        match args.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(value)) => Ok(Some(value.clone())),
+            _ => Err(DunkError::Refused(format!("{key} must be a string"))),
+        }
+    };
+    crate::owner::OwnerConversations::new(context.flock, context.env).thread_page(
+        &ThreadPageOptions {
+            mode,
+            filter,
+            limit,
+            root_id: string("root_id")?,
+            cursor: string("thread_cursor")?,
+        },
+        context.self_pane_id(),
+    )
+}
+
 /// `dunk_api.h_owner_conversation`.
 pub fn h_owner_conversation(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    if ["thread_mode", "thread_cursor", "root_id"]
+        .iter()
+        .any(|key| args.contains_key(*key))
+    {
+        return h_owner_thread_page(context, args);
+    }
     let limit = match args.get("limit").filter(|value| truthy(value)) {
         None => 50,
         Some(value) => {

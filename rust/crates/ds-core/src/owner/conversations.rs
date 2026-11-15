@@ -251,6 +251,30 @@ impl<'a> OwnerConversations<'a> {
         Ok(mailboxes)
     }
 
+    /// Explicit opt-in thread pages retain the filtered owner/web authorization boundary.
+    pub fn thread_page(
+        &self,
+        options: &crate::inbox_store::ThreadPageOptions,
+        self_pane_id: Option<&str>,
+    ) -> Result<Value, DunkError> {
+        let role = self.flock.caller_role(self_pane_id, self.pane_env)?;
+        let result = if matches!(role.as_str(), "owner" | "web") {
+            self.inbox_store()
+                .and_then(|store| store.conversation_thread_page(options))
+        } else {
+            Err(DunkError::Refused(
+                "thread pages require the owner or web role".into(),
+            ))
+        };
+        eprintln!(
+            "{}",
+            serde_json::json!({"event":"owner_thread_page", "role":role,
+            "pane":self_pane_id, "mode":options.mode.name(), "source_filter":options.filter.name(),
+            "root_id":options.root_id, "result":if result.is_ok(){"ok"}else{"refused_or_error"}})
+        );
+        result
+    }
+
     /// Read one owner conversation window without consuming or acknowledging rows.
     pub fn conversation(
         &self,
@@ -1005,6 +1029,83 @@ mod tests {
             "owner_conversation",
             None,
         )
+    }
+
+    fn dispatch_thread_args(
+        fixture: &Fixture,
+        pane: &str,
+        args: Value,
+    ) -> Result<Value, DunkError> {
+        dispatch_thread_request(fixture, Some(pane), None, args)
+    }
+
+    fn dispatch_thread_request(
+        fixture: &Fixture,
+        pane: Option<&str>,
+        token: Option<String>,
+        args: Value,
+    ) -> Result<Value, DunkError> {
+        let env = TestEnv::default();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let request = RequestCtx {
+            self_pane_id: pane.map(str::to_owned),
+            service_token: token,
+            socket_peer: Some(false),
+            ..Default::default()
+        };
+        let context = crate::api::HandlerContext {
+            flock: &fixture.flock,
+            request: &request,
+            env: &env,
+            runtime: runtime.handle(),
+        };
+        let mut dispatcher = crate::api::Dispatcher::new();
+        dispatcher.register("owner_conversation", crate::api::h_owner_conversation);
+        dispatcher.dispatch(
+            &context,
+            &crate::api::FlockGate(&context),
+            "owner_conversation",
+            Some(args.as_object().unwrap().clone()),
+        )
+    }
+
+    #[test]
+    fn thread_page_dispatch_is_explicit_owner_web_only_and_legacy_shape_is_unchanged() {
+        let fixture = Fixture::new("thread-page-dispatch", true);
+        let args =
+            serde_json::json!({"thread_mode":"heads","source_filter":"human_threads","limit":25});
+        let result = dispatch_thread_args(&fixture, OWNER, args.clone()).unwrap();
+        assert_eq!(result["thread_mode"], "heads");
+        assert_eq!(result["threads"], serde_json::json!([]));
+        let token = fixture
+            .flock
+            .with_roles(|roles, _| roles.issue_token("web", Some("thread-page-private-test"), None))
+            .unwrap();
+        let web = dispatch_thread_request(&fixture, None, Some(token), args.clone()).unwrap();
+        assert_eq!(web["threads"], serde_json::json!([]));
+        for pane in [WORKER, DESK] {
+            assert!(dispatch_thread_args(&fixture, pane, args.clone()).is_err());
+        }
+        let old = dispatch_thread_args(
+            &fixture,
+            OWNER,
+            serde_json::json!({"before_id":null,"source_filter":"human_threads"}),
+        )
+        .unwrap();
+        assert!(old.get("messages").is_some());
+        assert!(old.get("threads").is_none());
+        for invalid in [
+            serde_json::json!({"thread_mode":"heads","source_filter":"human_threads","before_id":null}),
+            serde_json::json!({"thread_mode":"heads","source_filter":"human_threads","include_internal":true}),
+            serde_json::json!({"thread_mode":"heads","source_filter":"all"}),
+            serde_json::json!({"thread_mode":"messages","source_filter":"human_threads"}),
+            serde_json::json!({"thread_cursor":"{}","source_filter":"human_threads"}),
+            serde_json::json!({"thread_mode":"heads","source_filter":"human_threads","limit":false}),
+        ] {
+            assert!(dispatch_thread_args(&fixture, OWNER, invalid).is_err());
+        }
     }
 
     struct Fixture {

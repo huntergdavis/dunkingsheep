@@ -38,7 +38,9 @@ pub use retired::RetiredArchiveOptions;
 mod owner_handoff;
 mod owner_queries;
 mod owner_service;
+mod thread_pages;
 mod threads;
+pub use thread_pages::{ThreadPageMode, ThreadPageOptions};
 pub use threads::{ThreadKind, ThreadRoute, ThreadSender, ThreadTransportRef, ThreadWrite};
 const _: () = assert!(MAX_BLOB_BYTES > 0);
 
@@ -223,6 +225,7 @@ impl Store {
                 .map_err(|e| captured.sqlite(e, &db_path, "inbox_schema"))?;
             connection.execute_batch(pr_wait::SCHEMA).map_err(map_sqlite)?;
             connection.execute_batch(threads::SCHEMA).map_err(map_sqlite)?;
+            connection.execute_batch(thread_pages::SCHEMA).map_err(map_sqlite)?;
             connection
                 .execute_batch(mailbox_status::SCHEMA)
                 .map_err(map_sqlite)?;
