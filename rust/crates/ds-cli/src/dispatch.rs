@@ -3836,7 +3836,26 @@ fn watchdog(ns: &Map<String, Value>) -> Outcome {
     // telegram transport, so the Telegram outbox never carries an owner page and the phone is not paged.
     let mailbox_ns = ns.clone();
     let mailbox = OwnerMailbox::new(move || crate::daemon_cmd::raw_client(&mailbox_ns));
-    match run::run(&config, now, dry_run, &mut send, &mailbox, None, None) {
+    // Lazy: disabled/unused pane rules perform no RPC. The evaluator caches a
+    // successful projection once per run, shared by all seven dependent rules.
+    let panes = || {
+        crate::watchdog_panes::load(config["panes"]["source"].as_str().unwrap_or("none"), || {
+            let mut client = crate::daemon_cmd::raw_client(ns)?;
+            client.timeout = std::time::Duration::from_secs(5);
+            client
+                .call("list_panes", Map::new())
+                .map_err(|error| ds_core::error::DunkError::Unavailable(error.to_string()))
+        })
+    };
+    match run::run(
+        &config,
+        now,
+        dry_run,
+        &mut send,
+        &mailbox,
+        Some(&panes),
+        None,
+    ) {
         Ok(report) => Outcome {
             stdout: if matches!(ns.get("json"), Some(Value::Bool(true))) {
                 format!("{}\n", sorted_json(&report))

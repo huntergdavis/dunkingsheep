@@ -16,3 +16,5 @@ pub mod secrets_cmd;
 pub mod spec;
 pub mod usage_cmd;
 pub mod worktrees_cmd;
+
+mod watchdog_panes;
