@@ -3089,6 +3089,7 @@ where
                 let expected_verdict_ids = Vec::new();
                 let mut body = review_body(&pr, &detail, author.as_deref());
                 let source = match self.flock.pr_author(&repo, pr.number, &pr.head).await {
+                    Ok(Some(a)) if a.corrected_by.is_some()=>format!("planner correction by {}; task {}; reason {}; accumulated contributors: {}",a.corrected_by.as_deref().unwrap(),a.task.as_deref().unwrap_or("?"),json!(a.correction_reason.as_deref().unwrap_or("?")),a.contributors.join(", ")),
                     Ok(Some(a)) => format!(
                         "guarded author-task declaration; task {}; accumulated contributors: {}",
                         a.task.as_deref().unwrap_or("none for this head"),

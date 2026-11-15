@@ -574,10 +574,26 @@ After pushing, a writer runs one command:
 `dunkingsheep pr wait OWNER/REPO#PR --head FULL_SHA --author-task TASK_ID`.
 Use the full pushed SHA and your currently claimed work task. The guarded daemon
 records your authenticated process-bound lane and task for that exact PR head.
+The first declaration binds that work task to its repository/PR; a mismatched
+PR is refused without changes. Use one work task per PR.
 Ordinary waiters, shared Git identities and editable PR-body text do not declare
 authorship. Run the command again after each push. The first writer for a head
-remains its primary author; co-authors accumulate, and every earlier contributor
+remains its primary author unless a coordinator records an audited correction;
+co-authors accumulate, and every earlier contributor
 remains excluded from reviewing the PR.
+
+A process-bound planner with the repository/task project grant can correct an
+attribution using `dunkingsheep pr correct-author OWNER/REPO#PR --head FULL_SHA
+--author-task TASK_ID --author PANE --reason "explanation"` (one command).
+The named work task must be associated with the corrected writer. This is also
+the explicit coordinator exception for rebinding a task to a different PR.
+Contributors cannot correct their own PR, even after becoming a planner. The
+audit retains old/new author and task bindings, planner and reason. Old/new
+contributors remain excluded; conflicting live reviewer assignments/leases are
+removed, and live unjudged review attribution is refreshed. Completed verdicts
+and merge policy are unchanged. The distinct correction verb is refused by an
+older daemon before writes. A writer client also requires a task-binding receipt;
+an older declaration implementation cannot silently confirm the new guarantee.
 
 Missing or stale head attribution still files an author-unknown review, without
 automatic reviewer assignment. An unassigned author-unknown review cannot be
@@ -590,7 +606,7 @@ carry it to reviewers. A recorded verdict sends an inbox notice to the author;
 this is not a merge decision. Merge behavior is unchanged.
 
 Authorship and notice receipts are additive tables. Older daemons can open the
-store and perform ordinary task operations, but ignore these new records. After
+store and perform ordinary task operations, but ignore newer authorship/correction records. After
 rollback, route reviews manually to independently known reviewers until the
 attribution-aware daemon returns. Retain the tables; never backfill from shared
 Git identities. This is explicit work attribution, not proof of a GitHub push or

@@ -226,6 +226,9 @@ pub fn allowed(role: &str, command: &str) -> bool {
         return role == "web";
     }
 
+    if command == "pr_author_correct" {
+        return role == "planner";
+    }
     if command == "pr_wait" {
         return matches!(role, "owner" | "planner" | "worker" | "reviewer");
     }

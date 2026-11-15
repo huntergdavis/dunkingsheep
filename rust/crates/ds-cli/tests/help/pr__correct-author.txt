@@ -1,0 +1,16 @@
+usage: dunkingsheep pr correct-author [-h] --head HEAD
+                                      --author-task AUTHOR_TASK
+                                      --author AUTHOR --reason REASON [--json]
+                                      target
+
+positional arguments:
+  target                owner/repo#PR
+
+options:
+  -h, --help            show this help message and exit
+  --head HEAD           full head SHA
+  --author-task AUTHOR_TASK
+                        work task associated with the corrected writer
+  --author AUTHOR       corrected author pane ID
+  --reason REASON       nonempty audited correction reason
+  --json

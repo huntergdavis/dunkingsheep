@@ -95,3 +95,68 @@ pub(crate) fn notify_verdict(
     )
     .map(Some)
 }
+
+pub(super) fn correct(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    if context
+        .flock
+        .caller_role(context.self_pane_id(), context.env)?
+        != "planner"
+    {
+        return Err(DunkError::Refused(
+            "authorship correction requires a planner".into(),
+        ));
+    }
+    let planner = super::require_planner_assignment_binding(context)?.ok_or_else(|| {
+        DunkError::Refused("correction requires a live bound planner request".into())
+    })?;
+    let get = |key: &str| {
+        args.get(key)
+            .and_then(Value::as_str)
+            .ok_or_else(|| DunkError::Refused(format!("{key} is required")))
+    };
+    let target = get("target")?;
+    let (repo, number) = target
+        .rsplit_once('#')
+        .ok_or_else(|| DunkError::Refused("expected owner/repo#PR".into()))?;
+    let pr = number
+        .parse::<i64>()
+        .ok()
+        .filter(|p| *p > 0)
+        .ok_or_else(|| DunkError::Refused("expected positive PR".into()))?;
+    let tokens = context.env.github_tokens()?;
+    let policy = crate::review::ConfiguredReviewPolicy {
+        config_dir: tokens.config_dir().to_path_buf(),
+    };
+    if !crate::review::ReviewRepoConfig::repos(&policy)
+        .map_err(DunkError::Refused)?
+        .iter()
+        .any(|r| r == repo)
+    {
+        return Err(DunkError::Refused(
+            "repository is not in review registry".into(),
+        ));
+    }
+    let head = get("head")?.to_ascii_lowercase();
+    let task = get("author_task")?;
+    let author = get("author")?;
+    let reason = get("reason")?;
+    let tasks = context
+        .flock
+        .stores()
+        .tasks
+        .ok_or_else(|| DunkError::Refused("task store unavailable".into()))?;
+    let a = context.block_on(tasks.correct_pr_author(
+        repo,
+        pr,
+        &head,
+        task,
+        author,
+        reason,
+        planner,
+        context.env.now_s(),
+    ))??;
+    context.flock.wake_push();
+    Ok(
+        json!({"corrected":true,"authorship":{"author":a.author,"task":a.task,"contributors":a.contributors,"head":head,"corrected_by":a.corrected_by,"correction_reason":a.correction_reason,"task_binding":{"repo":repo,"pr":pr}}}),
+    )
+}

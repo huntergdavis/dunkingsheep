@@ -234,6 +234,9 @@ impl Fixture {
     }
 
     fn with(apps: &[&str], lanes: Value) -> Self {
+        Self::with_terminal(apps, lanes, None)
+    }
+    fn with_terminal(apps: &[&str], lanes: Value, terminal: Option<LoopTerminalFactory>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config");
         std::fs::create_dir_all(&config).unwrap();
@@ -253,9 +256,11 @@ impl Fixture {
             Box::new(OsAppFileSystem),
         );
         let env = Env::from_pairs(&[("DUNKINGSHEEP_DIR", config.to_str().unwrap())]);
-        let services =
-            RuntimeServices::new_with_github(runtime_inputs(dir.path(), env, lanes), None, github)
-                .unwrap();
+        let mut inputs = runtime_inputs(dir.path(), env, lanes);
+        if let Some(terminal) = terminal {
+            inputs.terminal_factory = terminal;
+        }
+        let services = RuntimeServices::new_with_github(inputs, None, github).unwrap();
         Self {
             services,
             endpoint,
@@ -761,4 +766,127 @@ fn review_author_registration_uses_bound_caller_not_wait_observers() {
     assert_eq!(result["authorship"]["author"], "%worker");
     assert_eq!(result["authorship"]["contributors"], json!(["%worker"]));
     assert!(f.endpoint.requests().is_empty());
+}
+
+#[test]
+fn author_binding_correction_rpc_requires_live_scoped_planner_and_ignores_wire_identity() {
+    let pid = i64::from(std::process::id());
+    let start = crate::proc::process_start(pid).unwrap();
+    let lanes = json!({"lanes":{"w1:p1":{"role":"planner","provider":"codex","pane_pid":pid,"start":start},"%worker":{"role":"worker","provider":"codex"}}});
+    let terminal: LoopTerminalFactory = Arc::new(move || {
+        let mut t = FakeTerminal::new();
+        t.panes[0].pane_pid = Some(pid);
+        Box::new(t)
+    });
+    let f = Fixture::with_terminal(&[], lanes, Some(terminal));
+    let tasks = f.tasks();
+    let h = "a".repeat(40);
+    let make = |pane: &str| {
+        let id = f
+            .block_on(tasks.add_with(
+                "global",
+                "writer",
+                "",
+                AddOptions {
+                    assignees: vec![pane.into()],
+                    ..Default::default()
+                },
+            ))
+            .unwrap()
+            .id;
+        f.block_on(tasks.claim_next(
+            "global",
+            pane,
+            crate::tasks::ClaimOptions {
+                allow_busy: true,
+                caller: Some((pid, Some(start.clone()), None)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        id
+    };
+    let wrong = make("w3:p3");
+    let real = make("w2:p2");
+    let caller = crate::proc::Caller::new(
+        Some(pid),
+        Some(start.clone()),
+        None,
+        Some("w3:p3".into()),
+        "agent",
+    );
+    f.block_on(tasks.declare_pr_author(
+        &wrong,
+        "o/r",
+        7,
+        &h,
+        "w3:p3",
+        &caller,
+        crate::clock::now_s(),
+    ))
+    .unwrap();
+    let db = rusqlite::Connection::open(tasks.path()).unwrap();
+    crate::tasks::planner_scope::set_grant(
+        &db,
+        "w1:p1",
+        pid,
+        &start,
+        &crate::tasks::lane_project::ProjectScope::Project("alpha".into()),
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO planner_repo_projects VALUES ('o/r','alpha')",
+        [],
+    )
+    .unwrap();
+    for id in [&wrong, &real] {
+        db.execute(
+            "INSERT INTO planner_task_projects VALUES (?1,'alpha')",
+            [id],
+        )
+        .unwrap();
+    }
+    let args = json!({"target":"o/r#7","head":h,"author_task":real,"author":"w2:p2","reason":"verified real writer"});
+    assert!(f
+        .dispatch("pr_author_correct", args.clone(), "%worker")
+        .is_err());
+    assert!(f
+        .dispatch("pr_author_correct", args.clone(), "w1:p1")
+        .is_err());
+    let request = RequestCtx {
+        self_pane_id: Some("w1:p1".into()),
+        socket_peer: Some(true),
+        socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
+        identity_bound: Some(true),
+        caller: Some(crate::proc::Caller::new(
+            Some(pid),
+            Some(start.clone()),
+            None,
+            Some("w1:p1".into()),
+            "agent",
+        )),
+        ..Default::default()
+    };
+    let receipt = f
+        .services
+        .production_dispatcher()
+        .dispatch("pr_author_correct", &args, &request)
+        .unwrap();
+    assert_eq!(receipt["authorship"]["author"], "w2:p2");
+    assert_eq!(receipt["authorship"]["corrected_by"], "w1:p1");
+    assert_eq!(
+        receipt["authorship"]["contributors"],
+        json!(["w2:p2", "w3:p3"])
+    );
+    let mut spoof = args.clone();
+    spoof["planner"] = json!("w1:p1");
+    assert!(f
+        .services
+        .production_dispatcher()
+        .dispatch("pr_author_correct", &spoof, &request)
+        .is_err());
+    assert!(
+        f.endpoint.requests().is_empty(),
+        "correction has no GitHub calls"
+    );
 }

@@ -24,6 +24,7 @@ fn every_python_command_is_present_and_no_extra_ones_are() {
         "owner_ingest_thread",
         "owner_delivered_thread",
         "pr_wait",
+        "pr_author_correct",
         "task_owner_answer",
         "task_owner_question",
         "owner_page",
