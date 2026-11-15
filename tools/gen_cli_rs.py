@@ -132,6 +132,12 @@ def load_parser():
     disk.add_argument("--max-seconds", dest="max_seconds", type=float, metavar="S", help="stop scanning after S seconds and mark the report partial (default: 300)")
     disk.add_argument("--max-dirs", dest="max_dirs", type=int, metavar="N", help="scan at most N directories and mark the report partial (default: 2000)")
     disk.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    # t4705: read-only inventory of every worktree of the repository.
+    inventory = worktree_actions.add_parser("inventory", help="read-only: every worktree of the repository with its class, build caches and why the cleaner keeps each")
+    inventory.add_argument("--repo", metavar="DIR", help="the repository (default: the current directory)")
+    inventory.add_argument("--root", metavar="DIR", help="the worktree root (default: ~/workspace/.dunk-port-work)")
+    inventory.add_argument("--max-seconds", dest="max_seconds", type=float, metavar="S", help="stop after S seconds and mark the report partial (default: 300)")
+    inventory.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     clean = worktree_actions.add_parser("clean", help="delete merged worktrees' Cargo build caches; a dry run unless --apply")
     clean.add_argument("--root", metavar="DIR", help="the worktree root (default: ~/workspace/.dunk-port-work)")
     clean.add_argument("--apply", action="store_true", help="delete; needs --from, and every cache is checked again right before it is deleted")

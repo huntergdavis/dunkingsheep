@@ -102,8 +102,12 @@ impl Budget {
         Budget::new(86_400.0, usize::MAX)
     }
 
-    fn spent(&self) -> bool {
+    pub fn spent(&self) -> bool {
         self.started.elapsed() >= self.max
+    }
+
+    pub fn elapsed(&self) -> std::time::Duration {
+        self.started.elapsed()
     }
 }
 
@@ -336,6 +340,52 @@ fn age(now: f64, newest: Option<f64>) -> Option<i64> {
     newest.map(|at| (now - at).max(0.0).floor() as i64)
 }
 
+/// Every reason the report keeps one build cache (empty: eligible). Shared with the worktree
+/// inventory (t4705), so the inventory's "why the cleaner skips it" cannot disagree with this
+/// report. `busy_here` is whether a running process works in the directory or the cache, or
+/// why the process table could not be read.
+pub fn cache_keep_reasons(
+    tagged: bool,
+    used: &Usage,
+    pr: &PrLink,
+    now: f64,
+    busy_here: Result<bool, &str>,
+) -> Vec<String> {
+    let mut keep: Vec<String> = Vec::new();
+    if !tagged {
+        keep.push("no Cargo cache tag: not known to be a build cache".into());
+    }
+    if used.unreadable > 0 {
+        keep.push("part of it could not be read, so its age is not known".into());
+    }
+    if used.truncated {
+        keep.push("the scan ran out of time before reading it fully".into());
+    }
+    match pr.state.as_str() {
+        "merged" | "closed" => {}
+        "open" => keep.push("its pull request is open".into()),
+        "none" => keep.push(format!(
+            "no pull request: {}",
+            pr.reason.as_deref().unwrap_or("none found for the branch")
+        )),
+        _ => keep.push(format!(
+            "pull request state unknown: {}",
+            pr.reason.as_deref().unwrap_or("not read")
+        )),
+    }
+    match age(now, used.newest) {
+        Some(seconds) if seconds as f64 > UNTOUCHED_S => {}
+        Some(_) => keep.push("changed in the last 12 hours".into()),
+        None => keep.push("its age could not be read".into()),
+    }
+    match busy_here {
+        Err(error) => keep.push(format!("running processes could not be read: {error}")),
+        Ok(true) => keep.push("a running process works in this directory".into()),
+        Ok(false) => {}
+    }
+    keep
+}
+
 /// The report for every directory directly below `root`. `link` says which pull request a
 /// directory belongs to; `busy` is `busy_paths`, or its error.
 pub fn report(
@@ -399,41 +449,13 @@ pub fn report_within(
             total.add(used);
             target_bytes += used.bytes;
             let target_real = real(&target);
-            let mut keep: Vec<String> = Vec::new();
-            if !tagged {
-                keep.push("no Cargo cache tag: not known to be a build cache".into());
-            }
-            if used.unreadable > 0 {
-                keep.push("part of it could not be read, so its age is not known".into());
-            }
-            if used.truncated {
-                keep.push("the scan ran out of time before reading it fully".into());
-            }
-            match pr.state.as_str() {
-                "merged" | "closed" => {}
-                "open" => keep.push("its pull request is open".into()),
-                "none" => keep.push(format!(
-                    "no pull request: {}",
-                    pr.reason.as_deref().unwrap_or("none found for the branch")
-                )),
-                _ => keep.push(format!(
-                    "pull request state unknown: {}",
-                    pr.reason.as_deref().unwrap_or("not read")
-                )),
-            }
-            match age(now, used.newest) {
-                Some(seconds) if seconds as f64 > UNTOUCHED_S => {}
-                Some(_) => keep.push("changed in the last 12 hours".into()),
-                None => keep.push("its age could not be read".into()),
-            }
-            match &busy_real {
-                Err(error) => keep.push(format!("running processes could not be read: {error}")),
+            let busy_here = match &busy_real {
+                Err(error) => Err(*error),
                 Ok(paths) => {
-                    if dir_busy || paths.iter().any(|path| path.starts_with(&target_real)) {
-                        keep.push("a running process works in this directory".into());
-                    }
+                    Ok(dir_busy || paths.iter().any(|path| path.starts_with(&target_real)))
                 }
-            }
+            };
+            let keep = cache_keep_reasons(tagged, &used, &pr, now, busy_here);
             let eligible = keep.is_empty();
             if eligible {
                 eligible_bytes += used.bytes;
