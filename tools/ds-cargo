@@ -11,14 +11,20 @@ export RUSTC="$toolchain/rustc"
 export RUSTDOC="$toolchain/rustdoc"
 export RUSTFLAGS=${RUSTFLAGS:--D warnings}
 export PROJ_CARGO_TIMEOUT_SECONDS=${DS_CARGO_TIMEOUT_SECONDS:-3600}
-# t3912: test and build-script temp files go under this checkout's Cargo target (workspace
-# disk, cleaned with the build cache), not the small shared /tmp. A TMPDIR the caller set to
-# anything but /tmp is kept. Outside a git checkout nothing changes.
+# t3912: test and build-script temp files go to a SHORT per-checkout directory on the workspace
+# disk, not the small shared /tmp: ~/workspace/.dunk-scratch/c/<8 hex of the checkout path>.
+# Short, because tests make Unix sockets under it and a socket path may have only 107 bytes;
+# a directory longer than DS_CARGO_TMP_MAX (56) is refused with an error instead of used.
+# A TMPDIR the caller set to anything but /tmp is kept. Outside a git checkout nothing changes.
 if [[ -z ${TMPDIR:-} || ${TMPDIR%/} == /tmp ]] && top=$(git rev-parse --show-toplevel 2>/dev/null); then
-    target=${CARGO_TARGET_DIR:-$top/rust/target}
-    [[ $target == /* ]] || target=$PWD/$target
-    if mkdir -p -m 700 -- "$target/tmp" 2>/dev/null; then
-        export TMPDIR=$target/tmp
+    key=$(printf '%s' "$top" | sha256sum | cut -c1-8)
+    scratch=${HOME:?HOME is not set}/workspace/.dunk-scratch/c/$key
+    if (( ${#scratch} > ${DS_CARGO_TMP_MAX:-56} )); then
+        echo "ds-cargo: scratch directory $scratch is ${#scratch} bytes, over ${DS_CARGO_TMP_MAX:-56}; Unix socket paths under it would not fit. Set TMPDIR to a shorter directory." >&2
+        exit 2
     fi
+    mkdir -p -m 700 -- "$HOME/workspace/.dunk-scratch" "$HOME/workspace/.dunk-scratch/c"
+    mkdir -p -m 700 -- "$scratch"
+    export TMPDIR=$scratch
 fi
 exec "$(dirname -- "$(readlink -f -- "$0")")/proj-cargo" dunkingsheep "$@"
