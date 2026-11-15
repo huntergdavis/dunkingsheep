@@ -497,7 +497,8 @@ pub fn roster(env: &dyn RosterEnv, now: f64) -> Result<Value, String> {
             Some(name) => (Some(name.to_string()), Some("registry")),
             None => match launch
                 .as_ref()
-                .filter(|_| launch_bound != Some(false))
+                // `Some(Some(false))`: the record names a process, and it is not running here.
+                .filter(|_| launch_bound != Some(Some(false)))
                 .and_then(|record| record.get("argv"))
                 .and_then(Value::as_array)
                 .and_then(|argv| launch_harness(argv))
