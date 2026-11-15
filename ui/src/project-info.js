@@ -1,3 +1,4 @@
+import { formatTimestamp } from './timestamps.js';
 // The project information browser (t3250): pure helpers for the desk panel.
 
 export const CLASS_LABELS = {
@@ -24,12 +25,12 @@ export function viewStateText(view) {
 }
 
 // The provenance line of an entry: type, authority, source, and its standing.
-export function provenance(entry) {
+export function provenance(entry, timeZone) {
   const parts = [];
   if (entry.type) parts.push(entry.type);
   if (entry.authority) parts.push(`authority: ${entry.authority}`);
   if (entry.source) parts.push(`source: ${entry.source}`);
-  if (entry.stated) parts.push(`stated ${entry.stated}`);
+  if (entry.stated) parts.push(`stated ${formatTimestamp(entry.stated, timeZone)}`);
   return parts.join(' · ');
 }
 

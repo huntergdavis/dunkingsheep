@@ -1,3 +1,5 @@
+import { useServerTimeZone } from './Timestamp';
+import { timestampIso } from './timestamps.js';
 import React, { useEffect, useState } from 'react';
 import { CLASS_LABELS, provenance, requestedStore, splitEntries, standing, storeSearch, viewStateText } from './project-info.js';
 
@@ -5,9 +7,10 @@ import { CLASS_LABELS, provenance, requestedStore, splitEntries, standing, store
 // value is rendered as text by React; nothing here writes to a store.
 function Entry({ entry }) {
   const marks = standing(entry);
+  const timeZone = useServerTimeZone();
   return <article className="info-entry" data-info-entry={entry.slug}>
     <h4>{entry.subject || entry.slug} <small>{CLASS_LABELS[entry.class] || entry.class || 'Unclassified'}</small></h4>
-    {provenance(entry) && <p className="info-provenance">{provenance(entry)}</p>}
+    {provenance(entry, timeZone) && <p className="info-provenance" title={timestampIso(entry.stated) || undefined}>{provenance(entry, timeZone)}</p>}
     {marks.length > 0 && <p className="info-standing" role="note">{marks.join(' · ')}</p>}
     <details><summary>Show text</summary><pre className="info-body">{entry.body}{entry.body_truncated ? '\n… (truncated)' : ''}</pre></details>
   </article>;

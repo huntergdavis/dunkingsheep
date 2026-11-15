@@ -54,6 +54,7 @@ fn config(dir: &Path) -> DeskConfig {
     std::fs::create_dir_all(dir.join("config")).unwrap();
     std::fs::create_dir_all(dir.join("home")).unwrap();
     DeskConfig {
+        time_zone: Some("America/Los_Angeles".into()),
         data_dir: dir.join("desk"),
         config_dir: dir.join("config"),
         home: dir.join("home"),

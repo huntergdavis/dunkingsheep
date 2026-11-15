@@ -1,3 +1,4 @@
+import Timestamp from './Timestamp';
 import React, { useEffect, useRef, useState } from 'react';
 import { Message } from '@chatscope/chat-ui-kit-react';
 import { EditorContent, useEditor } from '@tiptap/react';
@@ -77,7 +78,7 @@ function MessageCard({ item, highlight, onSendNow, onInspect, frontDesk = false 
   const waitingMinutes = Math.floor(waitingSeconds / 60);
   const heldForDraft = item.delivery_detail?.includes('someone is typing') || item.delivery_detail?.includes('input box contains a draft');
   return <div className={`message-wrap ${senderClass} ${highlight ? 'highlight' : ''}`} id={`message-${item.id}`}>
-    <div className="message-meta"><strong>{senderLabel}</strong><span>{new Date(item.created_at).toLocaleString()}</span>{owner && <span className={`delivery ${item.delivery}`} title={item.delivery_detail}>{deliveryLabel}</span>}</div>
+    <div className="message-meta"><strong>{senderLabel}</strong><Timestamp value={item.created_at} />{owner && <span className={`delivery ${item.delivery}`} title={item.delivery_detail}>{deliveryLabel}</span>}</div>
     <Message model={{ message: '', direction: owner ? 'outgoing' : 'incoming', position: 'single', sender: senderLabel }}>
       <Message.CustomContent><MessageBody body={item.body} frontDesk={frontDesk} />
         {item.attachments?.length > 0 && <div className="attachments">{item.attachments.map(a => <div key={a.id} className="attachment-card">{['image/png','image/jpeg','image/gif','image/webp'].includes(a.mime) && <a href={`/api/uploads/${a.id}`} target="_blank" rel="noreferrer"><img src={`/api/uploads/${a.id}?preview=true`} loading="lazy" alt={a.filename} /></a>}<a href={`/api/uploads/${a.id}`} target="_blank" rel="noreferrer">📎 {a.filename}</a></div>)}</div>}</Message.CustomContent>
@@ -114,7 +115,7 @@ function Search({ onClose, onJump }) {
   return <div className="modal-backdrop" onMouseDown={onClose}><div className="search-modal" onMouseDown={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Search conversation history">
     <div className="search-head"><input autoFocus placeholder="Search messages across projects…" value={q} onChange={e => setQ(e.target.value)} /><button onClick={onClose}>Esc ×</button></div>
     <div className="search-results">{busy && <div className="muted">Searching…</div>}{!busy && q.length >= 2 && !results.length && <div className="muted">No matching messages</div>}
-      {results.map(item => <button key={item.id} className="search-result" onClick={() => { onJump(item); onClose(); }}><span>{item.channel.toUpperCase()} · {new Date(item.created_at).toLocaleString()}</span><strong>{item.body.slice(0, 260)}</strong></button>)}
+      {results.map(item => <button key={item.id} className="search-result" onClick={() => { onJump(item); onClose(); }}><span>{item.channel.toUpperCase()} · <Timestamp value={item.created_at} /></span><strong>{item.body.slice(0, 260)}</strong></button>)}
       {hasMore && <button className="search-more" onClick={loadMore} disabled={busy}>{busy ? 'Loading…' : 'More results'}</button>}</div>
   </div></div>;
 }
