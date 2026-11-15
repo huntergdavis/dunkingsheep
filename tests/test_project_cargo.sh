@@ -126,8 +126,38 @@ got=$(ds "$fixture/dscargo/repo/rust" TMPDIR=/tmp)
 [[ $(stat -c %a "$short_home/workspace/.dunk-scratch") == 700 ]] || { echo "scratch parent is not 0700" >&2; exit 1; }
 # The same checkout always gets the same directory, from any subdirectory.
 [[ $(ds "$fixture/dscargo/repo" TMPDIR=/tmp) == "$got" ]] || { echo "not stable per checkout" >&2; exit 1; }
-got=$(ds "$fixture/dscargo/repo/rust" TMPDIR="$fixture/dscargo/mine")
-[[ $got == "TMPDIR=$fixture/dscargo/mine" ]] || { echo "an explicit TMPDIR was replaced: $got" >&2; exit 1; }
+# A lane's own (long) TMPDIR is replaced by the short per-checkout one...
+got=$(ds "$fixture/dscargo/repo/rust" TMPDIR="$fixture/dscargo/lane-scratch-with-a-long-name")
+[[ $got == "TMPDIR=$short_home/workspace/.dunk-scratch/c/$key" ]] || { echo "a lane TMPDIR was kept: $got" >&2; exit 1; }
+# ...and DS_CARGO_TMPDIR is the one explicit override.
+# A short root that is not under /tmp, named as an allowed root.
+allowed_root=$(mktemp -d "$HOME/.dsch.XXXX")
+got=$(ds "$fixture/dscargo/repo/rust" TMPDIR=/tmp DS_CARGO_TMP_ROOTS="$allowed_root" DS_CARGO_TMPDIR="$allowed_root/m")
+[[ $got == "TMPDIR=$allowed_root/m" ]] || { echo "DS_CARGO_TMPDIR was not used: $got" >&2; exit 1; }
+[[ $(stat -c %a "$allowed_root/m") == 700 ]] || { echo "the override directory is not 0700" >&2; exit 1; }
+expect_exit 2 ds "$fixture/dscargo/repo/rust" DS_CARGO_TMP_ROOTS="$allowed_root" DS_CARGO_TMPDIR="$short_home/m" 2> "$fixture/dscargo/under-tmp.log"
+grep -q "may not be under /tmp" "$fixture/dscargo/under-tmp.log"
+expect_exit 2 ds "$fixture/dscargo/repo/rust" DS_CARGO_TMPDIR="$allowed_root/m" 2> "$fixture/dscargo/not-allowed.log"
+grep -q "must be under ~/workspace or a root in DS_CARGO_TMP_ROOTS" "$fixture/dscargo/not-allowed.log"
+# Path tricks are refused (review t5290): '..' back into /tmp, '//tmp', '.', and '/' as a root.
+expect_exit 2 ds "$fixture/dscargo/repo/rust" DS_CARGO_TMPDIR="$HOME/workspace/../../../tmp/x" 2> "$fixture/dscargo/dotdot.log"
+grep -q "plain absolute path" "$fixture/dscargo/dotdot.log"
+expect_exit 2 ds "$fixture/dscargo/repo/rust" DS_CARGO_TMP_ROOTS=/ DS_CARGO_TMPDIR=//tmp/x 2> "$fixture/dscargo/slashslash.log"
+grep -q "plain absolute path" "$fixture/dscargo/slashslash.log"
+expect_exit 2 ds "$fixture/dscargo/repo/rust" DS_CARGO_TMP_ROOTS="$allowed_root" DS_CARGO_TMPDIR="$allowed_root/./m" 2> "$fixture/dscargo/dot.log"
+grep -q "plain absolute path" "$fixture/dscargo/dot.log"
+expect_exit 2 ds "$fixture/dscargo/repo/rust" DS_CARGO_TMP_ROOTS=/ DS_CARGO_TMPDIR=/var/x 2> "$fixture/dscargo/slash-root.log"
+grep -q "must be under ~/workspace or a root" "$fixture/dscargo/slash-root.log"
+# A symbolic link under an allowed root that leads into /tmp is refused.
+ln -s "$short_home" "$allowed_root/l"
+expect_exit 2 ds "$fixture/dscargo/repo/rust" DS_CARGO_TMP_ROOTS="$allowed_root" DS_CARGO_TMPDIR="$allowed_root/l/x" 2> "$fixture/dscargo/link.log"
+grep -q "may not be under /tmp" "$fixture/dscargo/link.log"
+rm -r -- "$allowed_root"
+# The override is held to the same rules: absolute, and short enough.
+expect_exit 2 ds "$fixture/dscargo/repo/rust" DS_CARGO_TMPDIR=relative/dir 2> "$fixture/dscargo/relative.log"
+grep -q "must be an absolute path" "$fixture/dscargo/relative.log"
+expect_exit 2 ds "$fixture/dscargo/repo/rust" DS_CARGO_TMP_ROOTS="$fixture" DS_CARGO_TMPDIR="$fixture/dscargo/$(printf 'x%.0s' {1..80})" 2> "$fixture/dscargo/override-long.log"
+grep -q "Unix socket paths under it would not fit" "$fixture/dscargo/override-long.log"
 # The fixture may itself sit inside a checkout: stop git looking above it.
 got=$(ds "$fixture/dscargo" TMPDIR=/tmp GIT_CEILING_DIRECTORIES="$fixture")
 [[ $got == "TMPDIR=/tmp" ]] || { echo "outside a checkout: $got" >&2; exit 1; }
