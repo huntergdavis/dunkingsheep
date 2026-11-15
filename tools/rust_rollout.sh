@@ -51,22 +51,42 @@ DROPIN=$DROPIN_DIR/99-rust-cutover.conf
 SQLITE_FILES="tasks.db inbox.db context-ledger.db dispatch.db agent-state.db"
 
 cmd=${1:-plan}; shift || true
-SHA=""; APPLY=0; UNIT=""; ARTIFACT=""; ARTIFACT_SHA=""
+SHA=""; APPLY=0; UNIT=""; ARTIFACT=""; ARTIFACT_SHA=""; PACKET=""; PACKET_SHA=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --sha) [ $# -ge 2 ] || { echo "--sha needs a value" >&2; exit 2; }; SHA=$2; shift 2;;
-    --unit|--artifact|--artifact-sha256)
+    --unit|--artifact|--artifact-sha256|--packet|--packet-sha)
       [ $# -ge 2 ] || { echo "$1 needs a value" >&2; exit 2; }
       case "$1" in
         --unit) UNIT=$2;;
         --artifact) ARTIFACT=$2;;
         --artifact-sha256) ARTIFACT_SHA=$2;;
+        --packet) PACKET=$2;;
+        --packet-sha) PACKET_SHA=$2;;
       esac
       shift 2;;
     --apply) APPLY=1; shift;;
     *) echo "unknown argument: $1" >&2; exit 2;;
   esac
 done
+
+# t4699 slice 2: the existing entrypoint delegates reviewed coordinated packets
+# to the native helper. No implicit build or Python fallback; legacy paths below
+# remain separate. Every operation is dry-run unless --apply is explicit.
+if [ -n "$PACKET$PACKET_SHA" ]; then
+  [ -n "$PACKET" ] && [ -n "$PACKET_SHA" ] || die "--packet and --packet-sha are required together"
+  [ -z "$SHA$UNIT$ARTIFACT$ARTIFACT_SHA" ] || die "packet mode cannot mix legacy/unit artifact flags"
+  case "$cmd" in plan|activate|verify|rollback) ;; *) die "packet mode supports plan, activate, verify, rollback";; esac
+  require_plain_path packet "$PACKET"
+  helper=${RUST_RELEASE_OPERATOR:-$(command -v ds-release || true)}
+  [ -n "$helper" ] || die "install the reviewed ds-release helper or set RUST_RELEASE_OPERATOR; no helper is built automatically"
+  require_plain_path RUST_RELEASE_OPERATOR "$helper"
+  [ -f "$helper" ] && [ -x "$helper" ] && [ ! -L "$helper" ] || die "release helper must be a regular non-symlink executable"
+  if [ "$APPLY" = 1 ] && [ "$cmd" != plan ]; then
+    exec "$helper" "$cmd" --packet "$PACKET" --packet-sha "$PACKET_SHA" --apply
+  fi
+  exec "$helper" "$cmd" --packet "$PACKET" --packet-sha "$PACKET_SHA"
+fi
 if [ -n "$SHA" ]; then
   case "$cmd" in
     plan|stage|activate) ;;
