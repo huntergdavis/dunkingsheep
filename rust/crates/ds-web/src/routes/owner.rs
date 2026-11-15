@@ -860,8 +860,14 @@ fn owner_thread_item(row: &Value) -> Value {
         "attachments": []
     });
     if role == "owner" {
-        let answered = row.get("answered").is_some_and(is_truthy);
-        let read = row.get("read_at").is_some_and(is_truthy);
+        // The old daemon's SELECT * returns 0/1; the corrected daemon returns bool.
+        // Absence is unknown provenance during a downgrade, never an answer claim.
+        let explicit = row
+            .get("implicit_ack")
+            .is_some_and(|value| matches!(value, Value::Bool(false)) || value.as_i64() == Some(0));
+        let claimed_answer = row.get("answered").is_some_and(is_truthy);
+        let answered = claimed_answer && explicit;
+        let read = row.get("read_at").is_some_and(is_truthy) || claimed_answer;
         item["delivery"] = json!(if answered {
             "acked"
         } else if read {
@@ -1293,6 +1299,12 @@ mod handling_tests {
         let item = owner_thread_item(&store.conversation("owner", None, None).unwrap()[0]);
         assert_eq!(item["delivery"], "read");
         assert_eq!(item["outcome"], "Read by agent");
+        let mut rollback_row = store.conversation("owner", None, None).unwrap().remove(0);
+        rollback_row["answered"] = json!(true); // Old daemon uses raw acked_at.
+        rollback_row["implicit_ack"] = json!(1); // Old SELECT * still returns the column.
+        assert_eq!(owner_thread_item(&rollback_row)["delivery"], "read");
+        rollback_row.as_object_mut().unwrap().remove("implicit_ack");
+        assert_eq!(owner_thread_item(&rollback_row)["delivery"], "read");
         store.ack(std::slice::from_ref(&id), Some("owner")).unwrap();
         let item = owner_thread_item(&store.conversation("owner", None, None).unwrap()[0]);
         assert_eq!(item["delivery"], "acked");
@@ -2194,7 +2206,7 @@ mod tests {
         let backend = Arc::new(FakeOwner::new());
         backend.reply("owner_conversation", json!({
             "messages": [
-                {"id":"i5", "body":"q1", "created_at":1000.0, "transport":"web", "sender":null, "reply_to":null, "answered":true},
+                {"id":"i5", "body":"q1", "created_at":1000.0, "transport":"web", "sender":null, "reply_to":null, "answered":true, "implicit_ack":false},
                 {"id":"i6", "body":formatted, "created_at":1010.0, "transport":"web", "sender":"%133", "reply_to":"i5"},
                 {"id":"i9", "body":"agent report", "created_at":1020.0, "transport":null, "sender":"%21", "reply_to":null, "answered":false},
                 {"id":"i10", "body":"human follow-up", "created_at":1030.0, "transport":"web", "sender":null, "reply_to":"i9"},

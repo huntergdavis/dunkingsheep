@@ -450,7 +450,8 @@ impl Store {
                 let Some(object) = row.as_object_mut() else {
                     continue;
                 };
-                object.remove("implicit_ack"); // Internal consumption provenance, not conversation metadata.
+                let implicit = object.get("implicit_ack").is_some_and(truthy);
+                object.insert("implicit_ack".into(), Value::Bool(implicit));
                 object.insert("answered".to_string(), Value::Bool(answered));
                 if thread_view == Some("historical") {
                     let fields=["thread_version","parent_id","root_id","conversation_kind","sender_kind"];
@@ -767,7 +768,7 @@ mod tests {
             .conversation("owner", None, None)
             .unwrap()
             .iter()
-            .all(|row| row.get("implicit_ack").is_none()));
+            .all(|row| row.get("implicit_ack").is_some_and(Value::is_boolean)));
     }
 
     #[test]

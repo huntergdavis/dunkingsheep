@@ -2553,15 +2553,16 @@ impl SearchAttachmentsBackend for MessagesBackend {
 }
 
 /// An acked state consumes mail; only an explicit acknowledgement or reply handles it.
-/// Older daemons omit the flag because all their acknowledgements were explicit.
+/// Missing provenance is conservative: an old daemon after rollback may read
+/// rows consumed implicitly by the newer daemon.
 fn inbox_delivery(status: &Map<String, Value>) -> Option<&'static str> {
     match status.get("state").and_then(Value::as_str) {
         Some("queued") => Some("inbox"),
         Some("read") => Some("read"),
-        Some("acked") if status.get("implicit_ack").and_then(Value::as_bool) == Some(true) => {
-            Some("read")
+        Some("acked") if status.get("implicit_ack").and_then(Value::as_bool) == Some(false) => {
+            Some("acked")
         }
-        Some("acked") => Some("acked"),
+        Some("acked") => Some("read"),
         Some("cancelled") => Some("cancelled"),
         _ => None,
     }
@@ -2623,9 +2624,18 @@ mod unit {
         let status = inbox::status(&pool, &second, 20.0).unwrap();
         assert!(!status.implicit_ack);
         assert_eq!(
-            inbox_delivery(json!({"state":status.state}).as_object().unwrap()),
+            inbox_delivery(
+                json!({"state":status.state, "implicit_ack":false})
+                    .as_object()
+                    .unwrap()
+            ),
             Some("acked")
-        ); // Old-daemon explicit ACK.
+        );
+        assert_eq!(
+            inbox_delivery(json!({"state":"acked"}).as_object().unwrap()),
+            Some("read"),
+            "old rollback daemon omits provenance even for a retained implicit row"
+        );
     }
 
     /// Runs `python3 -c` and returns its stdout, failing the test if Python is absent.

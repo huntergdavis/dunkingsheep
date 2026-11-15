@@ -2256,10 +2256,7 @@ fn privileged_owner_read_is_seen_not_answered_until_explicit_ack() {
     let explicit = dispatcher
         .dispatch("inbox_status", &json!({"message_id":id}), &web)
         .unwrap();
-    assert!(
-        explicit.get("implicit_ack").is_none(),
-        "legacy explicit status shape remains unchanged"
-    );
+    assert_eq!(explicit["implicit_ack"], false);
     assert_eq!(
         store.conversation("owner", None, None).unwrap()[0]["answered"],
         true
@@ -2308,7 +2305,7 @@ fn threaded_lane_read_then_reply_records_explicit_handling() {
     let status = dispatcher
         .dispatch("inbox_status", &json!({"message_id":id}), &worker)
         .unwrap();
-    assert!(status.get("implicit_ack").is_none());
+    assert_eq!(status["implicit_ack"], false);
     assert_eq!(
         store.conversation("w1:p1", None, None).unwrap()[0]["answered"],
         true

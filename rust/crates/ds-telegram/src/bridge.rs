@@ -802,7 +802,12 @@ fn message_line(name: &str, row: &Value) -> String {
         "{name} message #{}: {}",
         row.get("id").map(display).unwrap_or_default(),
         if row.get("state").and_then(Value::as_str) == Some("acked")
-            && row.get("answered").and_then(Value::as_bool) == Some(false)
+            && (row.get("answered").and_then(Value::as_bool) == Some(false)
+                || !row
+                    .get("implicit_ack")
+                    .is_some_and(
+                        |value| matches!(value, Value::Bool(false)) || value.as_i64() == Some(0)
+                    ))
         {
             "read".to_owned()
         } else {
@@ -832,8 +837,22 @@ mod handling_tests {
             "Desk message #i1: read"
         );
         assert_eq!(
-            message_line("Desk", &json!({"id":"i1","state":"acked","answered":true})),
+            message_line(
+                "Desk",
+                &json!({"id":"i1","state":"acked","answered":true,"implicit_ack":false})
+            ),
             "Desk message #i1: acked"
+        );
+        assert_eq!(
+            message_line(
+                "Desk",
+                &json!({"id":"i1","state":"acked","answered":true,"implicit_ack":1})
+            ),
+            "Desk message #i1: read"
+        );
+        assert_eq!(
+            message_line("Desk", &json!({"id":"i1","state":"acked","answered":true})),
+            "Desk message #i1: read"
         );
         assert_eq!(
             message_line(

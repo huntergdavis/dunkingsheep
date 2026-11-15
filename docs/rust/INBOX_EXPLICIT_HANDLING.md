@@ -9,24 +9,25 @@ recovery still clears only explicitly named IDs.
 
 The migration adds `implicit_ack INTEGER NOT NULL DEFAULT 0` under an immediate
 transaction. It does not update historical rows or timestamps. Legacy rows retain
-explicit meaning. Status adds `implicit_ack: true` only for implicit consumption;
-legacy explicit response shapes remain unchanged. Read-only status also accepts
-pre-column databases. Conversation/reply rows omit the internal flag.
+explicit meaning. Status and conversation rows expose boolean `implicit_ack`;
+`false` proves the corrected producer distinguished explicit handling. Read-only
+status also accepts pre-column databases. Legacy reply-only rows retain their shape.
 
 ## Human-visible consumers audited
 
 - Owner conversation `answered`: a linked reply or ack timestamp with implicit
   flag clear. Implicit owner-mailbox reads keep the question unanswered/waiting.
 - Desk lane delivery refresh: implicit ack maps to Read by agent; explicit ack or
-  linked reply maps to Handled by agent. A send response lacks provenance, so an
+  linked reply with explicit `implicit_ack=false` maps to Handled by agent.
+  Missing provenance (old daemon) is conservatively Read. A send response lacks provenance, so an
   already-acked send result conservatively shows Read pending status refresh.
 - Desk owner thread: unanswered rows with `read_at` show Read by agent; answered
   rows show answered. A timestamp alone no longer claims handling.
 - `message_state` seen cell: retain `read_at`, suppress `seen.acked_at` for an
   implicit ack. Raw `inbox_status.acked_at` remains a storage/consumption timestamp.
 - Telegram `/status`: the owner-conversation row with acked state and
-  `answered=false` says read; answered/legacy rows retain their existing state
-  wording. Delivery receipts/outbox routing use `delivered_at`, not `acked_at`.
+  `answered=false`, implicit, or missing provenance says read; only known explicit
+  provenance allows acked wording. Delivery receipts/outbox routing use `delivered_at`, not `acked_at`.
 - Digest: `digest_waiting` requires both read and ack timestamps to be absent;
   it denotes unconsumed mail, not human handling. No handled/answered wording is
   derived from `acked_at` there. Replacing a digest resets the provenance flag.
@@ -51,9 +52,15 @@ inserts defaulted to zero. Evidence: `311-t5152-evidence/rollback-result.json`,
 SHA91b23f4b27f2edca997c4b8c04eb9546799cb2b3f9db31ca79c599c4e3e3d87a.
 This used fresh private auth/config/home/socket and no production credentials,
 mail, panes or services; no live rollback was performed.
-An old daemon cannot promote an already-implicitly-acked row on explicit ack;
-its linked reply still counts as an answer. The fixed desk conservatively shows
-Read for such a row until a reply or the corrected daemon records explicit ack.
+An old daemon cannot promote an already-implicitly-acked row on explicit ack.
+Its raw conversation can report `answered=true` from the consumption timestamp;
+fixed desk/Telegram consumers reject that claim when the returned raw flag is 1.
+Old status responses omit the flag, so desk lane delivery conservatively shows
+Read even for genuinely explicit legacy acknowledgements. The coordinator
+accepted this degraded display (i69021). The second actual old-daemon probe
+retains an implicit row and verifies both problematic response shapes:
+`311-t5152-evidence/rollback-gap-result.json`. Old raw API fields remain legacy
+metadata, not proof of handling; retain corrected consumers throughout rollback.
 
 Tests cover real stored owner/VP-web shapes: lane reads/no reply, lane reads then
 linked reply, explicit ack after consumption, privileged owner-mailbox read,
