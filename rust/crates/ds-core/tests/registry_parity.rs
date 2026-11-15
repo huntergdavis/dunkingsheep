@@ -73,6 +73,8 @@ fn every_input_schema_equals_the_pythons() {
                     .as_array_mut()
                     .unwrap();
                 assert_eq!(actions.pop(), Some(serde_json::json!("planner")));
+                // t5249: inspecting launch settings is a Rust-only read action.
+                assert_eq!(actions.pop(), Some(serde_json::json!("settings")));
                 // t4473 slice D: switching the model by a guarded respawn is Rust-only.
                 assert_eq!(actions.pop(), Some(serde_json::json!("switch_model")));
                 // t4473 slice C: the record-only model declaration is Rust-only.
