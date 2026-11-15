@@ -1,0 +1,37 @@
+.tasks-view { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: auto; gap: 16px; padding: 20px; color: var(--dash-fg); }
+.tasks-heading, .tasks-paging { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.tasks-heading h1, .tasks-metrics h2 { margin: 0; }
+.tasks-heading p, .tasks-checked { color: var(--dash-muted); }
+.tasks-view button, .tasks-view input, .tasks-view select { font: inherit; color: var(--dash-fg); background: var(--dash-panel); border: 1px solid var(--dash-border); padding: 8px 10px; max-width: 100%; }
+.tasks-view button { cursor: pointer; min-height: 40px; }
+.tasks-view button:disabled { cursor: default; opacity: .55; }
+.tasks-view :focus-visible { outline: 2px solid var(--dash-accent); outline-offset: 3px; }
+.tasks-tabs, .tasks-paging > div { display: flex; gap: 8px; flex-wrap: wrap; }
+.tasks-tabs button[aria-pressed="true"] { border-color: var(--dash-accent); background: var(--dash-panel-2); font-weight: 700; }
+.tasks-metrics { padding: 16px; border: 1px solid var(--dash-border); background: var(--dash-panel); }
+.tasks-metrics h2 { font-size: 1.1rem; }
+.tasks-metrics dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 16px 0; }
+.tasks-metrics dt, .tasks-metrics small { color: var(--dash-muted); }
+.tasks-metrics dd { margin: 5px 0 0; font-size: 1.5rem; }
+.tasks-filters { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+.tasks-filters label { display: grid; gap: 6px; min-width: 130px; max-width: 100%; }
+.tasks-filters input { width: 220px; }
+.tasks-results { min-width: 0; }
+.tasks-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.tasks-table th, .tasks-table td { text-align: left; vertical-align: top; padding: 12px 8px; border-bottom: 1px solid var(--dash-border); overflow-wrap: anywhere; }
+.tasks-table th:first-child { width: 32%; }
+.tasks-table th:last-child { width: 20%; }
+.tasks-table td:first-child span { display: block; margin-top: 6px; }
+.tasks-limited { border-left: 3px solid var(--dash-accent); padding: 12px; background: var(--dash-panel); }
+.tasks-sr { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@media (max-width: 760px) {
+  .tasks-view { padding: 12px; }
+  .tasks-table, .tasks-table tbody { display: block; }
+  .tasks-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .tasks-table tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border: 1px solid var(--dash-border); margin: 12px 0; padding: 8px; }
+  .tasks-table td { display: block; border: 0; min-width: 0; padding: 8px; }
+  .tasks-table td:first-child, .tasks-table td:last-child { grid-column: 1 / -1; }
+  .tasks-table td::before { display: block; content: attr(data-label); color: var(--dash-muted); font-size: .8rem; margin-bottom: 4px; }
+  .tasks-filters label { flex: 1; min-width: 120px; }
+  .tasks-filters input { width: 100%; box-sizing: border-box; }
+}

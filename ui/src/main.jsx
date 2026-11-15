@@ -9,6 +9,7 @@ import StarterKit from '@tiptap/starter-kit';
 import MessageBody from './MessageBody';
 import OwnerInbox from './OwnerInbox';
 import MailboxBrowser from './MailboxBrowser';
+import TasksView from './TasksView';
 import TurndownService from 'turndown';
 import { themeStyles } from './theme-styles.js';
 import './style.css';
@@ -1335,6 +1336,7 @@ function StandaloneDesk({ view, known }) {
   }
   if (view === 'cos' && new URLSearchParams(window.location.search).get('panel') === 'mailboxes') return <DashShell standalone view="cos"><MailboxBrowser api={api} /></DashShell>;
   if (view === 'cos' && new URLSearchParams(window.location.search).get('panel') !== 'conversation') return <DashShell standalone view="cos"><OwnerInbox api={api} /></DashShell>;
+  if (view === 'tasks') return <DashShell standalone view="tasks"><TasksView api={api} /></DashShell>;
   if (view === 'projects') return <Projects standalone />;
   if (view === 'operations') return <OpsBoard standalone />;
   if (view === 'play') return <PlayWorkspace standalone />;

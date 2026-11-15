@@ -4,6 +4,7 @@
 export const DASH_ROUTES = {
   projects: { eyebrow: 'PROJECTS', title: 'Projects', subtitle: 'Live lanes by explicit project membership' },
   cos: { eyebrow: 'INBOX', title: 'Inbox', subtitle: 'Browse Your inbox and VP history' },
+  tasks: { eyebrow: 'TASKS', title: 'Tasks', subtitle: 'Current work and closed tasks' },
   operations: { eyebrow: 'OPERATIONS', title: 'Operations board', subtitle: 'Tasks, progress, and service health' },
   play: { eyebrow: 'LIVE GAME', title: 'Play Pool of Radiance', subtitle: 'Private DOS run · save states' },
 };
