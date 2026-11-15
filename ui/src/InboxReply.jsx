@@ -1,8 +1,10 @@
 import React, { useRef, useState } from 'react';
 
 // The daemon resolves the recorded peer and confirms parent/root after commit.
-export default function InboxReply({ api, parent, onSent }) {
-  const [draft, setDraft] = useState('');
+export default function InboxReply({ api, parent, onSent, draftValue, onDraftChange }) {
+  const [localDraft, setLocalDraft] = useState('');
+  const draft = draftValue ?? localDraft;
+  const setDraft = onDraftChange ?? setLocalDraft;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [receipt, setReceipt] = useState('');

@@ -6,6 +6,9 @@
 
 use super::response_error::WebResponseError;
 
+#[path = "owner_thread_pages.rs"]
+mod thread_pages;
+
 use std::{
     collections::HashMap,
     future::Future,
@@ -384,6 +387,21 @@ async fn api_owner_thread(
         Ok(query) => query,
         Err(()) => return detail_response(StatusCode::BAD_REQUEST, "invalid query".to_owned()),
     };
+    if query.contains_key("thread_mode")
+        || query.contains_key("thread_cursor")
+        || query.contains_key("root_id")
+    {
+        if !matches!(identity, Identity::Owner) {
+            return detail_response(
+                StatusCode::FORBIDDEN,
+                "thread pages require an owner session".into(),
+            );
+        }
+        return match thread_pages::get(state.as_ref(), &query).await {
+            Ok(result) => ([(header::CACHE_CONTROL, "no-store")], Json(result)).into_response(),
+            Err(error) => error.into_response(),
+        };
+    }
     let limit = match parse_thread_limit(query.get("limit").map(String::as_str)) {
         Ok(limit) => limit,
         Err(response) => return response.into_response(),
@@ -2467,5 +2485,179 @@ mod tests {
             backend.methods(),
             ["owner_ingest_thread", "owner_ingest_thread"]
         );
+    }
+    fn page_row() -> Value {
+        json!({"id":"i8","mailbox":"owner","sender":"fixture lane","subject":"subject","body":"PRIVATE FULL FIXTURE BODY","preview":"bounded preview","audience":null,"created_at":123.25,"thread_version":1,"parent_id":"i1","root_id":"i1","conversation_kind":"human","sender_kind":"agent","recipient_route_kind":"human","state":"queued"})
+    }
+    fn page_envelope(mode: &str, rows: Value) -> Value {
+        let mut value = json!({"thread_mode":mode,"source_filter":"human_threads","include_internal":false,"view_revision":0,"fence_id":8,"next_cursor":null,"reload_from_top":false});
+        value[if mode == "heads" {
+            "threads"
+        } else {
+            "messages"
+        }] = rows;
+        if mode == "messages" {
+            value["root_id"] = json!("i1");
+        }
+        value
+    }
+    #[test]
+    fn threaded_http_heads_and_detail_are_scoped_bounded_and_get_only() {
+        let backend = Arc::new(FakeOwner::new());
+        backend.reply(
+            "owner_conversation",
+            page_envelope(
+                "heads",
+                json!([{"thread_id":"i1","latest":page_row(),"message_count":8,"unread_count":2}]),
+            ),
+        );
+        let response = block_on(app(authorized(), backend.clone()).oneshot(request(
+            "GET",
+            "/api/owner-thread?thread_mode=heads&filter=human_threads&limit=25",
+            None,
+        )))
+        .unwrap();
+        let (status, body, headers) = response_json(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+        assert_eq!(body["threads"][0]["latest"]["message_id"], "i8");
+        assert_eq!(body["threads"][0]["latest"]["conversation_source"], "human");
+        assert!(body["threads"][0]["latest"].get("body").is_none());
+        assert!(!body.to_string().contains("PRIVATE FULL FIXTURE BODY"));
+        assert_eq!(
+            backend.calls.lock().unwrap()[0].1,
+            json!({"thread_mode":"heads","source_filter":"human_threads","include_internal":false,"limit":25})
+        );
+        backend.reply(
+            "owner_conversation",
+            page_envelope("messages", json!([page_row()])),
+        );
+        let response=block_on(app(authorized(),backend.clone()).oneshot(request("GET","/api/owner-thread?thread_mode=messages&filter=human_threads&root_id=i1&thread_cursor=opaque",None))).unwrap();
+        let (status, body, _) = response_json(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["messages"][0]["body"], "PRIVATE FULL FIXTURE BODY");
+        assert_eq!(body["messages"][0]["sort_at"], 123.25);
+        assert_eq!(
+            backend.calls.lock().unwrap()[1].1,
+            json!({"thread_mode":"messages","source_filter":"human_threads","include_internal":false,"limit":50,"root_id":"i1","thread_cursor":"opaque"})
+        );
+        assert_eq!(
+            backend.methods(),
+            ["owner_conversation", "owner_conversation"]
+        );
+    }
+    #[test]
+    fn threaded_http_refuses_malformed_scope_root_counts_and_legacy_daemon() {
+        let backend = Arc::new(FakeOwner::new());
+        let good = page_envelope(
+            "heads",
+            json!([{"thread_id":"i1","latest":page_row(),"message_count":8,"unread_count":2}]),
+        );
+        let mut wrong_view = good.clone();
+        wrong_view["source_filter"] = json!("vp_threads");
+        let mut wrong_root = good.clone();
+        wrong_root["threads"][0]["thread_id"] = json!("i2");
+        let mut bad_count = good.clone();
+        bad_count["threads"][0]["unread_count"] = json!(9);
+        let mut wrong_kind = good.clone();
+        wrong_kind["threads"][0]["latest"]["conversation_kind"] = json!("vp");
+        wrong_kind["threads"][0]["latest"]["sender_kind"] = json!("system");
+        for bad in [
+            wrong_view,
+            wrong_root,
+            bad_count,
+            wrong_kind,
+            json!({"messages":[page_row()]}),
+        ] {
+            backend.reply("owner_conversation", bad);
+            let response = block_on(app(authorized(), backend.clone()).oneshot(request(
+                "GET",
+                "/api/owner-thread?thread_mode=heads&filter=human_threads",
+                None,
+            )))
+            .unwrap();
+            let (status, body, _) = response_json(response);
+            assert_eq!(status, StatusCode::BAD_GATEWAY);
+            assert!(!body.to_string().contains("PRIVATE FULL FIXTURE BODY"));
+        }
+        for query in [
+            "thread_mode=heads&filter=all",
+            "thread_mode=heads&filter=human_threads&limit=101",
+            "thread_mode=messages&filter=human_threads",
+            "thread_mode=heads&filter=human_threads&include_internal=true",
+            "thread_mode=heads&filter=human_threads&before=i1",
+        ] {
+            let before = backend.methods().len();
+            let response = block_on(app(authorized(), backend.clone()).oneshot(request(
+                "GET",
+                &format!("/api/owner-thread?{query}"),
+                None,
+            )))
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(backend.methods().len(), before);
+        }
+        let response = block_on(
+            app(
+                Arc::new(FakeAuth::accepting(Identity::Api)),
+                backend.clone(),
+            )
+            .oneshot(request(
+                "GET",
+                "/api/owner-thread?thread_mode=heads&filter=human_threads",
+                None,
+            )),
+        )
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+    #[test]
+    fn threaded_http_keeps_reload_clean_and_historical_singletons() {
+        let backend = Arc::new(FakeOwner::new());
+        let mut reload = page_envelope("heads", json!([]));
+        reload["reload_from_top"] = json!(true);
+        backend.reply("owner_conversation", reload);
+        let response = block_on(app(authorized(), backend.clone()).oneshot(request(
+            "GET",
+            "/api/owner-thread?thread_mode=heads&filter=human_threads&thread_cursor=opaque",
+            None,
+        )))
+        .unwrap();
+        let (status, body, _) = response_json(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["reload_from_top"], true);
+        assert_eq!(body["threads"], json!([]));
+        assert!(body["next_cursor"].is_null());
+        let mut row = page_row();
+        for key in [
+            "thread_version",
+            "parent_id",
+            "root_id",
+            "conversation_kind",
+            "sender_kind",
+        ] {
+            row[key] = Value::Null;
+        }
+        row["historical_reason"] = json!("prior_version");
+        row["ambiguous_owner_reply"] = json!(true);
+        let mut history = page_envelope(
+            "heads",
+            json!([{"thread_id":"i8","latest":row,"message_count":1,"unread_count":1}]),
+        );
+        history["source_filter"] = json!("historical");
+        backend.reply("owner_conversation", history);
+        let response = block_on(app(authorized(), backend.clone()).oneshot(request(
+            "GET",
+            "/api/owner-thread?thread_mode=heads&filter=historical",
+            None,
+        )))
+        .unwrap();
+        let (status, body, _) = response_json(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["threads"][0]["latest"]["historical_reason"],
+            "prior_version"
+        );
+        assert_eq!(body["threads"][0]["latest"]["ambiguous_owner_reply"], true);
     }
 }

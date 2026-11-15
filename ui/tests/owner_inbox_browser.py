@@ -1,164 +1,76 @@
-"""Render a synthetic owner thread and intercept every API request; never use live data.
-
-Run after `npm run build` with Playwright installed and CHROMIUM_PATH set.
-"""
-import json
-import os
-import threading
+"""Private synthetic thread heads/detail/poll/paging regression. No live APIs."""
+import json, os, threading
+from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
-
+from urllib.parse import urlsplit, parse_qs
 from playwright.sync_api import sync_playwright
-
-DIST = Path(__file__).resolve().parents[1] / 'dist'
-assert (DIST / 'index.html').is_file(), 'build ui/ first'
-ITEMS = [{'id': index, 'message_id': f'i{index}', 'sender': f'lane-{index}',
-          'role': 'agent', 'transport': 'inbox', 'body': f'Message {index}\n\nFull body {index}',
-          'created_at': f'2026-11-08T00:{index:02d}:00Z'} for index in range(1, 28)]
-requests = []
-mode = 'ready'
-history_fail = False
-history_cursors = []
-cursor_failure = False
-window_calls = []
-
+DIST=Path(__file__).resolve().parents[1]/'dist'
 class Handler(SimpleHTTPRequestHandler):
-    def translate_path(self, path):
-        return str(DIST / ('index.html' if path.startswith('/dash/') else path.lstrip('/')))
-
-    def log_message(self, *args):
-        pass
-
-server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
-threading.Thread(target=server.serve_forever, daemon=True).start()
-base = f'http://127.0.0.1:{server.server_port}'
-
-def mock(route):
-    global history_fail
-    query = parse_qs(urlsplit(route.request.url).query)
-    path = urlsplit(route.request.url).path
-    requests.append((route.request.method, path))
-    if path == '/api/session':
-        value = {'ok': True}
-    elif path == '/api/owner-thread':
-        window_calls.append((mode, query.get('paged') == ['true'], bool(query.get('before'))))
-        if mode in ('old_daemon', 'old_desk', 'auth_failure'):
-            if query.get('paged') == ['true'] and mode != 'old_desk':
-                status = 403 if mode == 'auth_failure' else 502
-                return route.fulfill(status=status, content_type='application/json', body=json.dumps({'detail': 'Forbidden history paging' if status == 403 else 'history paging unavailable'}))
-            return route.fulfill(status=200, content_type='application/json', body=json.dumps({'items': ITEMS}))
-        if mode == 'failed':
-            route.fulfill(status=503, content_type='application/json', body='{"detail":"Mailbox offline"}')
-            return
-        if mode == 'history':
-            assert query.get('paged') == ['true']
-            before = query.get('before', [None])[0]
-            history_cursors.append(before)
-            if before and cursor_failure:
-                return route.fulfill(status=502, content_type='application/json', body='{"detail":"History cursor removed; reload"}')
-            if before and history_fail:
-                history_fail = False
-                return route.fulfill(status=503, content_type='application/json', body='{"detail":"Older page offline"}')
-            boundary = int(before[1:]) if before else 451
-            rows = [{'id': index, 'message_id': f'i{index}', 'sender': f'lane-{index}', 'role': 'agent',
-                     'body': f'HISTORY-BODY-{index}', 'created_at': '2026-11-08T00:00:00Z'}
-                    for index in range(1, boundary)]
-            page = rows[-200:]
-            value = {'items': page, 'next_before': f"i{page[0]['id']}" if len(rows) > 200 else None}
-        else:
-            value = {'items': ITEMS if mode == 'ready' else [], 'next_before': None}
-    else:
-        value = {'ok': True}
-    if path == '/api/owner-thread':
-        value.update({'view_revision':0, 'source_filter': 'human_threads', 'include_internal': False})
-        for row in value.get('items', []):
-            row.update({'audience': None, 'conversation_source': 'human', 'mailbox': 'owner', 'thread_version': 1, 'parent_id': None, 'root_id': f"i{row['id']}", 'conversation_kind': 'human', 'sender_kind': 'human' if row.get('role') == 'owner' else 'agent'})
-    route.fulfill(status=200, content_type='application/json', body=json.dumps(value))
-
+ def translate_path(self,path):return str(DIST/('index.html' if path.startswith('/dash/') else path.lstrip('/')))
+ def log_message(self,*args):pass
+server=ThreadingHTTPServer(('127.0.0.1',0),Handler);threading.Thread(target=server.serve_forever,daemon=True).start();base=f'http://127.0.0.1:{server.server_port}'
+def message(n,root):
+ return dict(id=n,message_id=f'i{n}',body=f'FULL BODY {n}',sender='Fixture lane',role='agent',created_at=datetime.fromtimestamp(1794770000+n,timezone.utc).isoformat(),sort_at=1794770000+n,conversation_source='human',audience=None,mailbox='owner',thread_version=1,parent_id=None if n==root else f'i{root}',root_id=f'i{root}',conversation_kind='human',sender_kind='agent',state='queued',kind_labels=[])
+def fulfill(route,data,status=200):route.fulfill(status=status,content_type='application/json',body=json.dumps(data))
 try:
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(executable_path=os.environ['CHROMIUM_PATH'],
-                                             headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
-        for width in (360, 768, 1280):
-            page = browser.new_page(viewport={'width': width, 'height': 900})
-            page.route('**/api/**', mock)
-            page.goto(base + '/dash/cos', wait_until='domcontentloaded')
-            page.get_by_role('heading', name='Your inbox', exact=True).wait_for()
-            page.locator('.owner-inbox-row').first.wait_for()
-            assert page.locator('.owner-inbox-row').count() == 25
-            assert 'lane-27' in page.locator('.owner-inbox-row').first.inner_text()
-            assert 'Full body 27' in page.get_by_role('article', name='Selected message').inner_text()
-            page.locator('.owner-inbox-row').nth(2).click()
-            assert 'Full body 25' in page.get_by_role('article', name='Selected message').inner_text()
-            page.get_by_role('button', name='Older', exact=True).click()
-            assert page.locator('.owner-inbox-row').count() == 2
-            page.locator('.owner-inbox-row').last.click()
-            assert 'Full body 1' in page.get_by_role('article', name='Selected message').inner_text()
-            # New arrivals and a failed refresh must preserve the selected message.
-            ITEMS.append({'id': 28, 'sender': 'new-arrival', 'body': 'New message',
-                          'role': 'agent', 'created_at': '2026-11-08T00:28:00Z'})
-            page.wait_for_function("document.querySelector('.owner-inbox-pages').textContent.includes('28 loaded')")
-            assert 'Full body 1' in page.get_by_role('article', name='Selected message').inner_text()
-            mode = 'failed'
-            page.get_by_role('alert').wait_for(timeout=10000)
-            assert 'previously loaded' in page.get_by_role('alert').inner_text()
-            assert 'Full body 1' in page.get_by_role('article', name='Selected message').inner_text()
-            mode = 'ready'
-            page.get_by_role('button', name='Retry', exact=True).click()
-            page.get_by_role('alert').wait_for(state='detached')
-            assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
-            page.screenshot(path=str(DIST.parent / f'owner-inbox-{width}.png'))
-            ITEMS.pop()
-            page.close()
-        mode = 'history'
-        for width in (360, 768, 1280):
-            history_fail = True
-            page = browser.new_page(viewport={'width': width, 'height': 900})
-            page.route('**/api/**', mock)
-            page.goto(base + '/dash/cos', wait_until='domcontentloaded')
-            reader = page.get_by_role('article', name='Selected message')
-            reader.get_by_text('HISTORY-BODY-450', exact=True).wait_for()
-            page.get_by_role('button', name='Load older messages', exact=True).click()
-            page.get_by_role('alert').filter(has_text='Older page offline').wait_for()
-            assert '200 loaded' in page.locator('.owner-inbox-pages').inner_text()
-            page.get_by_role('button', name='Retry older messages', exact=True).click()
-            page.wait_for_function("document.querySelector('.owner-inbox-pages').textContent.includes('400 loaded')")
-            assert 'HISTORY-BODY-450' in reader.inner_text(), 'loading older must preserve selection'
-            assert 'lane-250' in page.locator('.owner-inbox-row').first.inner_text()
-            page.get_by_role('button', name='Load older messages', exact=True).click()
-            page.get_by_text('Start of conversation reached · 450 messages loaded', exact=True).wait_for()
-            assert page.get_by_role('button', name='Load older messages', exact=True).count() == 0
-            assert 'lane-50' in page.locator('.owner-inbox-row').first.inner_text()
-            page.get_by_role('button', name='Older', exact=True).click()
-            page.locator('.owner-inbox-row').last.click()
-            reader.get_by_text('HISTORY-BODY-1', exact=True).wait_for()
-            page.wait_for_timeout(5500)
-            assert '450 loaded' in page.locator('.owner-inbox-pages').inner_text()
-            assert 'HISTORY-BODY-1' in reader.inner_text(), 'newest polling must retain loaded history'
-            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-            if os.environ.get('OWNER_HISTORY_SCREENSHOT_DIR'):
-                page.screenshot(path=f"{os.environ['OWNER_HISTORY_SCREENSHOT_DIR']}/s-f-history-{width}.png")
-            page.close()
-        assert 'i251' in history_cursors and 'i51' in history_cursors
-        for mode in ('old_daemon', 'old_desk', 'auth_failure'):
-            page = browser.new_page()
-            page.route('**/api/**', mock)
-            page.goto(base + '/dash/cos', wait_until='domcontentloaded')
-            page.get_by_role('alert').wait_for()
-            assert page.locator('.owner-inbox-row').count() == 0, 'unconfirmed scope must fail closed'
-            page.close()
-        assert not any(mode in ('old_daemon', 'old_desk', 'auth_failure') and not paged for mode, paged, before in window_calls)
-        mode = 'empty'
-        page = browser.new_page()
-        page.route('**/api/**', mock)
-        page.goto(base + '/dash/cos')
-        page.get_by_text('No messages in this inbox yet.', exact=True).wait_for()
-        page.close()
-        # The existing shell reports viewport dimensions separately from mailbox browsing.
-        assert all(method == 'GET' for method, path in requests if path != '/api/viewport'), requests
-        assert {path for _, path in requests} <= {'/api/session', '/api/owner-thread', '/api/version', '/api/viewport'}
-        browser.close()
-finally:
-    server.shutdown()
-print('owner inbox browser passed: 450-row complete cursor history/ties/retry/EOF/poll preservation + unconfirmed scope and auth fail closed, newest-first, paging, selection, polling, errors, empty, GET-only at 360, 768 and 1280')
+ with sync_playwright() as p:
+  browser=p.chromium.launch(executable_path=os.environ['CHROMIUM_PATH'],headless=True,args=['--no-sandbox','--disable-dev-shm-usage'])
+  for width in (360,768,1280):
+   rows=[message(n,1 if n<=8 else 9) for n in range(1,16)];mode='normal';pending=[];requests=[];hold_root=None;reload=False;offline_older=False
+   def mock(route):
+    global reload
+    path=urlsplit(route.request.url).path;q=parse_qs(urlsplit(route.request.url).query);requests.append((route.request.method,path,q))
+    if path!='/api/owner-thread':return fulfill(route,{'ok':True,'time_zone':'America/Los_Angeles','channels':[]})
+    assert route.request.method=='GET' and q.get('thread_mode',[None])[0] in ('heads','messages')
+    if mode=='legacy':return fulfill(route,{'items':[{'body':'UNSAFE LEGACY FALLBACK'}]})
+    root=q.get('root_id',[None])[0];cursor=q.get('thread_cursor',[None])[0]
+    if root and root==hold_root:pending.append(route);return
+    key='threads' if q['thread_mode'][0]=='heads' else 'messages'
+    data=dict(thread_mode=q['thread_mode'][0],source_filter=q['filter'][0],include_internal=False,view_revision=0,fence_id=9999,next_cursor=None,reload_from_top=False)
+    if key=='messages':data['root_id']=root
+    if cursor and offline_older:return fulfill(route,{'detail':'Older fixture offline'},503)
+    if cursor and reload:reload=False;data.update(reload_from_top=True,message='List changed, reload from top.');data[key]=[];return fulfill(route,data)
+    if key=='threads':
+     groups={}
+     for row in rows:groups.setdefault(row['root_id'],[]).append(row)
+     heads=[]
+     for thread,items in groups.items():
+      latest=max(items,key=lambda r:r['sort_at']);preview={k:v for k,v in latest.items() if k!='body'};preview['preview']=latest['body']
+      heads.append(dict(thread_id=thread,latest=preview,message_count=len(items),unread_count=sum(r['state']=='queued' for r in items)))
+     heads.sort(key=lambda h:h['latest']['sort_at'],reverse=True);offset=int(cursor.split(':')[1]) if cursor else 0;data['threads']=heads[offset:offset+25]
+     if len(heads)>offset+25:data['next_cursor']=f'heads:{offset+25}'
+    else:
+     items=sorted([r for r in rows if r['root_id']==root],key=lambda r:r['sort_at']);end=int(cursor.split(':')[1]) if cursor else len(items);data['messages']=items[max(0,end-50):end]
+     if end>50:data['next_cursor']=f'messages:{end-50}'
+    return fulfill(route,data)
+   def open_page():
+    page=browser.new_page(viewport={'width':width,'height':900});page.route('**/api/**',mock);page.goto(base+'/dash/cos',wait_until='domcontentloaded');return page
+   page=open_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)));reader=page.get_by_role('article',name='Selected conversation');reader.get_by_text('FULL BODY 15',exact=True).wait_for()
+   assert page.locator('.owner-inbox-row').count()==2;assert reader.locator('.owner-thread-message').count()==7
+   page.locator('.owner-inbox-row').filter(has_text='FULL BODY 8').click();reader.get_by_text('FULL BODY 1',exact=True).wait_for();assert reader.locator('.owner-thread-message').count()==8
+   draft=page.get_by_role('textbox',name='Reply message');draft.fill('KEEP DRAFT WHILE POLLING');rows.append(message(16,1));reader.get_by_text('FULL BODY 16',exact=True).wait_for(timeout=10000)
+   assert page.locator('.owner-inbox-row').count()==2;assert '9 unread' in page.locator('.owner-inbox-row').filter(has_text='FULL BODY 16').inner_text();assert draft.input_value()=='KEEP DRAFT WHILE POLLING'
+   assert page.get_by_role('form',name='Reply to message').get_by_role('heading',name='Reply to i8',exact=True).count()==1
+   page.locator('.owner-inbox-row').filter(has_text='FULL BODY 15').click();reader.get_by_text('FULL BODY 15',exact=True).wait_for();hold_root='i1'
+   page.locator('.owner-inbox-row').filter(has_text='FULL BODY 16').click();page.wait_for_timeout(150);assert pending
+   page.locator('.owner-inbox-row').filter(has_text='FULL BODY 15').click();reader.get_by_text('FULL BODY 15',exact=True).wait_for()
+   for route in pending:fulfill(route,dict(thread_mode='messages',source_filter='human_threads',include_internal=False,view_revision=0,fence_id=9999,next_cursor=None,reload_from_top=False,root_id='i1',messages=[message(1,1)]))
+   pending.clear();hold_root=None;page.wait_for_timeout(100);assert reader.get_by_text('FULL BODY 1',exact=True).count()==0
+   page.locator('.owner-inbox-row').filter(has_text='FULL BODY 16').click();reader.get_by_text('FULL BODY 16',exact=True).wait_for();assert draft.input_value()=='KEEP DRAFT WHILE POLLING'
+   assert page.evaluate('document.documentElement.scrollWidth <= innerWidth');assert not errors,errors
+   if os.environ.get('OWNER_INBOX_SCREENSHOT_DIR'):page.screenshot(path=str(Path(os.environ['OWNER_INBOX_SCREENSHOT_DIR'])/f'threads-{width}.png'),full_page=True)
+   print(json.dumps(dict(width=width,fifteen_messages_two_heads='PASS',detail_poll_counts_selection_parent_draft='PASS',late_root_response='PASS')),flush=True);page.close()
+   if width!=1280:continue
+   rows=[message(n,1) for n in range(1,122)];page=open_page();reader=page.get_by_role('article',name='Selected conversation');reader.get_by_text('FULL BODY 121',exact=True).wait_for();assert reader.locator('.owner-thread-message').count()==50
+   offline_older=True;reader.get_by_role('button',name='Load earlier messages',exact=True).click();reader.get_by_role('alert').filter(has_text='Older fixture offline').wait_for();assert reader.locator('.owner-thread-message').count()==50
+   offline_older=False;reader.get_by_role('button',name='Load earlier messages',exact=True).click();reader.get_by_text('FULL BODY 22',exact=True).wait_for();assert reader.locator('.owner-thread-message').count()==100
+   reader.get_by_role('button',name='Load earlier messages',exact=True).click();reader.get_by_text('FULL BODY 1',exact=True).wait_for();assert reader.locator('.owner-thread-message').count()==121
+   assert reader.locator('.owner-thread-message h3').all_text_contents()==[f'Fixture lane · i{n}' for n in range(1,122)];page.close()
+   page=open_page();reader=page.get_by_role('article',name='Selected conversation');reader.get_by_text('FULL BODY 121',exact=True).wait_for();page.get_by_role('textbox',name='Reply message').fill('KEEP RELOAD DRAFT');reload=True;reader.get_by_role('button',name='Load earlier messages',exact=True).click()
+   reader.get_by_text('Conversation changed, reloading from the newest messages.',exact=True).wait_for();reader.get_by_text('FULL BODY 121',exact=True).wait_for();assert reader.locator('.owner-thread-message').count()==50;assert page.get_by_role('textbox',name='Reply message').input_value()=='KEEP RELOAD DRAFT';page.close()
+   rows=[message(n,n) for n in range(1,28)];page=open_page();page.locator('.owner-inbox-row').nth(24).wait_for();assert page.locator('.owner-inbox-row').count()==25;page.get_by_role('button',name='Load older conversations',exact=True).click();page.locator('.owner-inbox-row').nth(26).wait_for();assert page.locator('.owner-inbox-row').count()==27;page.close()
+   mode='legacy';page=open_page();page.get_by_role('alert').wait_for();assert page.get_by_text('UNSAFE LEGACY FALLBACK',exact=True).count()==0;page.close();assert all(method=='GET' for method,path,q in requests if path=='/api/owner-thread')
+   print('Long detail paging/chronology, older failure, clean reload/draft, older heads, legacy refusal, GET-only PASS',flush=True)
+  browser.close()
+finally:server.shutdown()

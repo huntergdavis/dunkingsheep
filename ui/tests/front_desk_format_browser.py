@@ -2,6 +2,7 @@
 
 Run after `npm run build` with Playwright installed and CHROMIUM_PATH set.
 """
+from thread_page_fixture import project
 import json
 import os
 import threading
@@ -56,10 +57,10 @@ def mock(route):
                             'created_at': '2026-11-08T00:01:00Z', 'attachments': []}]}
         value.update({'next_before': None, 'view_revision':0, 'source_filter': 'human_threads', 'include_internal': False})
         for row in value['items']:
-            row.update({'audience': None, 'conversation_source': 'human', 'mailbox': 'owner', 'thread_version': 1, 'parent_id': None, 'root_id': f"i{row['id']}", 'conversation_kind': 'human', 'sender_kind': 'human' if row.get('role') == 'owner' else 'agent'})
+            row.update({'message_id': f"i{row['id']}", 'audience': None, 'conversation_source': 'human', 'mailbox': 'owner', 'thread_version': 1, 'parent_id': None, 'root_id': f"i{row['id']}", 'conversation_kind': 'human', 'sender_kind': 'human' if row.get('role') == 'owner' else 'agent'})
     else:
         value = {'ok': True}
-    route.fulfill(status=200, content_type='application/json', body=json.dumps(value))
+    route.fulfill(status=200, content_type='application/json', body=json.dumps(project(route,value)))
 
 try:
     with sync_playwright() as playwright:
@@ -75,6 +76,7 @@ try:
             for index in range(2):
                 page.locator('.owner-inbox-row').nth(index).click()
                 message = messages.first
+                message.wait_for()
                 assert message.locator('table tbody tr').count() == 1
                 assert 'Alpha' in message.locator('table').inner_text()
                 assert 'if (x < 2)' in message.locator('pre code').inner_text()

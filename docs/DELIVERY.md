@@ -494,7 +494,19 @@ No table/column is replaced and no historical messages are rewritten. Older
 binaries can read and write with these indexes retained. Index maintenance still
 has normal SQLite write/storage cost. In the private synthetic 70k-row study,
 creating the two indexes took 572.26 ms combined and added 2,928,640 bytes;
-checking existing indexes took 0.22 ms (single Python/SQLite observations, not a
-production or Rust startup guarantee). Cursor digest work adds a metadata scan
+these are single Python/SQLite observations, not a production or Rust startup
+guarantee. Cursor digest work adds a metadata scan
 only to Load older. A release still requires its normal private rollback proof
 before activation.
+
+The authenticated owner web route opts in with
+`GET /api/owner-thread?thread_mode=heads&filter=human_threads&limit=25`.
+Use `thread_mode=messages&root_id=i123&limit=50` for its scoped chronological
+reader and `thread_cursor` for either continuation. Existing calls without a
+thread mode retain their old response. The adapter verifies the response's
+scope/lineage/counts before forwarding it and does not fall back to an unfiltered
+legacy window if the daemon lacks this contract. The grouped Inbox uses the
+existing five-second refresh, keeps reply targets/drafts separately from changing
+heads, and never marks messages read through selection or polling. Successful
+thread polls do not emit a per-request journal line; failures remain metadata-only.
+Deploy a daemon containing the thread-page path before enabling this desk build.

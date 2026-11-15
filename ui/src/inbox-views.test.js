@@ -39,3 +39,29 @@ test('system, alert and agent-only messages have visible recorded kind labels', 
   assert.deepEqual(messageKindLabels({...row('vp','agent'),sender_kind:'system',kind_labels:['Alert','System']}), ['System','Agent-only','Alert']);
   assert.throws(() => validateInboxPage(page('vp_threads', [{...row('vp'),kind_labels:['human guess']}]), 'vp_threads'));
 });
+
+test('thread heads require scoped lineage, canonical identity, bounded preview and counts', async () => {
+  const { validateThreadPage } = await import('./inbox-views.js');
+  const latest = { ...row('human'), sort_at: 100, preview: 'preview' }; delete latest.body;
+  const head = { thread_id: 'i1', latest, message_count: 8, unread_count: 2 };
+  const data = { ...page('human_threads', []), thread_mode: 'heads', fence_id: 8, reload_from_top: false, next_cursor: 'opaque', threads: [head] };
+  assert.equal(validateThreadPage(data, 'human_threads', 'heads').threads.length, 1);
+  for (const bad of [{ message_count: 0 }, { unread_count: 9 }, { thread_id: 'i2' }, { latest: { ...latest, body: 'must not be listed' } }, { latest: { ...latest, preview: '🦊'.repeat(241) } }]) {
+    assert.throws(() => validateThreadPage({ ...data, threads: [{ ...head, ...bad }] }, 'human_threads', 'heads'));
+  }
+  const reload = { ...data, threads: [], reload_from_top: true, next_cursor: null };
+  assert.equal(validateThreadPage(reload, 'human_threads', 'heads').reload_from_top, true);
+  assert.throws(() => validateThreadPage({ ...reload, threads: [head] }, 'human_threads', 'heads'));
+});
+test('message pages bind root and merges retain numeric ties without duplicates', async () => {
+  const { validateThreadPage, mergeThreadMessages, mergeThreadHeads } = await import('./inbox-views.js');
+  const a = { ...row('human'), message_id: 'i9', sort_at: 100 };
+  const b = { ...a, message_id: 'i10' };
+  const data = { ...page('human_threads', []), thread_mode: 'messages', root_id: 'i1', fence_id: 10, reload_from_top: false, next_cursor: null, messages: [a, b] };
+  assert.equal(validateThreadPage(data, 'human_threads', 'messages', 'i1').messages.length, 2);
+  assert.throws(() => validateThreadPage(data, 'human_threads', 'messages', 'i2'));
+  assert.throws(() => validateThreadPage({ ...data, messages: [a, a] }, 'human_threads', 'messages', 'i1'));
+  assert.deepEqual(mergeThreadMessages([b], [a, b]).map(r => r.message_id), ['i9', 'i10']);
+  assert.equal(mergeThreadHeads([{ thread_id: 'i1', latest: a }], [{ thread_id: 'i1', latest: b }])[0].latest.message_id, 'i10');
+  assert.equal(mergeThreadHeads([{ thread_id: 'i1', latest: b }], [{ thread_id: 'i1', latest: a }])[0].latest.message_id, 'i9');
+});

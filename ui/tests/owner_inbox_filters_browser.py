@@ -1,4 +1,5 @@
 """Three Inbox views using only synthetic recorded lineage; all API traffic mocked."""
+from thread_page_fixture import project
 import json, os, threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -36,7 +37,7 @@ HISTORY_OTHER = {**item(903,'RECORDED-OTHER-CONVERSATION','historical'),'histori
 HISTORY_UNKNOWN = {**item(904,'UNRECOGNISED-CONVERSATION','historical'),'historical_reason':'unknown','historical_labels':['Routine agent mail']}
 
 def fulfill(route, value, status=200):
-    route.fulfill(status=status,content_type='application/json',body=json.dumps(value))
+    route.fulfill(status=status,content_type='application/json',body=json.dumps(project(route,value, all_items=[HUMAN,HUMAN_OLD] if value.get('source_filter')=='human_threads' else [TAGGED,VP,VP_OLD] if value.get('source_filter')=='vp_threads' else None)))
 def response(view,before):
     rows = ([HUMAN_OLD] if before else [HUMAN]) if view == 'human_threads' else ([VP_OLD] if before else [TAGGED,VP]) if view == 'vp_threads' else [HISTORY_UNKNOWN,HISTORY_OTHER,HISTORY_TAGGED,HISTORY]
     cursor = None if before or view == 'historical' else 'i201' if view == 'human_threads' else 'i401'
@@ -45,9 +46,9 @@ def mock(route):
     path=urlsplit(route.request.url).path;query=parse_qs(urlsplit(route.request.url).query)
     calls.append((route.request.method,path,query))
     if path != '/api/owner-thread': return fulfill(route,{'ok':True,'channels':[]})
-    assert query.get('paged') == ['true'],query
+    assert query.get('thread_mode', [None])[0] in ('heads','messages'),query
     assert 'include_internal' not in query,query
-    view=query['filter'][0];before=query.get('before',[None])[0]
+    view=query['filter'][0];before=query.get('thread_cursor',[None])[0]
     assert view in ('human_threads','vp_threads','historical'),query
     if before: assert before == ('i201' if view == 'human_threads' else 'i401'),query
     if unavailable: return fulfill(route,{'detail':'View unavailable'},502)
@@ -71,7 +72,7 @@ try:
             assert nav.get_by_role('button').all_text_contents() == ['Your inbox','VP','Historical / prior versions']
             assert page.get_by_role('combobox',name='Inbox filter').count() == 0
             assert page.get_by_role('checkbox',name='Include agent-only mail').count() == 0
-            page.get_by_role('button',name='Load older messages',exact=True).click()
+            page.get_by_role('button',name='Load older conversations',exact=True).click()
             page.get_by_text(HUMAN_OLD['body'],exact=True).first.wait_for()
             nav.get_by_role('button',name='VP',exact=True).click()
             page.get_by_role('heading',name='VP',exact=True).wait_for()
@@ -79,7 +80,7 @@ try:
             page.get_by_text(TAGGED['body'],exact=True).first.wait_for()
             assert page.get_by_text(HUMAN_OLD['body'],exact=True).count() == 0
             assert page.evaluate('document.activeElement.textContent') == 'VP'
-            page.get_by_role('button',name='Load older messages',exact=True).click()
+            page.get_by_role('button',name='Load older conversations',exact=True).click()
             page.get_by_text(VP_OLD['body'],exact=True).first.wait_for()
             nav.get_by_role('button',name='Historical / prior versions',exact=True).click()
             page.get_by_role('heading',name='Historical / prior versions',exact=True).wait_for()
