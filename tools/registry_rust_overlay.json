@@ -1304,6 +1304,17 @@
    "roles": [
     "planner"
    ]
+  },
+  "inbox_fetch": {
+   "roles": [
+    "owner",
+    "system",
+    "web",
+    "desk",
+    "planner",
+    "worker",
+    "reviewer"
+   ]
   }
  },
  "groups": {
