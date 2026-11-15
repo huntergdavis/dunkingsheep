@@ -449,6 +449,36 @@ fn confirmed_task_binding(args: &Map<String, Value>, a: &Value) -> bool {
             .ok()
             .is_some_and(|pr| a["task_binding"]["pr"].as_i64() == Some(pr))
 }
+/// A distinct verb makes an older daemon refuse before any declaration/write.
+pub fn pr_author_correct_command(ns: &Map<String, Value>, args: Map<String, Value>) -> Outcome {
+    let mut client = match connect(ns) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let result = match call(&mut client, "pr_author_correct", args.clone()) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let a = &result["authorship"];
+    if !confirmed_task_binding(&args, a)
+        || result["corrected"] != true
+        || a["author"] != args["author"]
+        || a["task"] != args["author_task"]
+        || !a["head"]
+            .as_str()
+            .zip(args.get("head").and_then(Value::as_str))
+            .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+        || !a["corrected_by"].as_str().is_some_and(|s| !s.is_empty())
+        || a["correction_reason"].as_str()
+            != args.get("reason").and_then(Value::as_str).map(str::trim)
+    {
+        return fail("daemon did not confirm the audited correction".into(), 2);
+    }
+    finish(ns, &result, &|v| {
+        format!("{}\n", serde_json::to_string_pretty(v).unwrap())
+    })
+}
+
 #[cfg(test)]
 mod pr_author_receipt_tests {
     use super::*;
@@ -480,34 +510,4 @@ mod pr_author_receipt_tests {
             &json!({"registered":true})
         ));
     }
-}
-
-/// A distinct verb makes an older daemon refuse before any declaration/write.
-pub fn pr_author_correct_command(ns: &Map<String, Value>, args: Map<String, Value>) -> Outcome {
-    let mut client = match connect(ns) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let result = match call(&mut client, "pr_author_correct", args.clone()) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    let a = &result["authorship"];
-    if !confirmed_task_binding(&args, a)
-        || result["corrected"] != true
-        || a["author"] != args["author"]
-        || a["task"] != args["author_task"]
-        || !a["head"]
-            .as_str()
-            .zip(args.get("head").and_then(Value::as_str))
-            .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
-        || !a["corrected_by"].as_str().is_some_and(|s| !s.is_empty())
-        || a["correction_reason"].as_str()
-            != args.get("reason").and_then(Value::as_str).map(str::trim)
-    {
-        return fail("daemon did not confirm the audited correction".into(), 2);
-    }
-    finish(ns, &result, &|v| {
-        format!("{}\n", serde_json::to_string_pretty(v).unwrap())
-    })
 }
