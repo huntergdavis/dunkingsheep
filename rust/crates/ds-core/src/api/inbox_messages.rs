@@ -375,7 +375,11 @@ pub fn h_inbox_status(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkE
     };
     c.env.with_inbox_env(&mut |env| {
         let s=c.flock.inbox_status_bound(env, &bound_id, &id_repr, c.self_pane_id())?;
-        Ok(json!({"message_id":s.message_id,"state":s.state,"mailbox":s.mailbox,"destination":s.destination,"pane_id":s.pane_id,"sender":s.sender,"created_at":s.created_at,"read_at":s.read_at,"acked_at":s.acked_at,"archived_at":s.archived_at,"cancelled_at":s.cancelled_at,"waiting_s":s.waiting_s,"body_bytes":s.body_bytes,"attachments":s.attachments,"attachment_bytes":s.attachment_bytes,"reason":s.reason,"notify":{"state":s.notify_state,"reason":s.notify_reason,"at":s.notify_at,"transport_id":s.notify_transport_id,"attempt":s.notify_attempt}}))
+        let mut result = json!({"message_id":s.message_id,"state":s.state,"mailbox":s.mailbox,"destination":s.destination,"pane_id":s.pane_id,"sender":s.sender,"created_at":s.created_at,"read_at":s.read_at,"acked_at":s.acked_at,"archived_at":s.archived_at,"cancelled_at":s.cancelled_at,"waiting_s":s.waiting_s,"body_bytes":s.body_bytes,"attachments":s.attachments,"attachment_bytes":s.attachment_bytes,"reason":s.reason,"notify":{"state":s.notify_state,"reason":s.notify_reason,"at":s.notify_at,"transport_id":s.notify_transport_id,"attempt":s.notify_attempt}});
+        // Always include provenance: an old daemon's missing field must never be
+        // mistaken for explicit handling after a rollback with implicit rows retained.
+        result["implicit_ack"] = json!(s.implicit_ack);
+        Ok(result)
     })
 }
 pub fn h_inbox_stats(c: &HandlerContext<'_>, _args: Args) -> Result<Value, DunkError> {

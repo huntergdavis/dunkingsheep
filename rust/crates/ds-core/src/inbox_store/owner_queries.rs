@@ -147,7 +147,7 @@ impl Store {
             tx.execute("INSERT INTO messages (id, mailbox, mailbox_label, pane_id, sender, subject, body, state, created_at, transport, reply_to, external_id) VALUES (?, ?, ?, NULL, ?, NULL, ?, 'queued', ?, ?, ?, NULL)",
                 params![id, OWNER_MAILBOX, OWNER_MAILBOX, sender, body, now, transport, question_id]).map_err(map_sqlite)?;
             super::mailbox_status::reopen_on_mail(&tx, OWNER_MAILBOX, now)?;
-            tx.execute("UPDATE messages SET state = 'acked', acked_at = ?, read_at = COALESCE(read_at, ?) WHERE id = ? AND state IN ('queued', 'read')", params![now, now, question_id]).map_err(map_sqlite)?;
+            tx.execute("UPDATE messages SET state = 'acked', implicit_ack=0, acked_at = ?, read_at = COALESCE(read_at, ?) WHERE id = ? AND (state IN ('queued', 'read') OR (state='acked' AND implicit_ack=1))", params![now, now, question_id]).map_err(map_sqlite)?;
             if let (Some(prepared),Some(context))=(&prepared,&context){super::threads::record(&tx,&id,prepared,context)?;}
             let message = full_message(&tx, &id)?.ok_or_else(|| refuse("inserted owner answer missing"))?;
             tx.commit().map_err(map_sqlite)?;
@@ -163,7 +163,14 @@ impl Store {
                 .prepare("SELECT * FROM messages WHERE reply_to = ? ORDER BY created_at")
                 .map_err(map_sqlite)?;
             let rows = statement
-                .query_map([message_id], raw_row)
+                .query_map([message_id], |row| {
+                    let mut value = raw_row(row)?;
+                    value
+                        .as_object_mut()
+                        .expect("raw row object")
+                        .remove("implicit_ack");
+                    Ok(value)
+                })
                 .map_err(map_sqlite)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)
         })
@@ -438,10 +445,13 @@ impl Store {
                 .collect();
             for row in selected.iter_mut().rev() {
                 let answered = row.get("id").is_some_and(|id| answered_ids.contains(id))
-                    || row.get("acked_at").is_some_and(truthy);
+                    || (row.get("acked_at").is_some_and(truthy)
+                        && !row.get("implicit_ack").is_some_and(truthy));
                 let Some(object) = row.as_object_mut() else {
                     continue;
                 };
+                let implicit = object.get("implicit_ack").is_some_and(truthy);
+                object.insert("implicit_ack".into(), Value::Bool(implicit));
                 object.insert("answered".to_string(), Value::Bool(answered));
                 if thread_view == Some("historical") {
                     let fields=["thread_version","parent_id","root_id","conversation_kind","sender_kind"];
@@ -694,6 +704,71 @@ mod tests {
             std::fs::write(&path, bytes).expect("write temporary attachment");
             path
         }
+    }
+
+    #[test]
+    fn implicit_reads_do_not_answer_owner_questions_but_explicit_ack_and_replies_do() {
+        let f = Fixture::new();
+        let question = |mailbox| {
+            f.send_outgoing(&Outgoing {
+                mailbox,
+                body: Some("human question"),
+                transport: Some("web"),
+                ..Default::default()
+            })
+        };
+        let owner = question("owner");
+        let lane = question("lane");
+        let explicit = question("lane");
+        f.store
+            .read_with_receipt("owner", std::slice::from_ref(&owner), true, Some(10.0))
+            .unwrap();
+        f.store
+            .read_with_receipt("lane", &[lane.clone(), explicit.clone()], true, Some(11.0))
+            .unwrap();
+        let answered = |mailbox: &str, id: &str| {
+            f.store
+                .conversation(mailbox, None, None)
+                .unwrap()
+                .into_iter()
+                .find(|row| row["id"] == id)
+                .unwrap()["answered"]
+                .as_bool()
+                .unwrap()
+        };
+        assert!(
+            !answered("owner", &owner),
+            "privileged owner-mailbox consumption is not an answer"
+        );
+        assert!(
+            !answered("lane", &lane),
+            "a lane that only reads has not answered"
+        );
+        f.store
+            .ack(std::slice::from_ref(&explicit), Some("lane"))
+            .unwrap();
+        assert!(answered("lane", &explicit));
+        f.send_outgoing(&Outgoing {
+            mailbox: "owner",
+            body: Some("lane answer"),
+            sender: Some("lane"),
+            reply_to: Some(&lane),
+            ..Default::default()
+        });
+        assert!(
+            answered("lane", &lane),
+            "linked reply handles the parent even outside its conversation page"
+        );
+        f.store
+            .answer_owner_question(&owner, "owner answer", Some("vp"))
+            .unwrap();
+        assert!(answered("owner", &owner));
+        assert!(f
+            .store
+            .conversation("owner", None, None)
+            .unwrap()
+            .iter()
+            .all(|row| row.get("implicit_ack").is_some_and(Value::is_boolean)));
     }
 
     #[test]

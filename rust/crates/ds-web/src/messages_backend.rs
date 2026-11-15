@@ -1148,7 +1148,7 @@ impl MessagesBackend {
             let delivery = match result.get("state").and_then(Value::as_str) {
                 Some("queued") => "inbox",
                 Some("read") => "read",
-                Some("acked") => "acked",
+                Some("acked") => "read", // Send responses carry no handling provenance; status refresh resolves it.
                 _ => "uncertain",
             };
             let detail = match delivery {
@@ -1306,13 +1306,7 @@ impl MessagesBackend {
                     let Some(object) = inbox.as_object() else {
                         continue;
                     };
-                    let delivery = match object.get("state").and_then(Value::as_str) {
-                        Some("queued") => Some("inbox"),
-                        Some("read") => Some("read"),
-                        Some("acked") => Some("acked"),
-                        Some("cancelled") => Some("cancelled"),
-                        _ => None,
-                    };
+                    let delivery = inbox_delivery(object);
                     if let Some(delivery) = delivery {
                         let mut detail = match delivery {
                             "inbox" => "Stored in agent inbox",
@@ -2558,9 +2552,91 @@ impl SearchAttachmentsBackend for MessagesBackend {
     }
 }
 
+/// An acked state consumes mail; only an explicit acknowledgement or reply handles it.
+/// Missing provenance is conservative: an old daemon after rollback may read
+/// rows consumed implicitly by the newer daemon.
+fn inbox_delivery(status: &Map<String, Value>) -> Option<&'static str> {
+    match status.get("state").and_then(Value::as_str) {
+        Some("queued") => Some("inbox"),
+        Some("read") => Some("read"),
+        Some("acked") if status.get("implicit_ack").and_then(Value::as_bool) == Some(false) => {
+            Some("acked")
+        }
+        Some("acked") => Some("read"),
+        Some("cancelled") => Some("cancelled"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod unit {
     use super::*;
+
+    #[test]
+    fn inbox_delivery_distinguishes_real_consumed_rows_from_handled_rows() {
+        use ds_core::{
+            db::ReadPool,
+            inbox,
+            inbox_store::{Outgoing, Store},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("inbox.db"), dir.path().join("blobs")).unwrap();
+        let id = store
+            .send(&Outgoing {
+                mailbox: "lane",
+                body: Some("human question"),
+                transport: Some("web"),
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .read_with_receipt("lane", std::slice::from_ref(&id), true, Some(10.0))
+            .unwrap();
+        let pool = ReadPool::open(store.path(), 1).unwrap();
+        let delivery = || {
+            let status = inbox::status(&pool, &id, 20.0).unwrap();
+            let wire = json!({"state": status.state, "implicit_ack": status.implicit_ack});
+            inbox_delivery(wire.as_object().unwrap())
+        };
+        assert_eq!(delivery(), Some("read")); // Read and never reply.
+        store
+            .send(&Outgoing {
+                mailbox: "owner",
+                body: Some("linked answer"),
+                reply_to: Some(&id),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(delivery(), Some("acked"));
+        let second = store
+            .send(&Outgoing {
+                mailbox: "lane",
+                body: Some("second"),
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .read_with_receipt("lane", std::slice::from_ref(&second), true, Some(11.0))
+            .unwrap();
+        store
+            .ack(std::slice::from_ref(&second), Some("lane"))
+            .unwrap();
+        let status = inbox::status(&pool, &second, 20.0).unwrap();
+        assert!(!status.implicit_ack);
+        assert_eq!(
+            inbox_delivery(
+                json!({"state":status.state, "implicit_ack":false})
+                    .as_object()
+                    .unwrap()
+            ),
+            Some("acked")
+        );
+        assert_eq!(
+            inbox_delivery(json!({"state":"acked"}).as_object().unwrap()),
+            Some("read"),
+            "old rollback daemon omits provenance even for a retained implicit row"
+        );
+    }
 
     /// Runs `python3 -c` and returns its stdout, failing the test if Python is absent.
     fn python(script: &str) -> String {

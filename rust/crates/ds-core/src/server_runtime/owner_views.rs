@@ -118,7 +118,7 @@ fn status_row(status: &Status) -> Value {
         "sender": status.sender,
         "created_at": status.created_at,
         "read_at": status.read_at,
-        "acked_at": status.acked_at,
+        "acked_at": if status.implicit_ack { None } else { status.acked_at },
         "notify_state": status.notify_state,
         "notify_reason": status.notify_reason,
     })

@@ -1462,7 +1462,30 @@ fn thread_sidecar_is_additive_and_preserves_legacy_schema_and_sql() {
     let store = Store::open(&path, dir.path().join("blobs")).unwrap();
     let after = schema(&db);
     for row in &before {
-        assert!(after.contains(row), "legacy DDL changed: {}", row.0);
+        if row.0 == "messages" {
+            // The approved t5152 migration adds exactly one column. Thread sidecars
+            // still must preserve every other part of the legacy DDL verbatim.
+            let expected = rusqlite::Connection::open_in_memory().unwrap();
+            expected.execute_batch(&row.1).unwrap();
+            expected
+                .execute_batch(
+                    "ALTER TABLE messages ADD COLUMN implicit_ack INTEGER NOT NULL DEFAULT 0",
+                )
+                .unwrap();
+            let sql: String = expected
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE name='messages'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                after.contains(&(row.0.clone(), sql)),
+                "unexpected messages DDL change"
+            );
+        } else {
+            assert!(after.contains(row), "legacy DDL changed: {}", row.0);
+        }
     }
     for name in [
         "message_threads",
@@ -1700,4 +1723,56 @@ fn manual_and_implicit_reads_preserve_unread_watchdog_and_digest_gates() {
         );
         assert_eq!(status.acked_at.is_some(), ack);
     }
+}
+
+#[test]
+fn additive_ack_flag_preserves_history_and_legacy_insert_default() {
+    let f = Fixture::new();
+    let old = f.send("lane", "existing explicit acknowledgement");
+    f.store
+        .ack(std::slice::from_ref(&old), Some("lane"))
+        .unwrap();
+    let db = rusqlite::Connection::open(f.store.path()).unwrap();
+    // Recreate a pre-flag database, then reopen through the migration. No data rewrite.
+    db.execute_batch("ALTER TABLE messages DROP COLUMN implicit_ack")
+        .unwrap();
+    let before: (String, Option<f64>, Option<f64>) = db
+        .query_row(
+            "SELECT state,read_at,acked_at FROM messages WHERE id=?",
+            [&old],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    let reopened = Store::open(f.store.path(), f.dir.path().join("blobs")).unwrap();
+    let after = inbox::status(&f.pool(), &old, 20.0).unwrap();
+    assert_eq!((after.state, after.read_at, after.acked_at), before);
+    assert!(!after.implicit_ack);
+    // Exact named-column INSERT shape used at rollback target a47168cd: omitted
+    // additive columns take DEFAULT 0. Old readers select named fields or * by name.
+    db.execute("INSERT INTO messages (id, mailbox, mailbox_label, pane_id, sender, subject, body, state, created_at, transport, reply_to, external_id) VALUES (?,?,?,?,?,?,?,'queued',?,?,?,?)", rusqlite::params!["ilegacy", "lane", "lane", Option::<String>::None, "vp", "question", "body", 1.0, "web", Option::<String>::None, Option::<String>::None]).unwrap();
+    assert!(
+        !inbox::status(&f.pool(), "ilegacy", 20.0)
+            .unwrap()
+            .implicit_ack
+    );
+    reopened
+        .read_with_receipt("lane", &["ilegacy".into()], true, Some(30.0))
+        .unwrap();
+    assert!(
+        inbox::status(&f.pool(), "ilegacy", 40.0)
+            .unwrap()
+            .implicit_ack
+    );
+    let result = reopened.ack(&["ilegacy".into()], Some("lane")).unwrap();
+    assert!(
+        result.changed.is_empty(),
+        "already-consumed state remains idempotent"
+    );
+    let explicit = inbox::status(&f.pool(), "ilegacy", 40.0).unwrap();
+    assert!(!explicit.implicit_ack);
+    reopened.ack(&["ilegacy".into()], Some("lane")).unwrap();
+    assert_eq!(
+        inbox::status(&f.pool(), "ilegacy", 40.0).unwrap().acked_at,
+        explicit.acked_at
+    );
 }

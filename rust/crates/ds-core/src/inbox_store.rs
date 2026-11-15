@@ -4,8 +4,8 @@
 //! Scope is exactly the task's: one message row per delivery, attachments content-addressed
 //! by sha256 with the Python's dedupe, the `message` counter. NOT here: the read
 //! aggregations (T15c), upsert_digest/ack/cancel/archive/purge, and the migrations of an
-//! OLD database (`ALTER TABLE ... ADD COLUMN`): this opens a database that is either new
-//! (the verbatim schema is applied) or already at the current schema.
+//! OLD database, except the additive implicit-ack provenance flag: the verbatim base schema
+//! is applied when new, then that flag is added without rewriting historical rows.
 //!
 //! File names deviate from the task text on purpose: `inbox.rs` already exists as a single
 //! file, so the store is `inbox_store.rs` beside it rather than a `inbox/` directory move.
@@ -204,6 +204,16 @@ impl Store {
                         .execute_batch(statement)
                         .map_err(|e| captured.sqlite(e, &db_path, "inbox_schema"))?;
                 }
+            }
+            // Serialize detection and ALTER across concurrent Store opens. Existing rows
+            // retain their explicit-ack meaning; no historical timestamps are rewritten.
+            {
+                let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(map_sqlite)?;
+                let present: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('messages') WHERE name='implicit_ack')", [], |row| row.get(0)).map_err(map_sqlite)?;
+                if !present {
+                    tx.execute_batch("ALTER TABLE messages ADD COLUMN implicit_ack INTEGER NOT NULL DEFAULT 0").map_err(map_sqlite)?;
+                }
+                tx.commit().map_err(map_sqlite)?;
             }
             connection.execute_batch("CREATE TABLE IF NOT EXISTS message_audiences (message_id TEXT PRIMARY KEY, audience TEXT NOT NULL CHECK(audience = 'agent'))")
                 .map_err(|e| captured.sqlite(e, &db_path, "inbox_schema"))?;
@@ -598,6 +608,9 @@ impl Store {
             if let (Some(prepared), Some(context)) = (&prepared, &thread) {
                 threads::record(&transaction, &message_id, prepared, context)?;
             }
+            if let Some(parent) = &reply_to {
+                transaction.execute("UPDATE messages SET state='acked', implicit_ack=0, acked_at=?, read_at=COALESCE(read_at,?) WHERE id=? AND state='acked' AND implicit_ack=1", rusqlite::params![created, created, parent]).map_err(map_sqlite)?;
+            }
             transaction.commit().map_err(map_sqlite)?;
             let mut message = connection
                 .query_row(
@@ -865,7 +878,7 @@ impl Store {
                 transaction
                     .execute(
                         "UPDATE messages SET mailbox=?, mailbox_label=?, pane_id=?, sender=?, \
-                         subject=?, body=?, state='queued', read_at=NULL, acked_at=NULL, \
+                         subject=?, body=?, state='queued', read_at=NULL, acked_at=NULL, implicit_ack=0, \
                          archived_at=NULL, cancelled_at=NULL, reason=NULL, notify_state=NULL, \
                          notify_reason=NULL, digest_updated_at=? WHERE digest_id=?",
                         rusqlite::params![
@@ -1069,7 +1082,7 @@ impl Store {
                 }
                 changed += if ack {
                     tx.execute(
-                        "UPDATE messages SET state='acked', read_at=COALESCE(read_at,?), acked_at=? WHERE id=? AND state IN ('queued','read')",
+                        "UPDATE messages SET state='acked', read_at=COALESCE(read_at,?), acked_at=?, implicit_ack=1 WHERE id=? AND state IN ('queued','read')",
                         rusqlite::params![now, now, id],
                     )
                 } else {
@@ -1503,6 +1516,11 @@ impl Store {
                     }
                 }
                 if !allowed.contains(&current.as_str()) {
+                    if state == "acked" && current == "acked" {
+                        // The state transition remains idempotent, but an explicit ACK
+                        // upgrades read-only consumption to a handling signal once.
+                        tx.execute("UPDATE messages SET implicit_ack=0, acked_at=? WHERE id=? AND implicit_ack=1", rusqlite::params![now_s(), id]).map_err(map_sqlite)?;
+                    }
                     unchanged.push((id.clone(), current));
                     continue;
                 }
@@ -1511,7 +1529,7 @@ impl Store {
                     tx.execute(
                         &format!(
                             "UPDATE messages SET state = ?, {stamp} = ?, \
-                             read_at = COALESCE(read_at, ?) WHERE id = ?"
+                             read_at = COALESCE(read_at, ?), implicit_ack=0 WHERE id = ?"
                         ),
                         rusqlite::params![state, now, now, id],
                     )

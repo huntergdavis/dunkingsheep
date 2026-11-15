@@ -2694,6 +2694,7 @@ mod tests {
             created_at: crate::clock::now_s(),
             read_at: None,
             acked_at: None,
+            implicit_ack: false,
             archived_at: None,
             cancelled_at: None,
             waiting_s: Some(0),

@@ -533,6 +533,7 @@ pub struct Status {
     pub created_at: f64,
     pub read_at: Option<f64>,
     pub acked_at: Option<f64>,
+    pub implicit_ack: bool,
     pub archived_at: Option<f64>,
     pub cancelled_at: Option<f64>,
     pub waiting_s: Option<i64>,
@@ -589,6 +590,9 @@ pub(crate) fn status_scoped_bound(
         parameters.push(rusqlite::types::Value::Text(sender_pane.to_owned()));
     }
     pool.with(|connection: &Connection| {
+        // Read-only legacy schema fixtures and rollback databases may lack the flag.
+        let has_flag: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('messages') WHERE name='implicit_ack')", [], |r| r.get(0)).map_err(map_sqlite)?;
+        let sql = sql.replacen("SELECT id, state", if has_flag { "SELECT implicit_ack, id, state" } else { "SELECT 0 AS implicit_ack, id, state" }, 1);
         let mut statement = connection.prepare(&sql).map_err(map_sqlite)?;
         let mut rows = statement
             .query_map(rusqlite::params_from_iter(parameters.iter()), |row| {
@@ -607,6 +611,7 @@ pub(crate) fn status_scoped_bound(
                     created_at,
                     read_at: row.get("read_at")?,
                     acked_at: row.get("acked_at")?,
+                    implicit_ack: row.get("implicit_ack")?,
                     archived_at: row.get("archived_at")?,
                     cancelled_at: row.get("cancelled_at")?,
                     waiting_s: if state == UNREAD {
