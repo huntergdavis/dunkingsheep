@@ -3316,10 +3316,13 @@
    "retire"
   ],
   "namespace": {
+   "apply": false,
    "command": "inbox",
    "inbox_command": "retire",
    "json": false,
+   "mailboxes": null,
    "no_start_daemon": false,
+   "reason": null,
    "self_pane": null,
    "socket": null
   }
@@ -3331,10 +3334,13 @@
    "--json"
   ],
   "namespace": {
+   "apply": false,
    "command": "inbox",
    "inbox_command": "retire",
    "json": true,
+   "mailboxes": null,
    "no_start_daemon": false,
+   "reason": null,
    "self_pane": null,
    "socket": null
   }
@@ -3346,10 +3352,71 @@
    "retire"
   ],
   "namespace": {
+   "apply": false,
    "command": "inbox",
    "inbox_command": "retire",
    "json": true,
+   "mailboxes": null,
    "no_start_daemon": false,
+   "reason": null,
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "inbox",
+   "retire",
+   "--apply"
+  ],
+  "namespace": {
+   "apply": true,
+   "command": "inbox",
+   "inbox_command": "retire",
+   "json": false,
+   "mailboxes": null,
+   "no_start_daemon": false,
+   "reason": null,
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "inbox",
+   "retire",
+   "--mailbox",
+   "x"
+  ],
+  "namespace": {
+   "apply": false,
+   "command": "inbox",
+   "inbox_command": "retire",
+   "json": false,
+   "mailboxes": [
+    "x"
+   ],
+   "no_start_daemon": false,
+   "reason": null,
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "inbox",
+   "retire",
+   "--reason",
+   "x"
+  ],
+  "namespace": {
+   "apply": false,
+   "command": "inbox",
+   "inbox_command": "retire",
+   "json": false,
+   "mailboxes": null,
+   "no_start_daemon": false,
+   "reason": "x",
    "self_pane": null,
    "socket": null
   }

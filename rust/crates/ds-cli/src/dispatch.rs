@@ -4403,22 +4403,56 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         }
         "inbox" => match text(ns, "inbox_command").unwrap_or("") {
             // t5014: the read-only mailbox retirement dry run.
-            "retire" => crate::daemon_cmd::run_command(ns, "inbox_retire", Map::new(), |result| {
-                let mut out = String::from("mailbox retirement DRY RUN: nothing was changed\n");
-                if let Some(classes) = result["by_class"].as_object() {
-                    for (class, counts) in classes {
+            "retire" => {
+                let mut args = Map::new();
+                if matches!(ns.get("apply"), Some(Value::Bool(true))) {
+                    args.insert("apply".into(), Value::Bool(true));
+                    args.insert(
+                        "mailboxes".into(),
+                        ns.get("mailboxes").cloned().unwrap_or(Value::Null),
+                    );
+                    args.insert(
+                        "reason".into(),
+                        ns.get("reason").cloned().unwrap_or(Value::Null),
+                    );
+                }
+                crate::daemon_cmd::run_command(ns, "inbox_retire", args, |result| {
+                    if result["applied"] == true {
+                        let list = |key: &str| result[key].as_array().map_or(0, Vec::len);
+                        return format!(
+                        "retired {} mailbox(es); kept at re-check {}; refused {} (use --json for names and reasons)\n",
+                        list("retired"), list("kept_at_recheck"), list("refused")
+                    );
+                    }
+                    let mut out = String::from("mailbox retirement DRY RUN: nothing was changed\n");
+                    if let Some(classes) = result["by_class"].as_object() {
+                        for (class, counts) in classes {
+                            out.push_str(&format!(
+                                "{class:>16}: {} mailboxes, {} messages\n",
+                                counts["mailboxes"], counts["messages"]
+                            ));
+                        }
+                    }
+                    if let Some(note) = result["role_registry"].as_str() {
+                        out.push_str(&format!("note: {note}\n"));
+                    }
+                    // t5014: the evidence behind each candidate.
+                    for entry in result["mailboxes"].as_array().into_iter().flatten() {
+                        if entry["class"] != "retired" {
+                            continue;
+                        }
                         out.push_str(&format!(
-                            "{class:>16}: {} mailboxes, {} messages\n",
-                            counts["mailboxes"], counts["messages"]
+                            "candidate {}: unread {}, waiting {}, last activity {} days ago\n",
+                            crate::render_fleet::py_str(&entry["mailbox"]),
+                            entry["unread"],
+                            entry["waiting"],
+                            crate::render_fleet::py_str(&entry["newest_age_days"]),
                         ));
                     }
-                }
-                if let Some(note) = result["role_registry"].as_str() {
-                    out.push_str(&format!("note: {note}\n"));
-                }
-                out.push_str("use --json for every mailbox with its class and reasons\n");
-                out
-            }),
+                    out.push_str("use --json for every mailbox with its class and reasons\n");
+                    out
+                })
+            }
             "ack" | "cancel" | "delete" => {
                 let command = text(ns, "inbox_command").unwrap_or("ack");
                 let ids = ns

@@ -616,13 +616,16 @@ pub static ROOT: Cmd = Cmd {
                 },
                 Cmd {
                     name: "retire", aliases: &[],
-                    help: Some("dry run: which mailboxes could be retired, and why the others stay (read-only)"),
+                    help: Some("dry run: which mailboxes could be retired, and why the others stay (read-only); --apply retires named mailboxes (owner only)"),
                     raw: false,
                     raw_text: false,
                     about: None,
                     epilog: None,
                     args: &[
                         Arg { id: "json", dest: "json", tri: false, default_int: false, flags: &["--json"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: None, hidden: true, metavar: None, version: None },
+                        Arg { id: "apply", dest: "apply", tri: false, default_int: false, flags: &["--apply"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: Some("owner only: retire the --mailbox names that are classed retired now"), hidden: false, metavar: None, version: None },
+                        Arg { id: "mailboxes", dest: "mailboxes", tri: false, default_int: false, flags: &["--mailbox"], positional: false, kind: Kind::Append, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("with --apply: an exact mailbox name (repeatable); there is no class-wide apply"), hidden: false, metavar: Some("NAME"), version: None },
+                        Arg { id: "reason", dest: "reason", tri: false, default_int: false, flags: &["--reason"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("with --apply: why (recorded)"), hidden: false, metavar: None, version: None },
                     ],
                     groups: &[],
                     sub_dest: None, sub_metavar: None, sub_required: false,

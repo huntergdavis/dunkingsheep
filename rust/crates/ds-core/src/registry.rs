@@ -433,8 +433,8 @@ pub static COMMANDS: &[Command] = &[
     },
     Command {
         name: "inbox_retire",
-        description: "Mailbox retirement dry run (read-only): every mailbox with its class (active, human, vp, ambiguous, retired) and why. 'retired' lists the candidates: no live pane or registry entry, nothing unread or waiting, no mail for 14 days. Nothing is changed.",
-        params: &[],
+        description: "Mailbox retirement dry run (read-only): every mailbox with its class (active, human, vp, ambiguous, retired) and why. 'retired' lists the candidates: no live pane or registry entry, nothing unread or waiting, no mail for 14 days. Nothing is changed. With apply (owner only): retires an explicit list of named mailboxes, each only if it is classed retired now; never a whole class.",
+        params: &[Param { name: "apply", schema: "{\"type\":\"boolean\",\"description\":\"owner only: retire the named mailboxes instead of reporting\"}" }, Param { name: "mailboxes", schema: "{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"apply: the exact mailbox names to retire (required; no class-wide apply)\"}" }, Param { name: "reason", schema: "{\"type\":\"string\",\"description\":\"apply: why, recorded with each retirement\"}" }],
         dispatch_required: &[],
         required: &[],
         mcp: false,
