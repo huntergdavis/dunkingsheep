@@ -418,8 +418,44 @@ impl Flock {
     }
 
     /// `inbox_status`.
-    pub fn inbox_status(&self, env: &dyn InboxEnv, message_id: &str) -> Result<Status, DunkError> {
-        inbox::status(env.pool(), message_id, env.now())
+    pub fn inbox_status(
+        &self,
+        env: &dyn InboxEnv,
+        message_id: &str,
+        self_pane_id: Option<&str>,
+    ) -> Result<Status, DunkError> {
+        self.inbox_status_bound(
+            env,
+            &rusqlite::types::Value::Text(message_id.to_owned()),
+            &format!("{message_id:?}"),
+            self_pane_id,
+        )
+    }
+
+    pub fn inbox_status_bound(
+        &self,
+        env: &dyn InboxEnv,
+        message_id: &rusqlite::types::Value,
+        id_repr: &str,
+        self_pane_id: Option<&str>,
+    ) -> Result<Status, DunkError> {
+        let pane = self_pane_id.filter(|pane| !pane.is_empty());
+        let role = match pane {
+            Some(pane) => env.caller_role(pane)?,
+            None => env.paneless_role()?.unwrap_or_else(|| "anonymous".into()),
+        };
+        if matches!(role.as_str(), "owner" | "web" | "system") {
+            return inbox::status_bound(env.pool(), message_id, id_repr, env.now());
+        }
+        let pane = pane.ok_or_else(|| refused(format!("no message with id {id_repr}")))?;
+        let own = self.own_mailbox(env, pane)?;
+        inbox::status_scoped_bound(
+            env.pool(),
+            message_id,
+            id_repr,
+            env.now(),
+            Some((&own, pane)),
+        )
     }
 
     /// `inbox_stats`: the `mailboxes` list.

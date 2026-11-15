@@ -359,7 +359,7 @@ pub fn h_inbox_status(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkE
         _ => python_value_repr(raw_id),
     };
     c.env.with_inbox_env(&mut |env| {
-        let s=crate::inbox::status_bound(env.pool(), &bound_id, &id_repr, env.now())?;
+        let s=c.flock.inbox_status_bound(env, &bound_id, &id_repr, c.self_pane_id())?;
         Ok(json!({"message_id":s.message_id,"state":s.state,"mailbox":s.mailbox,"destination":s.destination,"pane_id":s.pane_id,"sender":s.sender,"created_at":s.created_at,"read_at":s.read_at,"acked_at":s.acked_at,"archived_at":s.archived_at,"cancelled_at":s.cancelled_at,"waiting_s":s.waiting_s,"body_bytes":s.body_bytes,"attachments":s.attachments,"attachment_bytes":s.attachment_bytes,"reason":s.reason,"notify":{"state":s.notify_state,"reason":s.notify_reason,"at":s.notify_at,"transport_id":s.notify_transport_id,"attempt":s.notify_attempt}}))
     })
 }
