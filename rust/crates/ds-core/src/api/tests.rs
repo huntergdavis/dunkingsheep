@@ -3279,7 +3279,8 @@ fn test_owner_only_matches_the_python_superuser_only_set() {
     got.sort_unstable();
     let mut want = expected.to_vec();
     // Rust-only owner decisions have no counterpart in the frozen Python registry.
-    want.extend(["task_owner_answer", "task_owner_question"]);
+    // t5014: the mailbox retirement dry run is owner only.
+    want.extend(["task_owner_answer", "task_owner_question", "inbox_retire"]);
     want.sort_unstable();
     assert_eq!(got, want);
 }
@@ -4143,6 +4144,38 @@ fn lanes_model_records_a_declaration_for_the_callers_own_pane_only() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("pane is not live"), "{error}");
+}
+
+/// t5014: the retirement dry run refuses when the live pane list cannot be read, rather than
+/// reporting every live lane as gone.
+#[test]
+fn inbox_retire_refuses_when_the_pane_list_cannot_be_read() {
+    let (dir, flock) = flock();
+    let inbox =
+        Arc::new(Store::open(dir.path().join("inbox.db"), dir.path().join("blobs")).unwrap());
+    flock.attach_stores(Stores {
+        inbox: Some(inbox),
+        ..Default::default()
+    });
+    // ParityEnv has no authoritative pane listing: its fallible listing fails.
+    let env = ParityEnv::new(Some(i64::from(std::process::id())));
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_inbox_retire();
+    let error = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "inbox_retire",
+        None,
+        &RequestCtx::default(),
+        &env,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("the live pane list could not be read"),
+        "refused with: {error}"
+    );
 }
 
 #[test]

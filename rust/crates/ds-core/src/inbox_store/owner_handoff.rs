@@ -248,6 +248,7 @@ impl Store {
                 let subject = format!("TASK {task_id}: owner question");
                 let body = format!("TASK {task_id}: inspect owner question {question_id}. If still unanswered, use owner reply for the final answer. If already answered, reconcile the task without sending a second answer.");
                 tx.execute("INSERT INTO messages (id, mailbox, mailbox_label, pane_id, sender, subject, body, state, created_at) VALUES (?, ?, ?, ?, 'owner-handoff', ?, ?, 'queued', ?)", params![notice, SUPERVISOR, SUPERVISOR, pane_id, subject, body, created]).map_err(map_sqlite)?;
+                super::mailbox_status::reopen_on_mail(&tx, SUPERVISOR, created)?;
                 tx.execute("INSERT INTO message_audiences (message_id, audience) VALUES (?, 'agent')", [&notice]).map_err(map_sqlite)?;
                 tx.execute("INSERT INTO owner_handoffs (question_id, task_id, pane_id, notice_id, created_at) VALUES (?, ?, ?, ?, ?)", params![question_id, task_id, pane_id, notice, created]).map_err(map_sqlite)?;
                 (notice, created)

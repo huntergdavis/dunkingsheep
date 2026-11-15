@@ -31,6 +31,7 @@ use crate::inbox::{
     RETENTION_S, SCHEMA, STATES,
 };
 
+pub mod mailbox_status;
 pub(crate) mod pr_wait;
 mod retired;
 pub use retired::RetiredArchiveOptions;
@@ -212,6 +213,9 @@ impl Store {
                 .map_err(|e| captured.sqlite(e, &db_path, "inbox_schema"))?;
             connection.execute_batch(pr_wait::SCHEMA).map_err(map_sqlite)?;
             connection.execute_batch(threads::SCHEMA).map_err(map_sqlite)?;
+            connection
+                .execute_batch(mailbox_status::SCHEMA)
+                .map_err(map_sqlite)?;
             Ok(())
         })?;
         let readers = ReadPool::open_context(path, DEFAULT_READ_POOL, context)?;
@@ -232,12 +236,19 @@ impl Store {
         let old = old.to_string();
         let new = new.to_string();
         self.writer.call(move |connection| {
-            connection
+            let transaction = connection.transaction().map_err(map_sqlite)?;
+            let moved = transaction
                 .execute(
                     "UPDATE messages SET mailbox = ?1, mailbox_label = ?1 WHERE mailbox = ?2",
                     rusqlite::params![new, old],
                 )
-                .map_err(map_sqlite)
+                .map_err(map_sqlite)?;
+            // Mail moved into a retired mailbox is new mail for it (t5014).
+            if moved > 0 {
+                mailbox_status::reopen_on_mail(&transaction, &new, now_s())?;
+            }
+            transaction.commit().map_err(map_sqlite)?;
+            Ok(moved)
         })
     }
 
@@ -556,6 +567,7 @@ impl Store {
                     ],
                 )
                 .map_err(map_sqlite)?;
+            mailbox_status::reopen_on_mail(&transaction, &mailbox, created)?;
             if agent_only {
                 transaction
                     .execute(
@@ -656,6 +668,7 @@ impl Store {
                     ],
                 )
                 .map_err(map_sqlite)?;
+            mailbox_status::reopen_on_mail(&transaction, &mailbox, created)?;
             for (index, blob) in stored.iter().enumerate() {
                 transaction
                     .execute(
@@ -700,7 +713,8 @@ impl Store {
         );
         let status_id = message_id.clone();
         self.writer.call(move |connection| {
-            connection
+            let transaction = connection.transaction().map_err(map_sqlite)?;
+            let inserted = transaction
                 .execute(
                     "INSERT OR IGNORE INTO messages \
                      (id,mailbox,mailbox_label,pane_id,sender,subject,body,state,created_at) \
@@ -717,7 +731,12 @@ impl Store {
                     ],
                 )
                 .map_err(map_sqlite)?;
-            let (stored_mailbox, stored_pane): (String, Option<String>) = connection
+            // A next job stored for a retired mailbox reopens it (t5014); an existing row is
+            // not new mail.
+            if inserted > 0 {
+                mailbox_status::reopen_on_mail(&transaction, &mailbox, now_s())?;
+            }
+            let (stored_mailbox, stored_pane): (String, Option<String>) = transaction
                 .query_row(
                     "SELECT mailbox,pane_id FROM messages WHERE id = ?",
                     [&message_id],
@@ -727,6 +746,7 @@ impl Store {
             if stored_mailbox != mailbox || stored_pane.as_deref() != Some(pane_id.as_str()) {
                 return Err(refuse("next-job recipient changed"));
             }
+            transaction.commit().map_err(map_sqlite)?;
             Ok(())
         })?;
 
@@ -868,6 +888,7 @@ impl Store {
                     .map_err(map_sqlite)?;
                 id
             };
+            mailbox_status::reopen_on_mail(&transaction, &mailbox, now)?;
             if agent_only {
                 transaction
                     .execute(

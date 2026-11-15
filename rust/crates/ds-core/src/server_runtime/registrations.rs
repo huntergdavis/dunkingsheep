@@ -41,6 +41,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_task_complete();
     handlers.register_task_mutation_leases();
     handlers.register_task_statistics();
+    handlers.register_inbox_retire();
     handlers.register_metrics();
     handlers.register_doctor_recover();
     handlers.register_project_summary();
@@ -760,6 +761,7 @@ os.rename(out_path + ".tmp", out_path)
             "inbox_recover",
             "inbox_archive",
             "inbox_stats",
+            "inbox_retire",
             "inbox_fetch",
             "clear_box",
             "delivery",

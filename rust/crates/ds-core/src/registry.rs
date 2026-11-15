@@ -39,7 +39,7 @@ pub struct Group {
     pub actions: &'static [(&'static str, &'static str)],
 }
 
-/// Every command the daemon serves (138 at generation time).
+/// Every command the daemon serves (139 at generation time).
 pub static COMMANDS: &[Command] = &[
     Command {
         name: "add_dunk",
@@ -430,6 +430,16 @@ pub static COMMANDS: &[Command] = &[
         mcp: true,
         owner_only: false,
         roles: &["owner", "system", "web", "desk", "planner", "worker", "reviewer", "anonymous"],
+    },
+    Command {
+        name: "inbox_retire",
+        description: "Mailbox retirement dry run (read-only): every mailbox with its class (active, human, vp, ambiguous, retired) and why. 'retired' lists the candidates: no live pane or registry entry, nothing unread or waiting, no mail for 14 days. Nothing is changed.",
+        params: &[],
+        dispatch_required: &[],
+        required: &[],
+        mcp: false,
+        owner_only: true,
+        roles: &["owner"],
     },
     Command {
         name: "inbox_status",

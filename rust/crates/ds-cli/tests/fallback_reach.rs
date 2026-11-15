@@ -181,7 +181,7 @@ fn the_table_accepts_exactly_the_subcommands_the_dispatcher_routes() {
         sub_names(&["inbox"]),
         names(&[
             "count", "send", "list", "read", "recover", "archive", "status", "ack", "cancel",
-            "delete", "stats", "fetch"
+            "delete", "stats", "fetch", "retire"
         ])
     );
     assert_eq!(

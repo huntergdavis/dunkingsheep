@@ -18,6 +18,7 @@ pub mod outbox_messages;
 pub use outbox_messages::{h_cancel_message, h_get_message, h_list_messages};
 mod poll_roster_turn_end;
 pub use poll_roster_turn_end::{h_poll, h_roster, h_turn_end};
+mod inbox_retire;
 mod owner_push;
 pub use owner_push::{h_owner_poll, h_owner_push, h_owner_take};
 mod recovery;

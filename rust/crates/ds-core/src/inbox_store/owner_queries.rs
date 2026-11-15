@@ -146,6 +146,7 @@ impl Store {
             let prepared=context.as_ref().map(|context|super::threads::prepare(&tx,&id,context)).transpose()?;
             tx.execute("INSERT INTO messages (id, mailbox, mailbox_label, pane_id, sender, subject, body, state, created_at, transport, reply_to, external_id) VALUES (?, ?, ?, NULL, ?, NULL, ?, 'queued', ?, ?, ?, NULL)",
                 params![id, OWNER_MAILBOX, OWNER_MAILBOX, sender, body, now, transport, question_id]).map_err(map_sqlite)?;
+            super::mailbox_status::reopen_on_mail(&tx, OWNER_MAILBOX, now)?;
             tx.execute("UPDATE messages SET state = 'acked', acked_at = ?, read_at = COALESCE(read_at, ?) WHERE id = ? AND state IN ('queued', 'read')", params![now, now, question_id]).map_err(map_sqlite)?;
             if let (Some(prepared),Some(context))=(&prepared,&context){super::threads::record(&tx,&id,prepared,context)?;}
             let message = full_message(&tx, &id)?.ok_or_else(|| refuse("inserted owner answer missing"))?;

@@ -4342,6 +4342,23 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             })
         }
         "inbox" => match text(ns, "inbox_command").unwrap_or("") {
+            // t5014: the read-only mailbox retirement dry run.
+            "retire" => crate::daemon_cmd::run_command(ns, "inbox_retire", Map::new(), |result| {
+                let mut out = String::from("mailbox retirement DRY RUN: nothing was changed\n");
+                if let Some(classes) = result["by_class"].as_object() {
+                    for (class, counts) in classes {
+                        out.push_str(&format!(
+                            "{class:>16}: {} mailboxes, {} messages\n",
+                            counts["mailboxes"], counts["messages"]
+                        ));
+                    }
+                }
+                if let Some(note) = result["role_registry"].as_str() {
+                    out.push_str(&format!("note: {note}\n"));
+                }
+                out.push_str("use --json for every mailbox with its class and reasons\n");
+                out
+            }),
             "ack" | "cancel" | "delete" => {
                 let command = text(ns, "inbox_command").unwrap_or("ack");
                 let ids = ns
