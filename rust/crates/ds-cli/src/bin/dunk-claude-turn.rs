@@ -319,9 +319,15 @@ fn run() -> Option<()> {
                     return Some(());
                 }
             }
-            // Refusal / malformed result cannot cause model feedback. Keep state
-            // for retry unless the daemon positively confirms this generation ended.
-            if result["ended"] == true {
+            // A daemon restart forgets generations. Release stale/terminal tokens
+            // so the next prompt declares itself busy again. Transport failure
+            // returned above; only these explicit continuation races can retry.
+            let retryable = result["ended"] == false
+                && matches!(
+                    result["reason"].as_str(),
+                    Some("mail_continuation_active" | "turn_changed")
+                );
+            if !retryable {
                 fs::remove_file(path).ok()?;
             }
         } else {

@@ -403,8 +403,12 @@ context. Its duplicate false Stop stays silent. A genuine continuation Stop can
 still finish the token; if none arrives, the declared turn TTL remains the
 backstop and guarded fallback waits 120 s after expiry. The private fixture
 actually kills a hook whose stdout pipe is full after marker persistence; this
-is process/format evidence, not evidence from a live Claude model. Failed or
-refused RPCs emit no feedback and retain private state for retry/expiry. Rollout
+is process/format evidence, not evidence from a live Claude model. Transport failures and explicit continuation races (`mail_continuation_active`,
+`turn_changed`) emit no feedback and retain private state for retry/expiry.
+Terminal refusals (`no_active_turn`, `already_ended`, `expired_turn`,
+`turn_mismatch`, `foreign_turn`) and unrecognized results remove the stale local
+token, so the next prompt declares a fresh busy generation after daemon restart
+rather than waiting for its old TTL. Rollout
 requires a separate coordinator GO and agent lanes only; this PR edits neither
 installed hooks nor trust configuration.
 
