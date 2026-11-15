@@ -314,6 +314,43 @@ fn every_dry_run_and_plan_apply_leave_prefix_unchanged() {
     assert!(!f.root.join("state/ACTIVATION-START.json").exists());
     assert_eq!(hash(&cli).unwrap(), before);
 }
+
+#[test]
+fn inconsistent_recovery_inputs_are_refused_before_host_commands() {
+    for kind in ["saved-cli", "triggers"] {
+        let mut f = Fixture::new();
+        let path = f.root.join("STAGING-MANIFEST.json");
+        let mut manifest: Value = load(&path).unwrap();
+        if kind == "saved-cli" {
+            manifest["launcher"]["old_sha256"] = json!("incorrect");
+        } else {
+            manifest["rollback_triggers"] = json!(["unrelated_trigger"]);
+        }
+        put(&path, &serde_json::to_vec(&manifest).unwrap(), 0o444);
+        let sums = f.root.join("SHA256SUMS");
+        let rewritten = fs::read_to_string(&sums)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                if line.ends_with("  STAGING-MANIFEST.json") {
+                    format!("{}  STAGING-MANIFEST.json\n", hash(&path).unwrap())
+                } else {
+                    format!("{line}\n")
+                }
+            })
+            .collect::<String>();
+        put(&sums, rewritten.as_bytes(), 0o444);
+        f.digest = hash(&sums).unwrap();
+        let error = f.run("activate", true).unwrap_err();
+        assert!(error.contains(if kind == "saved-cli" {
+            "saved CLI differs"
+        } else {
+            "unexpected rollback trigger list"
+        }));
+        assert!(f.host.calls.is_empty());
+        assert!(!f.root.join("state/ACTIVATION-START.json").exists());
+    }
+}
 #[test]
 fn three_units_verify_and_repeated_rollback_restore_old_without_duplicate_dropins() {
     let mut f = Fixture::new();

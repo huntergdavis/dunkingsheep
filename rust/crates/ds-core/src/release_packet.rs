@@ -245,6 +245,16 @@ impl Packet {
             m,
         };
         packet.files()?;
+        validate_triggers(&packet.m.rollback_triggers)?;
+        for (name, expected) in [
+            ("launcher.before", &packet.m.launcher.old_sha256),
+            ("launcher.pending", &packet.m.launcher.new_sha256),
+        ] {
+            fail(
+                hash(&packet.relative(Path::new(name))?)? == *expected,
+                "saved CLI differs from manifest",
+            )?;
+        }
         for key in ORDER {
             packet.candidate(key)?;
         }
@@ -802,7 +812,7 @@ impl Packet {
 
 /// Quiesced SQLite snapshot and trigger downgrade; publication never overwrites
 /// the first complete snapshot and repeated calls accept already-dropped triggers.
-fn rollback_database(database: &Path, snapshot: &Path, triggers: &[String]) -> Result<()> {
+fn validate_triggers(triggers: &[String]) -> Result<()> {
     let expected = BTreeSet::from([
         "message_threads_delete",
         "message_thread_routes_delete",
@@ -812,7 +822,10 @@ fn rollback_database(database: &Path, snapshot: &Path, triggers: &[String]) -> R
         triggers.len() == 3
             && triggers.iter().map(String::as_str).collect::<BTreeSet<_>>() == expected,
         "unexpected rollback trigger list",
-    )?;
+    )
+}
+fn rollback_database(database: &Path, snapshot: &Path, triggers: &[String]) -> Result<()> {
+    validate_triggers(triggers)?;
     regular(database)?;
     let connection = Connection::open(database).map_err(|e| e.to_string())?;
     if !snapshot.exists() {
@@ -857,7 +870,7 @@ fn rollback_database(database: &Path, snapshot: &Path, triggers: &[String]) -> R
         after
             == before
                 .into_iter()
-                .filter(|(name, _)| !expected.contains(name.as_str()))
+                .filter(|(name, _)| !triggers.contains(name))
                 .collect(),
         "unrelated schema changed",
     )
