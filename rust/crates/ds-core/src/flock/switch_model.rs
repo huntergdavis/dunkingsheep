@@ -47,12 +47,99 @@ fn strip(argv: &[String], with_value: &[&str], bare: &[&str]) -> Vec<String> {
     out
 }
 
+/// The flags of each harness that take a value. Every other token after the executable must be
+/// a flag: a word that is not a flag's value is a positional argument (an initial prompt, a
+/// session id where codex expects one), which a resumed session would replay or misread.
+fn value_flags(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "claude" => &[
+            "--model",
+            "--effort",
+            "--permission-mode",
+            "--setting-sources",
+            "--settings",
+            "--mcp-config",
+            "--resume",
+            "-r",
+            "--allowedTools",
+            "--allowed-tools",
+            "--disallowedTools",
+            "--disallowed-tools",
+            "--session-id",
+            "--add-dir",
+            "--append-system-prompt",
+            "--system-prompt",
+            "--fallback-model",
+            "--agents",
+            "--plugin-dir",
+            "--output-format",
+            "--input-format",
+        ],
+        "codex" => &[
+            "-c",
+            "--config",
+            "-m",
+            "--model",
+            "-a",
+            "--ask-for-approval",
+            "-s",
+            "--sandbox",
+            "-C",
+            "--cd",
+            "-p",
+            "--profile",
+            "-i",
+            "--image",
+            "--add-dir",
+        ],
+        "pi" => &[
+            "--model",
+            "--provider",
+            "--thinking",
+            "--name",
+            "-e",
+            "--extension",
+            "--session",
+            "--session-id",
+            "--fork",
+            "--api-key",
+            "--system-prompt",
+        ],
+        _ => &[],
+    }
+}
+
+/// How many positional arguments `rest` holds, read fail-closed: a word counts unless it is the
+/// value of a known value-taking flag; `--` makes everything after it positional.
+fn positional_count(kind: &str, rest: &[String]) -> usize {
+    let takes_value = value_flags(kind);
+    let mut count = 0;
+    let mut expecting_value = false;
+    for (index, token) in rest.iter().enumerate() {
+        if expecting_value {
+            expecting_value = false;
+            continue;
+        }
+        if token == "--" {
+            return count + rest.len() - index - 1;
+        }
+        if token.starts_with('-') {
+            expecting_value = !token.contains('=') && takes_value.contains(&token.as_str());
+            continue;
+        }
+        count += 1;
+    }
+    count
+}
+
 /// The command line that resumes `session` with `model` (and `effort`), built from the lane's
-/// launch command. The old model, effort and session flags are replaced, not repeated.
+/// launch command. The old model, effort and session flags are replaced, not repeated. With no
+/// `model`, the session is resumed without a model flag (the harness's default, as at launch).
+/// A launch command with positional arguments is refused.
 pub fn switch_argv(
     argv: &[String],
     session: &str,
-    model: &str,
+    model: Option<&str>,
     effort: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let Some(exe) = argv.first() else {
@@ -60,6 +147,21 @@ pub fn switch_argv(
     };
     let kind = exe.rsplit('/').next().unwrap_or(exe).to_lowercase();
     let rest = &argv[1..];
+    // A lane switched before already starts `codex resume ... SESSION`; that form is read as is.
+    let checked: Vec<String> = match (kind.as_str(), rest.first().map(String::as_str)) {
+        ("codex", Some("resume")) => rest[1..]
+            .iter()
+            .filter(|t| *t != session)
+            .cloned()
+            .collect(),
+        _ => rest.to_vec(),
+    };
+    let positional = positional_count(&kind, &checked);
+    if positional > 0 && !value_flags(&kind).is_empty() {
+        return Err(format!(
+            "the launch command has {positional} positional argument(s) (such as an initial prompt), which a resumed session would replay or misread"
+        ));
+    }
     match kind.as_str() {
         "claude" => {
             let mut out = vec![exe.clone()];
@@ -68,7 +170,10 @@ pub fn switch_argv(
                 &["--model", "--effort", "--resume", "-r", "--session-id"],
                 &["--continue", "-c", "--fork-session"],
             ));
-            out.extend(["--resume".into(), session.into(), "--model".into(), model.into()]);
+            out.extend(["--resume".into(), session.into()]);
+            if let Some(model) = model {
+                out.extend(["--model".into(), model.into()]);
+            }
             if let Some(effort) = effort {
                 out.extend(["--effort".into(), effort.into()]);
             }
@@ -97,7 +202,9 @@ pub fn switch_argv(
             }
             let mut out = vec![exe.clone(), "resume".into()];
             out.extend(out_rest);
-            out.extend(["-m".into(), model.into()]);
+            if let Some(model) = model {
+                out.extend(["-m".into(), model.into()]);
+            }
             if let Some(effort) = effort {
                 out.extend(["-c".into(), format!("model_reasoning_effort={effort}")]);
             }
@@ -111,11 +218,14 @@ pub fn switch_argv(
                 &["--model", "--session", "--session-id", "--thinking", "--fork"],
                 &["--continue", "-c", "--resume", "-r"],
             ));
-            let model = match effort {
-                Some(effort) => format!("{model}:{effort}"),
-                None => model.to_string(),
-            };
-            out.extend(["--session".into(), session.into(), "--model".into(), model]);
+            out.extend(["--session".into(), session.into()]);
+            match (model, effort) {
+                (Some(model), Some(effort)) => out.extend(["--model".into(), format!("{model}:{effort}")]),
+                (Some(model), None) => out.extend(["--model".into(), model.into()]),
+                // pi takes the effort only as part of the model.
+                (None, Some(effort)) => out.extend(["--thinking".into(), effort.into()]),
+                (None, None) => {}
+            }
             Ok(out)
         }
         other => Err(format!(
@@ -187,8 +297,24 @@ impl Flock {
                 ))
             })?
             .to_string();
-        let new_argv = switch_argv(&argv, &session, &model, effort.as_deref())
+        let new_argv = switch_argv(&argv, &session, Some(&model), effort.as_deref())
             .map_err(|why| refusal(format!("switch model refused: {why}")))?;
+        // A failed start is rolled back by RESUMING the same session with the old model, never
+        // by the launch command, which would start a fresh session and abandon this one.
+        let old_text = |key: &str| {
+            launch
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+        };
+        let old_model =
+            old_text("model").or_else(|| crate::state::flag(&argv, &crate::state::MODEL_FLAGS));
+        let old_effort =
+            old_text("effort").or_else(|| crate::state::flag(&argv, &crate::state::THINKING_FLAGS));
+        let rollback_argv =
+            switch_argv(&argv, &session, old_model.as_deref(), old_effort.as_deref())
+                .map_err(|why| refusal(format!("switch model refused: no safe rollback: {why}")))?;
         let pane_pid = services
             .terminal
             .lock()
@@ -205,7 +331,7 @@ impl Flock {
                 "switch model refused: the process of {pane} is not readable"
             ))
         })?;
-        let previous = launch.get("model").cloned().unwrap_or(Value::Null);
+        let previous = json!(old_model);
         let reason = json!(format!("switch model to {model}"));
         let (pane_value, pid_value, start_value) = (json!(pane), json!(pane_pid), json!(start));
         // The idle evidence is the respawn's own: no active turn, no queued outbox message, no
@@ -215,7 +341,7 @@ impl Flock {
             RespawnRequest {
                 pane_id: &pane_value,
                 argv: &new_argv,
-                rollback_argv: Some(&argv),
+                rollback_argv: Some(&rollback_argv),
                 expected_pid: Some(&pid_value),
                 expected_start: Some(&start_value),
                 confirm_idle: true,
@@ -253,7 +379,7 @@ mod tests {
             "-c",
         ]);
         assert_eq!(
-            switch_argv(&argv, "abc-1", "opus-5.5", Some("medium")).unwrap(),
+            switch_argv(&argv, "abc-1", Some("opus-5.5"), Some("medium")).unwrap(),
             v(&[
                 "/bin/claude",
                 "--dangerously-skip-permissions",
@@ -266,15 +392,9 @@ mod tests {
             ])
         );
         // Switching again replaces the earlier resume, it does not stack.
-        let again = switch_argv(
-            &switch_argv(&argv, "abc-1", "a", None).unwrap(),
-            "abc-1",
-            "b",
-            None,
-        )
-        .unwrap();
+        let once = switch_argv(&argv, "abc-1", Some("a"), None).unwrap();
         assert_eq!(
-            again,
+            switch_argv(&once, "abc-1", Some("b"), None).unwrap(),
             v(&[
                 "/bin/claude",
                 "--dangerously-skip-permissions",
@@ -299,7 +419,7 @@ mod tests {
             "--yolo",
         ]);
         assert_eq!(
-            switch_argv(&argv, "s-9", "gpt-sol", Some("high")).unwrap(),
+            switch_argv(&argv, "s-9", Some("gpt-sol"), Some("high")).unwrap(),
             v(&[
                 "codex",
                 "resume",
@@ -313,9 +433,9 @@ mod tests {
                 "s-9"
             ])
         );
-        let switched = switch_argv(&argv, "s-9", "gpt-sol", None).unwrap();
+        let switched = switch_argv(&argv, "s-9", Some("gpt-sol"), None).unwrap();
         assert_eq!(
-            switch_argv(&switched, "s-9", "gpt-luna", None).unwrap(),
+            switch_argv(&switched, "s-9", Some("gpt-luna"), None).unwrap(),
             v(&[
                 "codex",
                 "resume",
@@ -344,7 +464,7 @@ mod tests {
             "x",
         ]);
         assert_eq!(
-            switch_argv(&argv, "p-2", "sol", Some("high")).unwrap(),
+            switch_argv(&argv, "p-2", Some("sol"), Some("high")).unwrap(),
             v(&[
                 "pi",
                 "--extension",
@@ -358,11 +478,91 @@ mod tests {
     }
 
     #[test]
+    fn the_rollback_resumes_the_same_session_with_the_old_model_never_a_fresh_one() {
+        // A lane launched normally: its launch command has no resume at all.
+        let launch = v(&[
+            "claude",
+            "--model",
+            "opus-4",
+            "--effort",
+            "high",
+            "--dangerously-skip-permissions",
+        ]);
+        let rollback = switch_argv(&launch, "abc-1", Some("opus-4"), Some("high")).unwrap();
+        assert_eq!(
+            rollback,
+            v(&[
+                "claude",
+                "--dangerously-skip-permissions",
+                "--resume",
+                "abc-1",
+                "--model",
+                "opus-4",
+                "--effort",
+                "high"
+            ])
+        );
+        assert_ne!(
+            rollback, launch,
+            "the launch command would start a fresh session"
+        );
+        // With no old model known, the session is still resumed, with the harness default.
+        assert_eq!(
+            switch_argv(&v(&["codex", "-a", "never"]), "s-9", None, None).unwrap(),
+            v(&["codex", "resume", "-a", "never", "s-9"])
+        );
+        assert_eq!(
+            switch_argv(&v(&["pi"]), "p-2", None, Some("low")).unwrap(),
+            v(&["pi", "--session", "p-2", "--thinking", "low"])
+        );
+    }
+
+    #[test]
+    fn a_launch_command_with_positional_arguments_is_refused() {
+        let refused = |argv: &[&str]| switch_argv(&v(argv), "s", Some("m"), None).unwrap_err();
+        // An initial prompt after a flag that takes no value.
+        assert!(
+            refused(&["claude", "--dangerously-skip-permissions", "start the task"])
+                .contains("1 positional argument")
+        );
+        assert!(refused(&["codex", "--no-daemon", "a prompt"]).contains("positional"));
+        assert!(refused(&["pi", "--offline", "hello"]).contains("positional"));
+        // Everything after `--` is positional.
+        assert!(refused(&["pi", "--model", "x", "--", "a", "b"]).contains("2 positional"));
+        // An unknown flag followed by a word is not trusted to be flag and value.
+        assert!(refused(&["claude", "--unknown-flag", "word"]).contains("positional"));
+        // Known value flags, `=` forms and bare flags with no word after them are fine.
+        assert!(switch_argv(
+            &v(&[
+                "claude",
+                "--permission-mode",
+                "plan",
+                "--settings=x.json",
+                "--verbose"
+            ]),
+            "s",
+            Some("m"),
+            None
+        )
+        .is_ok());
+        assert!(switch_argv(
+            &v(&["codex", "-c", "k=v", "-s", "workspace-write", "--no-daemon"]),
+            "s",
+            Some("m"),
+            None
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn a_harness_without_a_resume_form_is_refused() {
         for argv in [v(&["opencode", "--model", "x"]), v(&["bash"]), Vec::new()] {
-            assert!(switch_argv(&argv, "s", "m", None).is_err(), "{argv:?}");
+            assert!(
+                switch_argv(&argv, "s", Some("m"), None).is_err(),
+                "{argv:?}"
+            );
         }
-        assert!(switch_argv(&v(&["opencode"]), "s", "m", None)
+        assert!(switch_argv(&v(&["opencode"]), "s", Some("m"), None)
             .unwrap_err()
             .contains("a fresh session is never started instead"));
     }
