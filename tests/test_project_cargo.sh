@@ -106,4 +106,33 @@ wait_start maintenance
 expect_exit 75 env PATH="$install_path" bash "$installer" --apply --bin-dir "$fixture/install/bin" --expected-ds-sha "$new_baseline" --backup-dir "$fixture/install/maintenance-backup" 2> "$fixture/install-maintenance.log"
 [[ ! -e $fixture/install/maintenance-backup ]]
 touch "$RELEASE/maintenance"; wait "$maintenance"
+# t3912: ds-cargo gives each checkout a short scratch TMPDIR under ~/workspace/.dunk-scratch/c;
+# a fake toolchain and a fake proj-cargo beside a copy of ds-cargo report what it exports.
+mkdir -p "$fixture/dscargo/bin" "$fixture/dscargo/toolchain" "$fixture/dscargo/repo/rust" "$fixture/h"
+cp "$repo/tools/ds-cargo" "$fixture/dscargo/bin/ds-cargo"
+printf '#!/usr/bin/env bash\necho "TMPDIR=${TMPDIR:-unset}"\n' > "$fixture/dscargo/bin/proj-cargo"
+printf '#!/bin/sh\nexit 0\n' > "$fixture/dscargo/toolchain/cargo"
+cp "$fixture/dscargo/toolchain/cargo" "$fixture/dscargo/toolchain/rustc"
+chmod +x "$fixture/dscargo/bin/ds-cargo" "$fixture/dscargo/bin/proj-cargo" "$fixture/dscargo/toolchain/cargo" "$fixture/dscargo/toolchain/rustc"
+git init -q "$fixture/dscargo/repo"
+# A short HOME stands in for the real one, so the length rule is tested on a short path.
+short_home=$(mktemp -d /tmp/dsch.XXXX)
+ds() { (cd "$1" && env -u CARGO_TARGET_DIR DS_CARGO_TOOLCHAIN="$fixture/dscargo/toolchain" HOME="$short_home" "${@:2}" "$fixture/dscargo/bin/ds-cargo" test); }
+top=$(cd "$fixture/dscargo/repo" && git rev-parse --show-toplevel)
+key=$(printf '%s' "$top" | sha256sum | cut -c1-8)
+got=$(ds "$fixture/dscargo/repo/rust" TMPDIR=/tmp)
+[[ $got == "TMPDIR=$short_home/workspace/.dunk-scratch/c/$key" ]] || { echo "default TMPDIR: $got" >&2; exit 1; }
+[[ $(stat -c %a "$short_home/workspace/.dunk-scratch/c/$key") == 700 ]] || { echo "scratch is not 0700" >&2; exit 1; }
+[[ $(stat -c %a "$short_home/workspace/.dunk-scratch") == 700 ]] || { echo "scratch parent is not 0700" >&2; exit 1; }
+# The same checkout always gets the same directory, from any subdirectory.
+[[ $(ds "$fixture/dscargo/repo" TMPDIR=/tmp) == "$got" ]] || { echo "not stable per checkout" >&2; exit 1; }
+got=$(ds "$fixture/dscargo/repo/rust" TMPDIR="$fixture/dscargo/mine")
+[[ $got == "TMPDIR=$fixture/dscargo/mine" ]] || { echo "an explicit TMPDIR was replaced: $got" >&2; exit 1; }
+# The fixture may itself sit inside a checkout: stop git looking above it.
+got=$(ds "$fixture/dscargo" TMPDIR=/tmp GIT_CEILING_DIRECTORIES="$fixture")
+[[ $got == "TMPDIR=/tmp" ]] || { echo "outside a checkout: $got" >&2; exit 1; }
+# Too long for socket paths: a clear refusal, not a silent long TMPDIR.
+expect_exit 2 ds "$fixture/dscargo/repo/rust" TMPDIR=/tmp DS_CARGO_TMP_MAX=20 2> "$fixture/dscargo/too-long.log"
+grep -q "Unix socket paths under it would not fit" "$fixture/dscargo/too-long.log"
+rm -r -- "$short_home"
 echo "project Cargo locking PASS; evidence: $fixture"
