@@ -1844,7 +1844,7 @@ fn h_lanes_matches_python() {
             "lanes",
             args(json!({"action":"remove"})),
         )),
-        "lanes action must be list, set, project, model, switch_model or planner"
+        "lanes action must be list, set, project, model, switch_model, settings or planner"
     );
 
     let set = dispatch_as_flock_role(

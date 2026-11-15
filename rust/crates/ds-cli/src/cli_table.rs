@@ -2534,6 +2534,22 @@ pub static ROOT: Cmd = Cmd {
                     ],
                 },
                 Cmd {
+                    name: "settings", aliases: &[],
+                    help: Some("read-only: a lane's launch settings (model, effort, sandbox, approval, ...) and where each came from"),
+                    raw: false,
+                    raw_text: false,
+                    about: None,
+                    epilog: None,
+                    args: &[
+                        Arg { id: "json", dest: "json", tri: false, default_int: false, flags: &["--json"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: None, hidden: true, metavar: None, version: None },
+                        Arg { id: "pane", dest: "pane", tri: false, default_int: false, flags: &[], positional: true, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: true, help: Some("live pane id"), hidden: false, metavar: None, version: None },
+                    ],
+                    groups: &[],
+                    sub_dest: None, sub_metavar: None, sub_required: false,
+                    subs: &[
+                    ],
+                },
+                Cmd {
                     name: "planner", aliases: &[],
                     help: Some("owner-controlled planner grants and task project scope"),
                     raw: false,

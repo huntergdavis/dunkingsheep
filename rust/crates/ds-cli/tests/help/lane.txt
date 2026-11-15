@@ -11,6 +11,8 @@ positional arguments:
     model         record the model a lane now runs (recorded, not applied)
     switch-model  restart a lane with another model, resuming its session
                   (owner role)
+    settings      read-only: a lane's launch settings (model, effort, sandbox,
+                  approval, ...) and where each came from
     planner       owner-controlled planner grants and task project scope
 
 options:

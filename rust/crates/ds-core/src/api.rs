@@ -3482,9 +3482,23 @@ pub fn h_lanes(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkEr
         };
         return context.env.with_respawn_pane_env(&mut operation);
     }
+    if action == "settings" {
+        // t5249 slice 1: the lane's effective launch settings with their sources. Read-only.
+        let pane = args
+            .get("pane")
+            .and_then(Value::as_str)
+            .filter(|pane| !pane.trim().is_empty())
+            .ok_or_else(|| DunkError::Refused("lane settings needs a pane id".into()))?;
+        let record = context.flock.launch(pane).map(Value::Object);
+        return Ok(crate::flock::launch_settings::lane_settings(
+            pane,
+            record.as_ref(),
+        ));
+    }
     if action != "list" {
         return Err(DunkError::Refused(
-            "lanes action must be list, set, project, model, switch_model or planner".into(),
+            "lanes action must be list, set, project, model, switch_model, settings or planner"
+                .into(),
         ));
     }
     let mut rows = context.flock.lanes();

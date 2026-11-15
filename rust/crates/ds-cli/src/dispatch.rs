@@ -1028,6 +1028,19 @@ fn lane(ns: &Map<String, Value>) -> Outcome {
                 }),
             )
         }
+        "settings" => {
+            let mut args = Map::new();
+            args.insert("action".into(), Value::String("settings".into()));
+            args.insert(
+                "pane".into(),
+                ns.get("pane").cloned().unwrap_or(Value::Null),
+            );
+            (
+                "lanes",
+                args,
+                Box::new(ds_core::flock::launch_settings::render_text),
+            )
+        }
         "switch-model" => {
             let mut args = Map::new();
             args.insert("action".into(), Value::String("switch_model".into()));
