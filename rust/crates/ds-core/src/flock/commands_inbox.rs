@@ -878,7 +878,7 @@ impl Flock {
             thread,
             ..Default::default()
         };
-        let (snapshot, created) = if key.is_some() {
+        let (snapshot, deduplicated) = if key.is_some() {
             env.store().send_thread_snapshot_wire(
                 &outgoing,
                 stored_subject,
@@ -893,12 +893,12 @@ impl Flock {
                     raw_attachments,
                     args.agent_only,
                 )?,
-                true,
+                false,
             )
         };
         let message_id = snapshot.summary.message_id.clone();
         let mut notified = false;
-        if created
+        if !deduplicated
             && args.notify
             && (args.wake_quiet
                 || !recipient_is_quiet(
