@@ -51,3 +51,23 @@ export function splitEntries(entries) {
     others: list.filter(entry => entry.ground_truth !== true),
   };
 }
+
+// t5241: the store a Databases deep link asks for: ?project=global, or ?project=<name>.
+// Anything else (missing, empty, untrimmed) selects nothing.
+export function requestedStore(search) {
+  const project = new URLSearchParams(typeof search === 'string' ? search : '').get('project');
+  if (typeof project !== 'string' || !project || project.trim() !== project) return '';
+  return project === 'global' ? 'global' : `project:${project}`;
+}
+
+// The query string that reopens `selected` ('' for none), for the address bar.
+export function storeSearch(selected) {
+  if (!selected) return '';
+  const project = selected === 'global' ? 'global' : selected.slice('project:'.length);
+  return `?project=${encodeURIComponent(project)}`;
+}
+
+// The Databases address for a project's information (the link in Projects).
+export function informationHref(project) {
+  return `/dash/databases${storeSearch(`project:${project}`)}`;
+}

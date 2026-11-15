@@ -1,4 +1,4 @@
-"""t3250: the read-only project information panel, with mocked desk API responses only."""
+"""t3250/t5241: the read-only project information panel in the Databases tab, with mocked desk API responses only."""
 import json, os, threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -23,7 +23,7 @@ def api(route):
     url = urlsplit(route.request.url)
     path = url.path
     requests.append((route.request.method, path))
-    if path == '/api/projects': value = {'lanes': []}
+    if path == '/api/projects': value = {'lanes': [{'pane_id': '%11', 'name': 'Writer A', 'membership': {'scope': 'project', 'project': 'alpha'}, 'state': 'idle'}]}
     elif path == '/api/project-context':
         value = {'map': {'state': 'ok'}, 'global': {'state': 'ok'}, 'projects': [{'name': 'alpha', 'state': 'ok'}, {'name': 'broken', 'state': 'mapping_invalid', 'reason': 'the directory is not an absolute path'}]}
     elif path == '/api/project-context/project/alpha':
@@ -42,11 +42,23 @@ try:
             dialogs = []
             page.on('dialog', lambda d: (dialogs.append(d.message), d.dismiss()))
             page.route('**/api/**', api)
+            # Projects no longer holds the panel; each project links to its information.
             page.goto(base + '/dash/projects', wait_until='domcontentloaded')
+            link = page.get_by_role('link', name='Information')
+            link.wait_for()
+            assert page.locator('.project-information').count() == 0, 'the panel moved to Databases'
+            assert link.get_attribute('href') == '/dash/databases?project=alpha'
+            assert page.locator('a[href="/dash/databases"]').count() >= 1, 'Databases is in the navigation'
+            link.click()
+            page.wait_for_url('**/dash/databases?project=alpha')
             page.get_by_role('heading', name='Information').wait_for()
             store = page.get_by_label('Information store')
-            store.select_option('project:alpha')
             page.get_by_role('heading', name='Ground truths (1)').wait_for()
+            assert store.input_value() == 'project:alpha', 'the link opened the project focused'
+            # The deep link survives a reload.
+            page.reload(wait_until='domcontentloaded')
+            page.get_by_role('heading', name='Ground truths (1)').wait_for()
+            assert page.get_by_label('Information store').input_value() == 'project:alpha'
             rule = page.locator('[data-info-entry="alpha-rule"]')
             assert 'authority: owner' in rule.inner_text() and 'source: owner mail' in rule.inner_text()
             assert 'stale: re-check before trusting' in page.locator('[data-info-entry="alpha-fact"]').inner_text()
@@ -65,6 +77,7 @@ try:
             page.get_by_text('The mapping for this project is invalid: the directory is not an absolute path.').wait_for()
             store.select_option('global')
             page.get_by_text('This store has no entries yet.').wait_for()
+            assert page.url.endswith('/dash/databases?project=global'), page.url
             assert not page.evaluate('document.documentElement.scrollWidth > window.innerWidth'), f'page scrolls sideways at {width}'
             page.close()
         browser.close()
@@ -72,4 +85,4 @@ try:
     assert info and all(method == 'GET' for method, _ in info), 'the panel only reads'
 finally:
     server.shutdown()
-print('project information browser check passed at 360, 768 and 1280')
+print('databases tab (project information) browser check passed at 360, 768 and 1280')

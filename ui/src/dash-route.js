@@ -3,6 +3,7 @@
 // is the order of the navigation links.
 export const DASH_ROUTES = {
   projects: { eyebrow: 'PROJECTS', title: 'Projects', subtitle: 'Live lanes by explicit project membership' },
+  databases: { eyebrow: 'DATABASES', title: 'Databases', subtitle: 'Each project\'s information store and the global store' },
   cos: { eyebrow: 'INBOX', title: 'Inbox', subtitle: 'Browse Your inbox and VP history' },
   tasks: { eyebrow: 'TASKS', title: 'Tasks', subtitle: 'Current work and closed tasks' },
   operations: { eyebrow: 'OPERATIONS', title: 'Operations board', subtitle: 'Tasks, progress, and service health' },

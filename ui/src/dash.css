@@ -581,6 +581,7 @@
 .project-terminal-screen { height: min(60vh, 600px); min-height: 240px; background: #111; padding: 8px; overflow: auto; box-sizing: border-box; max-width: 100%; }
 .project-terminal-note { color: var(--dash-muted, #888); font-size: 0.85rem; }
 
+.project-information-link { margin-left: 0.75rem; font-size: 0.85rem; font-weight: normal; }
 .project-information .info-controls { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 0.75rem; }
 .project-information .info-entry { border-top: 1px solid var(--dash-border); padding: 0.5rem 0; overflow-wrap: anywhere; }
 .project-information .info-entry h4 { margin: 0; }
