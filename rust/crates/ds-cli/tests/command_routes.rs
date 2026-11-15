@@ -5367,7 +5367,6 @@ fn cli_route_58_commands_map() {
     ));
     assert!(r.contains("inbox_send(to*, body*, subject, attach, system_sender, notify, parent_id)"));
     assert!(r.contains("inbox_send_agent_only(to*, body*, subject, attach, notify, parent_id)"));
-    assert!(r.contains("task_list(scope, status, assignee, include_done, limit, kind, needs_owner, paged, page_size, cursor, priority, page_group)"));
     let strip = |text: &str| {
         let mut skip_description = false;
         text.lines()
@@ -5394,7 +5393,6 @@ fn cli_route_58_commands_map() {
                     ).replace("owner_conversation(limit, before, before_id, source_filter, include_internal)", "owner_conversation(limit, before)")
                     .replace("inbox_send(to*, body*, subject, attach, system_sender, notify, parent_id)", "inbox_send(to*, body*, subject, attach, system_sender, notify)")
                     .replace("inbox_send_agent_only(to*, body*, subject, attach, notify, parent_id)", "inbox_send_agent_only(to*, body*, subject, attach, notify)")
-                    .replace("task_list(scope, status, assignee, include_done, limit, kind, needs_owner, paged, page_size, cursor, priority, page_group)", "task_list(scope, status, assignee, include_done, limit, kind, needs_owner)")
                     .replace("task_read(id*, summary, notes, note_kind, before_note)", "task_read(id*)")
                     .replace("task_note(id*, event, reason, note_kind)", "task_note(id*, event, reason)")
                     .replace("task_complete(id*, by, verdict, landed, note, next)", "task_complete(id*, by, verdict, landed)")
@@ -5511,22 +5509,6 @@ fn cli_route_58_commands_map() {
                 .unwrap()
                 .remove(key)
                 .is_some());
-        }
-        let task_list = r.iter_mut().find(|row| row["name"] == "task_list").unwrap();
-        let fields = task_list["input_schema"]["properties"]
-            .as_object_mut()
-            .unwrap();
-        for (key, kind) in [
-            ("paged", "boolean"),
-            ("page_size", "integer"),
-            ("cursor", "string"),
-            ("priority", "string"),
-            ("page_group", "string"),
-        ] {
-            let field = fields
-                .remove(key)
-                .expect("new task paging parameter is advertised");
-            assert_eq!(field["type"], kind);
         }
         let inbox_list = r
             .iter_mut()

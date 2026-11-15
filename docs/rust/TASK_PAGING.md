@@ -1,6 +1,8 @@
 # Opt-in task list pages
 
-Existing `task_list` calls retain their priority/age ordering, signed `limit`
+Paging is an internal socket/desk-client option on the existing handler. Public
+CLI flags and MCP schemas remain unchanged to preserve their existing contracts
+and the MCP hot-set schema budget. Existing `task_list` calls retain their priority/age ordering, signed `limit`
 semantics, default of 200, validation and response fields. Paging requires the
 literal boolean `paged: true`; its `page_size` defaults to 50 and must be 1–100.
 `limit` applies to the legacy mode only. No schema, task state, leases or events
@@ -29,8 +31,7 @@ the prior page boundary does not prevent continuing after its ID.
 
 Paged mode supports existing status/kind/assignee/needs_owner filters plus a
 `priority` filter. `page_group` optionally selects `active` (open/in_progress/blocked)
-or `closed` (done/cancelled), and cannot combine with `status`. This separate
-parameter avoids a collision with mutation status enums in the grouped MCP tool. Without an explicit status, `include_done` retains
+or `closed` (done/cancelled), and cannot combine with `status`. Without an explicit status, `include_done` retains
 its existing meaning. Empty/unknown results do not imply inaccessible queues are
 visible. Caller scope rules match the legacy Flock path.
 
@@ -40,7 +41,7 @@ and leases) are decorated only for the bounded page. Each page is one deferred
 read transaction on the existing task actor; there is no cross-request snapshot
 or server-side cursor state.
 
-This daemon-only addition does not add CLI flags or a desk route. A later desk
+This daemon-only addition does not add CLI flags, MCP parameters or a desk route. A later desk
 Tasks view must detect `paging_version` and show an explicit first-page-only note
 when using an older daemon. Do not infer paging support from an accepted request:
 older handlers may ignore the new optional arguments.
