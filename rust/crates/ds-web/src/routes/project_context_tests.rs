@@ -449,6 +449,41 @@ async fn an_unreadable_entry_is_shown_under_its_class_directory_with_the_error()
 }
 
 #[tokio::test]
+async fn a_fifo_or_a_linked_class_directory_is_never_opened_and_does_not_hang() {
+    let w = world();
+    // A FIFO with no writer: opening it for reading without O_NONBLOCK would block forever.
+    nix_mkfifo(&w.alpha.join(".dunkingsheep/fact/pipe.md"));
+    // A class directory that is a link to another store.
+    std::os::unix::fs::symlink(
+        w.beta.join(".dunkingsheep/fact"),
+        w.alpha.join(".dunkingsheep/history"),
+    )
+    .unwrap();
+    let request = get(
+        &w.config,
+        Some(Identity::Owner),
+        "/api/project-context/project/alpha",
+    );
+    let (_, view) = tokio::time::timeout(std::time::Duration::from_secs(10), request)
+        .await
+        .expect("the request must not hang on a FIFO");
+    assert_eq!(
+        (view["total"].as_u64(), view["skipped_links"].as_u64()),
+        (Some(3), Some(2)),
+        "{view}"
+    );
+    assert!(!view.to_string().contains("beta"));
+}
+
+fn nix_mkfifo(path: &Path) {
+    let status = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[tokio::test]
 async fn long_bodies_are_truncated_with_a_marker() {
     let w = world();
     write_entry(

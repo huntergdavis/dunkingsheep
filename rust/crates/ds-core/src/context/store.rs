@@ -105,6 +105,9 @@ pub const TYPES: [&str; 8] = [
 /// and standing instructions come from one person.
 pub const OWNER_ONLY_TYPES: [&str; 2] = ["rule", "principle"];
 
+/// At most this much of one entry file is read by `entries_no_follow`.
+const MAX_ENTRY_BYTES: u64 = 1024 * 1024;
+
 /// Front-matter keys in the order `_render` writes them.
 const RENDER_KEYS: [&str; 12] = [
     "class",
@@ -436,6 +439,92 @@ impl Store {
             }
         }
         out
+    }
+
+    /// `entries`, for a reader that must not follow links or open anything but plain files (the
+    /// desk's information browser, t3250). A class directory that is not a real directory, and
+    /// an entry that is not a regular file (a link, a FIFO, a device), is never opened: it is
+    /// skipped and counted. A file is opened with `O_NOFOLLOW | O_NONBLOCK` and checked again
+    /// after opening, so a link swapped in between is refused too. Nothing is written.
+    pub fn entries_no_follow(&self) -> (Vec<Entry>, usize) {
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut out = Vec::new();
+        let mut skipped = 0;
+        let is_real_dir =
+            |path: &Path| fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_dir());
+        if !is_real_dir(&self.root) {
+            return (out, skipped);
+        }
+        for name in CLASSES {
+            let folder = self.root.join(name);
+            if fs::symlink_metadata(&folder).is_err() {
+                continue;
+            }
+            if !is_real_dir(&folder) {
+                skipped += 1;
+                continue;
+            }
+            let mut files: Vec<PathBuf> = fs::read_dir(&folder)
+                .map(|iter| {
+                    iter.filter_map(|e| e.ok().map(|e| e.path()))
+                        .filter(|p| p.extension().is_some_and(|ext| ext == "md"))
+                        .collect()
+                })
+                .unwrap_or_default();
+            files.sort();
+            for file in files {
+                if !fs::symlink_metadata(&file).is_ok_and(|m| m.file_type().is_file()) {
+                    skipped += 1;
+                    continue;
+                }
+                let flags = (nix::fcntl::OFlag::O_NOFOLLOW | nix::fcntl::OFlag::O_NONBLOCK).bits();
+                let opened = fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(flags)
+                    .open(&file);
+                let Ok(mut handle) = opened else {
+                    skipped += 1;
+                    continue;
+                };
+                if !handle.metadata().is_ok_and(|m| m.file_type().is_file()) {
+                    skipped += 1;
+                    continue;
+                }
+                let stem = file
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let mut bytes = Vec::new();
+                let parsed = handle
+                    .by_ref()
+                    .take(MAX_ENTRY_BYTES)
+                    .read_to_end(&mut bytes)
+                    .map_err(|error| ContextError(error.to_string()))
+                    .and_then(|_| {
+                        String::from_utf8(bytes)
+                            .map_err(|_| ContextError("entry is not UTF-8".into()))
+                    })
+                    .and_then(|text| parse_front(&text));
+                out.push(match parsed {
+                    Ok((meta, body)) => Entry {
+                        meta,
+                        slug: stem,
+                        path: file,
+                        body: body.trim().to_string(),
+                        error: None,
+                    },
+                    Err(error) => Entry {
+                        meta: Meta::new(),
+                        slug: stem,
+                        path: file,
+                        body: String::new(),
+                        error: Some(error.0),
+                    },
+                });
+            }
+        }
+        (out, skipped)
     }
 
     /// `find`: the slug match first, then the subject match, over ALL entries.

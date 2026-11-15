@@ -112,24 +112,8 @@ fn read_store(root: &Path) -> (Vec<Entry>, usize) {
     let Ok(root) = std::fs::canonicalize(root) else {
         return (Vec::new(), 0);
     };
-    let mut skipped = 0;
-    let entries = Store::new(Some(&root), false)
-        .entries()
-        .into_iter()
-        .filter(|entry| {
-            let link = std::fs::symlink_metadata(&entry.path)
-                .map(|meta| meta.file_type().is_symlink())
-                .unwrap_or(true);
-            let inside =
-                std::fs::canonicalize(&entry.path).is_ok_and(|path| path.starts_with(&root));
-            let keep = !link && inside;
-            if !keep {
-                skipped += 1;
-            }
-            keep
-        })
-        .collect();
-    (entries, skipped)
+    // Links, FIFOs and devices are never opened (see `Store::entries_no_follow`).
+    Store::new(Some(&root), false).entries_no_follow()
 }
 
 fn class_rank(class: Option<&str>) -> usize {
