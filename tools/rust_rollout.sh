@@ -51,6 +51,16 @@ DROPIN=$DROPIN_DIR/99-rust-cutover.conf
 SQLITE_FILES="tasks.db inbox.db context-ledger.db dispatch.db agent-state.db"
 
 cmd=${1:-plan}; shift || true
+# Inventory bypasses every legacy mutation path and forwards arguments without evaluation.
+# The native branch refuses --apply/packet flags before collecting any host data.
+if [ "$cmd" = inventory ]; then
+  helper=${RUST_RELEASE_OPERATOR:-$(command -v ds-release || true)}
+  [ -n "$helper" ] || die "set RUST_RELEASE_OPERATOR to the reviewed native ds-release helper"
+  require_plain_path RUST_RELEASE_OPERATOR "$helper"
+  [ -f "$helper" ] && [ -x "$helper" ] && [ ! -L "$helper" ] || die "release helper must be a regular non-symlink executable"
+  exec "$helper" inventory --releases "$RELEASES" "$@"
+fi
+
 SHA=""; APPLY=0; UNIT=""; ARTIFACT=""; ARTIFACT_SHA=""; PACKET=""; PACKET_SHA=""
 while [ $# -gt 0 ]; do
   case "$1" in

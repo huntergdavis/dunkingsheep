@@ -210,6 +210,67 @@ reviewed backup/migration, release listing and retention, packet authoring, and 
 real three-unit release by a different operator remain parent-task gates. There
 is no live activation as part of this tooling PR.
 
+## Read-only release inventory (t4699, third slice)
+
+The native helper now reports references without changing releases, launchers,
+units or operation state. It refuses `--apply` and packet operation flags before
+reading host data. The shell entrypoint delegates to the same reviewed executable:
+
+```sh
+RUST_RELEASE_OPERATOR=/absolute/reviewed/bin/ds-release \
+  tools/rust_rollout.sh inventory \
+  --record-root /absolute/workspace/.dunk-port-work \
+  --constraints /absolute/checkout/packaging/rust-release/examples/b24-consumer-floor.json
+# Native invocation also accepts --releases /absolute/release/root:
+ds-release inventory --record /absolute/packet/STAGING-MANIFEST.json --json
+```
+
+`RUST_RELEASES` selects the wrapper's release root; the native default is
+`$HOME/.local/share/dunkingsheep/releases`. Repeat `--record`, `--record-root`
+and `--launcher` to extend the observed inputs. The two default launchers are
+`$HOME/.local/bin/dunkingsheep` and `dunk-poll`; additional launchers do not replace
+them. A record root is inspected only for `STAGING-MANIFEST.json` at its root and
+direct child directories. The inventory reads known manifest fields and the two
+known result receipts, never workspace notes, stores, tokens or credentials.
+It does not require disposable build outputs to remain present.
+
+Every run reads all three units with `systemctl --user show/cat`, showing their
+fragment/drop-in chains and the winning `ExecStart` when the two views agree.
+Every observed overlay reference is retained, including overridden assignments.
+The report unions those paths with same-user `/proc/*/exe` links (no argv or
+environment), launchers, recorded baselines, staged candidates and poll references.
+Text and JSON render the same collected report. No command evaluates launcher
+shell text or writes a lock, index, snapshot or result receipt. Ordinary filesystem
+reads can update access times; the fixtures compare content, modes and modification
+times, not access times.
+
+Each release entry reports logical bytes and reference roles. Unrecognized legacy
+manifests, symbolic links, incomplete discovery, malformed records and uncertain
+floor compatibility are `unknown: keep`. Recognized manifests have their binary
+hash checked. `unreferenced in observed inputs` is scoped evidence, never permission
+to remove anything. All dispositions retain the entry. Logical bytes do not
+estimate physical reclaim; hashes and mtimes do not establish release order.
+There is no removal action or registered global packet index. This read-only
+snapshot cannot establish deletion safety against concurrent filesystem changes.
+
+The checked-in constraint example records the coordinator's standing desk/Telegram
+floor of `b24f6409`: implicit acknowledgement rows exist since t5168 on
+2026-11-15 at 01:43 PST. It includes the reason and source receipt. Constraint data
+is explicit, not inferred from history or enforced as authorization: revisions
+other than the named floor remain uncertain because Git ancestry is not inferred.
+Historical rollback references do not override that floor.
+
+This follows the t4699 `RETENTION-LIST-DESIGN.txt` task evidence and reuses the
+packet fields in `ds-core::release_packet`; the packet executor is unchanged.
+Before another operator can perform a real native-path release, independently
+review its exact tooling head and supported packet, rehearse its actual switching
+and recovery order against the current consumer floor, and obtain current review
+acceptance and GO. The existing executor still switches daemon first and rolls
+back all three units in reverse order, with the old t5007 trigger-drop contract;
+those assumptions need release-specific compatibility review or a separate fix.
+Stable single-drop-in migration, packet authoring, retention/removal and a real
+release through the native tool by a different operator remain parent-task gates.
+
 ## Legacy activation gate
 
 Switching the live units or launchers to a release requires, before the cutover:

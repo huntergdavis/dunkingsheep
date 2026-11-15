@@ -1,0 +1,11 @@
+{
+  "format": 1,
+  "constraints": [
+    {
+      "units": ["web", "telegram"],
+      "minimum_revision": "b24f6409f6d7d843fc24fa76ab06a2dbe802eab3",
+      "reason": "Implicit acknowledgement rows exist since release t5168, 2026-11-15 01:43 PST. Desk and Telegram must remain at or above the compatible b24f6409 consumers after that daemon boundary.",
+      "source": "Coordinator %303 i69276 and t5168 GO i69219; live receipt SHA256 51f576d057a27e52cab1fba24eab5e2c17cd14d868dc1c22d1710adfe209c201"
+    }
+  ]
+}
