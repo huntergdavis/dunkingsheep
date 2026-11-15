@@ -274,13 +274,13 @@ mod tests {
             applied.argv,
             v(&[
                 "codex",
-                "-m",
-                "MODEL",
-                "--no-daemon",
                 "-s",
                 "danger-full-access",
                 "-a",
-                "never"
+                "never",
+                "-m",
+                "MODEL",
+                "--no-daemon"
             ])
         );
         assert_eq!(applied.sources["sandbox"], "project:LookingGlassNX");
@@ -295,7 +295,7 @@ mod tests {
         assert_eq!(applied.sources["approval"], "project:LookingGlassNX");
         assert_eq!(
             applied.argv,
-            v(&["codex", "-s", "workspace-write", "-a", "never"])
+            v(&["codex", "-a", "never", "-s", "workspace-write"])
         );
         // (b) no template at all: WARN-ONLY: launched unchanged, with the would-refuse line.
         let applied = apply(
