@@ -2763,6 +2763,7 @@ pub struct Message {
     /// An inbox notice: one per pane, never stacked.
     pub is_notice: bool,
     pub notify_for: Vec<String>,
+    pub(crate) notice_offer: Option<super::mail_notice::NoticeOffer>,
     pub detail: Option<String>,
     pub holds: i64,
     pub next_attempt_at: Option<f64>,
@@ -2857,6 +2858,7 @@ impl Message {
             typed_at: None,
             is_notice: false,
             notify_for: Vec::new(),
+            notice_offer: None,
             detail: None,
             holds: 0,
             next_attempt_at: None,
@@ -2932,7 +2934,7 @@ impl Message {
         self.notify_for = self.receipt_frame();
     }
 
-    fn same_lifetime(&self, other: &Message) -> bool {
+    pub(super) fn same_lifetime(&self, other: &Message) -> bool {
         Arc::ptr_eq(&self.attempt_state, &other.attempt_state)
     }
 
@@ -3448,7 +3450,7 @@ pub(crate) fn candidate_from_snapshot(value: &Value) -> Option<StuckCandidate> {
 /// writer wrote those seven, so a restart restored a no-Enter send as one that submits with Enter
 /// and dropped a scheduled template. Python's writer and restore carry the same seven keys.
 pub(crate) fn message_snapshot(message: &Message) -> Value {
-    json!({
+    let mut row = json!({
         "id": message.id,
         "pane_id": message.pane_id,
         "target_label": message.target_label,
@@ -3471,7 +3473,11 @@ pub(crate) fn message_snapshot(message: &Message) -> Value {
         "typed_at": message.typed_at,
         "detail": message.detail,
         "finished_at": message.finished_at,
-    })
+    });
+    if let Some(offer) = &message.notice_offer {
+        row["notice_offer"] = json!(offer);
+    }
+    row
 }
 
 pub(crate) fn message_from_snapshot(value: &Value) -> Option<Message> {
@@ -3504,6 +3510,8 @@ pub(crate) fn message_from_snapshot(value: &Value) -> Option<Message> {
     message.scheduled = field("scheduled").and_then(Value::as_bool).unwrap_or(false);
     message.schedule_template = string("schedule_template");
     message.attempt_generation = string("attempt_generation");
+    message.notice_offer =
+        field("notice_offer").and_then(|v| serde_json::from_value(v.clone()).ok());
     message.is_notice = field("is_notice").and_then(Value::as_bool).unwrap_or(false);
     message.notify_for = field("notify_for")
         .and_then(Value::as_array)
@@ -3922,6 +3930,7 @@ pub(crate) enum OutboxStep {
     Delivered,
     Held,
     Due,
+    HookWaiting,
     Stopped,
 }
 
@@ -3953,6 +3962,10 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
         stored_head.prepare_receipt_frame();
         stored_head.clone()
     };
+
+    if flock.notice_waits_for_hook(&head, now) {
+        return OutboxStep::HookWaiting;
+    }
 
     if let Some(due_at) = head.next_attempt_at {
         let signature = hold_signature(flock, env, pane_id);
@@ -4050,6 +4063,7 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
         DeliveryOutcome::Sent | DeliveryOutcome::Failed | DeliveryOutcome::AlreadyDecided => {
             OutboxStep::Delivered
         }
+        DeliveryOutcome::Held if flock.notice_waits_for_hook(&head, now) => OutboxStep::HookWaiting,
         DeliveryOutcome::Held | DeliveryOutcome::Undeliverable => OutboxStep::Held,
         DeliveryOutcome::Missing => OutboxStep::Empty,
     }
@@ -4094,6 +4108,12 @@ where
             OutboxStep::Delivered => {
                 seen = None;
                 seen_since = env.now_s();
+                continue;
+            }
+            OutboxStep::HookWaiting => {
+                if wait(MESSAGE_RECHECK_S) {
+                    return;
+                }
                 continue;
             }
             OutboxStep::Held | OutboxStep::Due => {}
@@ -4425,7 +4445,7 @@ impl Flock {
         expected: &Message,
         now: f64,
         env: &mut dyn SendPreparationEnv,
-        permission: impl FnMut() -> Option<String>,
+        mut permission: impl FnMut() -> Option<String>,
     ) -> DeliveryOutcome {
         let mut message = {
             let mut outbox = outbox_lock(&self.outbox);
@@ -4478,8 +4498,20 @@ impl Flock {
         let press_enter = message.press_enter;
         let attempt_generation = message.attempt_generation.clone();
         let has_dunk_action = message.dunk_delivery.is_some();
-        let (sent, ok, detail, blocker_reason) =
-            send_guarded_with_reason(self, env, &pane_id, options, permission, |env, guard| {
+        let permission_frame = message.clone();
+        let (sent, ok, detail, blocker_reason) = send_guarded_with_reason(
+            self,
+            env,
+            &pane_id,
+            options,
+            || {
+                permission().or_else(|| {
+                    self.notice_waits_for_hook(&permission_frame, now).then(|| {
+                        "mail hook owns this notice until bounded idle fallback".to_owned()
+                    })
+                })
+            },
+            |env, guard| {
                 if has_dunk_action {
                     let still_queued = {
                         let outbox = outbox_lock(&self.outbox);
@@ -4529,7 +4561,8 @@ impl Flock {
                         Some(guard),
                     ))
                 }
-            });
+            },
+        );
 
         if has_dunk_action {
             let still_queued = {
@@ -4544,6 +4577,9 @@ impl Flock {
             }
         }
 
+        if !sent && detail == "mail hook owns this notice until bounded idle fallback" {
+            return DeliveryOutcome::Held;
+        }
         if !sent {
             let hold_signature = hold_signature(self, env, &pane_id);
             let reason = blocker_reason.as_deref();

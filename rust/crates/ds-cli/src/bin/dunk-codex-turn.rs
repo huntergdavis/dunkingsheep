@@ -132,6 +132,27 @@ fn handoff(prompt: &str) -> Option<&str> {
     }
     None
 }
+fn notice_output(result: &Value, edge: &str) -> Option<Value> {
+    let notice = result.get("mail_notice")?;
+    if notice["action"] != "offer" {
+        return None;
+    }
+    let text = notice
+        .get("text")?
+        .as_str()
+        .filter(|s| !s.is_empty() && s.len() <= 512)?;
+    Some(if edge == "start" {
+        json!({"hookSpecificOutput":{"hookEventName":"UserPromptSubmit", "additionalContext":text}})
+    } else {
+        json!({"decision":"block", "reason":text})
+    })
+}
+fn emit_notice(result: &Value, edge: &str) {
+    if let Some(output) = notice_output(result, edge) {
+        println!("{output}");
+    }
+}
+
 fn run() -> Option<()> {
     let action = std::env::args().nth(1)?;
     if action != "start" && action != "end" {
@@ -199,7 +220,7 @@ fn run() -> Option<()> {
             "turn",
             "start",
             "--source",
-            "codex-hook",
+            "codex-hook-mail-v1",
             "--ttl-s",
             &ttl_s,
         ];
@@ -224,6 +245,7 @@ fn run() -> Option<()> {
         f.write_all(serde_json::to_string(&value).ok()?.as_bytes())
             .ok()?;
         fs::rename(temp, path).ok()?;
+        emit_notice(&result, "start");
     } else {
         let s = state?;
         if s["session_id"] != session
@@ -241,7 +263,7 @@ fn run() -> Option<()> {
         let stored_cwd = s["cwd"].as_str()?;
         fs::remove_file(path).ok()?;
         drop(lock);
-        let _ = cli(
+        let result = cli(
             &[
                 "--json",
                 "turn",
@@ -253,6 +275,9 @@ fn run() -> Option<()> {
             ],
             stored_cwd,
         );
+        if let Some(result) = result.filter(|r| r["ended"] == true) {
+            emit_notice(&result, "end");
+        }
     }
     Some(())
 }
@@ -263,6 +288,20 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_bounded_offers_continue_a_turn() {
+        assert!(notice_output(
+            &json!({"mail_notice":{"action":"fallback","text":"read"}}),
+            "end"
+        )
+        .is_none());
+        assert!(notice_output(
+            &json!({"mail_notice":{"action":"offer","text":"x".repeat(513)}}),
+            "start"
+        )
+        .is_none());
+        assert!(notice_output(&json!({}), "end").is_none());
+    }
     #[test]
     fn validates_session_and_handoff() {
         assert!(safe_id("session-1"));

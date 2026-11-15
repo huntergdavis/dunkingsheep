@@ -311,7 +311,8 @@ impl NextJobs {
             .tasks
             .ok_or_else(|| DunkError::Refused("task store unavailable".into()))?;
         let caller = caller_map(caller);
-        let planner: Arc<Planner> = Arc::new(|input: &PlanInput<'_>| {
+        let mail_hook = self.flock.mail_hook_opted_in(pane);
+        let planner: Arc<Planner> = Arc::new(move |input: &PlanInput<'_>| {
             let tasks: Vec<Value> = input
                 .tasks
                 .iter()
@@ -337,6 +338,7 @@ impl NextJobs {
                 tasks: &tasks,
                 unread,
                 pending_delivery: input.pending_delivery,
+                mail_hook,
                 dispatch_reason: input.dispatch_reason,
                 now: Some(input.now),
                 ..NextJob::default()

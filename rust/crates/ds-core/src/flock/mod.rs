@@ -987,6 +987,7 @@ pub mod loop_env;
 pub mod loops;
 pub mod loops_push;
 pub mod loops_stuck;
+pub(crate) mod mail_notice;
 pub mod mailbox;
 pub mod panes;
 pub mod project_summary;

@@ -62,6 +62,16 @@ pub trait TurnHooks {
     fn observe_turn(&self, pane_id: &str, state: &TurnState) -> Result<(), DunkError>;
     /// `self._dispatch_on_turn_end(pane_id)`: the record returned under `dispatch`.
     fn dispatch_on_turn_end(&self, pane_id: &str) -> Result<Value, DunkError>;
+    /// Own-mailbox notice offer; default keeps legacy producers unchanged.
+    fn mail_notice(
+        &self,
+        _pane: &str,
+        _turn: &str,
+        _edge: &str,
+        _now: f64,
+    ) -> Result<Option<Value>, DunkError> {
+        Ok(None)
+    }
     /// t4692: a turn start or end from `pane_id` was just recorded; `caller` is the process
     /// that sent it. The runtime extends the leases that process holds on that pane. It never
     /// fails the turn event; without a task store it does nothing.
@@ -174,6 +184,14 @@ impl Flock {
         if ttl <= 0.0 {
             return Err(DunkError::Refused("ttl_s must be positive".into()));
         }
+        // A new model turn cannot overtake the final guarded notice write. The
+        // adapter waits for this start RPC before returning context to the model.
+        let notice_lock = self.send_lock_for(pane_id);
+        let notice_guard = if super::mail_notice::hook_source(source) {
+            Some(notice_lock.lock().unwrap_or_else(|p| p.into_inner()))
+        } else {
+            None
+        };
         let now = crate::clock::now_s();
         let state = TurnState {
             started_at: now,
@@ -197,13 +215,22 @@ impl Flock {
                 ended_at: None,
             },
         );
+        drop(notice_guard);
         hooks.record("turn.start", pane_id, source, None, "ok", now, None);
         hooks.renew_leases(pane_id, state.caller.as_ref(), now);
         hooks.observe_turn(pane_id, &state)?;
-        Ok(json!({
+        let mut result = json!({
             "pane_id": pane_id, "started_at": now, "expires_at": now + ttl, "ttl_s": ttl,
             "source": source, "turn_id": state.turn_id,
-        }))
+        });
+        if super::mail_notice::hook_source(source) {
+            match hooks.mail_notice(pane_id, &state.turn_id, "start", now) {
+                Ok(Some(notice)) => result["mail_notice"] = notice,
+                Ok(None) => {}
+                Err(error) => eprintln!("mail-first offer failed pane={pane_id}: {error}"),
+            }
+        }
+        Ok(result)
     }
 
     /// `turn_end`. An invalid end (no turn, already ended, expired, or - when `authenticated` -
@@ -279,13 +306,29 @@ impl Flock {
             Some(duration),
         );
         hooks.renew_leases(pane_id, self.current_caller().as_ref(), now);
+        let notice = if authenticated && super::mail_notice::hook_source(state.source.as_deref()) {
+            match hooks.mail_notice(pane_id, &state.turn_id, "end", now) {
+                Ok(notice) => notice,
+                Err(error) => {
+                    eprintln!("mail-first offer failed pane={pane_id}: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         // THE TRIGGER: the turn just ended and the lane is idle.
         let dispatch = if authenticated {
             hooks.dispatch_on_turn_end(pane_id)?
         } else {
             skip("turn.end", "unauthenticated")
         };
-        Ok(json!({ "pane_id": pane_id, "ended": true, "reason": reason, "dispatch": dispatch }))
+        let mut result =
+            json!({ "pane_id": pane_id, "ended": true, "reason": reason, "dispatch": dispatch });
+        if let Some(notice) = notice {
+            result["mail_notice"] = notice;
+        }
+        Ok(result)
     }
     /// `turn_active`: true only for an unexpired declared turn. Expiry is the safety.
     pub fn turn_active(&self, pane_id: &str) -> bool {
@@ -314,7 +357,13 @@ impl Flock {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let expired: Vec<String> = states
                 .iter()
-                .filter(|(_, state)| state.expires_at <= now)
+                .filter(|(_, state)| {
+                    let hook_idle_grace = super::mail_notice::hook_source(state.source.as_deref())
+                        && state
+                            .ended_at
+                            .is_some_and(|ended| now - ended < super::mail_notice::IDLE_FALLBACK_S);
+                    state.expires_at <= now && !hook_idle_grace
+                })
                 .map(|(pane, _)| pane.clone())
                 .collect();
             expired
@@ -455,7 +504,9 @@ impl Flock {
         }
         let is_claim = plan.get("action").and_then(Value::as_str) == Some("claim");
         let open_handoffs = env.open_handoffs(pane_id, !is_claim)?;
-        if is_claim || open_handoffs {
+        let mail_first = self.mail_hook_opted_in(pane_id)
+            && plan.get("action").and_then(Value::as_str) == Some("mail");
+        if is_claim || mail_first || open_handoffs {
             return Ok(with_delivered(plan));
         }
         {

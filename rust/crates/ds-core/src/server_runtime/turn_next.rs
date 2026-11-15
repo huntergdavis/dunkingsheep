@@ -128,6 +128,24 @@ impl TurnHooks for RequestRuntimeAdapter<'_> {
     fn dispatch_on_turn_end(&self, pane: &str) -> Result<Value, DunkError> {
         self.terminal.flock.dispatch_on_turn_end(pane, self)
     }
+    fn mail_notice(
+        &self,
+        pane: &str,
+        turn: &str,
+        edge: &str,
+        now: f64,
+    ) -> Result<Option<Value>, DunkError> {
+        use crate::api::CommandEnv;
+        let result = self.with_inbox_env(&mut |env| {
+            let mailbox = self.terminal.flock.own_mailbox(env, pane)?;
+            Ok(self
+                .terminal
+                .flock
+                .offer_mail_notice(pane, &mailbox, turn, edge, now)?
+                .unwrap_or(Value::Null))
+        })?;
+        Ok((!result.is_null()).then_some(result))
+    }
     /// t4692: extend the leases the turn's own process holds on this pane. A failure is logged
     /// and never fails the turn event: the lease then simply runs to its ordinary expiry.
     fn renew_leases(&self, pane: &str, caller: Option<&Value>, now: f64) {

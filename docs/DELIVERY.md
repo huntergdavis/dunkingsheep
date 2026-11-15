@@ -337,3 +337,64 @@ checks. t130's historical `m9973` trace proves failed delivery without a later
 recovery line, but does not establish whether its candidate was registered or
 superseded; the source regression covers terminal failure through the real
 observer without claiming that historical cause.
+
+## Inbox notices through turn hooks (t4702, first slice)
+
+Mail is stored before any notice. A model-context offer is neither a read nor
+handling, and never sets the typed-notice delivery receipt. The native Codex
+adapter opts in with turn source `codex-hook-mail-v1`; legacy producers retain
+ordinary queued delivery. No installed hook, trust configuration or live pane
+changes as part of this source PR. Activation is agent-lane only and needs the
+coordinator's separate GO; do not install the continuation adapter on a human-driven
+Codex session.
+
+| Harness | Turn edges already wired | Model-context route | Evidence / activation |
+|---|---|---|---|
+| Codex | UserPromptSubmit / Stop | Start: hookSpecificOutput.additionalContext; Stop: decision=block with bounded reason starts a continuation | Official contract; native producer/queue private fixtures. Installed host/model consumption NOT verified; native sibling installation is separate. |
+| Claude Code | UserPromptSubmit / Stop; SubagentStop ignored | Prompt context and Stop feedback are documented | Existing Rust producer currently discards turn result. Adapter is next slice t5171; not activated by this PR. |
+| pi | before_agent_start / agent_settled | Installed extension returns a message at start and uses sendMessage(followUp) for owner mail | Local extension source inspected; general inbox adapter and live acceptance remain follow-up. |
+| OpenCode | chat.message / session.idle | Model injection NOT verified | Existing plugin reports token-bound edges; events alone do not prove a context consumer. Keep guarded fallback. |
+
+Primary contracts: [Codex hooks](https://learn.chatgpt.com/docs/hooks) and
+[Claude hooks](https://code.claude.com/docs/en/hooks). Local evidence:
+`integrations/{codex,claude}/hooks.json`, native turn binaries,
+`integrations/opencode/dunkingsheep-turn.js`, and the installed pi extension.
+Documented capability, a private fixture, installation and observed model
+consumption are separate evidence levels.
+
+The daemon offers only an existing queued/coalesced notice and only metadata
+from the authenticated turn caller's own mailbox. Recipient notification
+suppression/notify=false cannot create a notice through this route. It returns
+an unread batch count, a batch fingerprint and the command to read it; no mail
+body is taken and no receipt is fabricated. The same edge cannot repeat an
+offer. The existing outbox row persists the batch and a maximum of two offers;
+this is one logical notice, not an extra queue. After two offers without a read,
+the turn result and daemon log explicitly select guarded fallback. A newer
+unread batch can supply a new offer. A real read makes the obsolete offered wake
+cancellable, so that its queue entry does not block the next task.
+
+Next-job decisions with unread mail return action `mail` only for an authenticated
+opt-in hook-mail source and do not claim another task. Legacy sources retain the
+exact prior `skip` response and `turn.end.dispatch` held/unread_mail metric;
+merely upgrading the daemon does not change the 24 h legacy baseline. While an opted-in turn is active, the notice
+worker performs no terminal reads, recovery or typing. On idle it waits 120 s,
+then uses the same durable queue, recipient guards, draft/dialog protections and
+submit verification as ordinary delivery. Duplicate hooks do not add wakes;
+once the queued notice is delivered, the existing decided receipt prevents a
+second send. Missing/failed hooks retain that queue; a missing end still has the
+normal declared-turn TTL backstop. No timer sleeps under a queue or fleet lock.
+
+The motivating journal window (2026-11-14 23:20–23:50) contained four `%308`
+turn-end decisions skipped for unread_mail. The specific m38500 identifier was
+not found in the inspected logs; its delay remains coordinator incident evidence,
+not an independently reproduced timing measurement. Historical hold counts and
+method are in `/home/hunter/workspace/t4682-research/REPORT.md`. The 24 h before/
+after live typed-notice and hold measurement remains parent-task acceptance,
+not something proved by private fixtures or by this source change.
+
+Read-only metadata measurement at 2026-11-15 00:44 PST found 113,032 retained
+`message.held` events with reason `dialog`; all event kinds with that reason
+numbered 115,189 across 47 lanes, with 87.0% in five lanes. This is a different
+retained window from the research snapshot (117,027). The metrics schema has no
+message/dialog identity, so lane concentration cannot establish distinct dialog
+counts or exact repeat counts. Evidence: `311-t4702-evidence/dialog-concentration.json`.
