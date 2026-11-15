@@ -1562,3 +1562,11 @@ pub fn grouped_input_schema(name: &str) -> Option<Value> {
 pub fn group_map() -> BTreeMap<&'static str, &'static [(&'static str, &'static str)]> {
     GROUPS.iter().map(|group| (group.name, group.actions)).collect()
 }
+
+/// Internal socket-only arguments; these do not enlarge public MCP schemas.
+pub fn socket_only_params(name: &str) -> &'static [&'static str] {
+    match name {
+        "task_list" => &["paged", "page_size", "cursor", "priority", "page_group"],
+        _ => &[],
+    }
+}

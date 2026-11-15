@@ -1203,6 +1203,15 @@
     "owner"
    ],
    "after": "inbox_stats"
+  },
+  "task_list": {
+   "socket_only_params": [
+    "paged",
+    "page_size",
+    "cursor",
+    "priority",
+    "page_group"
+   ]
   }
  },
  "groups": {

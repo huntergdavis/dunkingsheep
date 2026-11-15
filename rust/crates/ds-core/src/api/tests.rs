@@ -11670,3 +11670,95 @@ fn task_audit_service_update_preserves_null_completion_attribution_with_a_verdic
         );
     }
 }
+
+#[test]
+fn task_list_pages_are_opt_in_and_preserve_scope_privacy() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_api_fixture();
+    for index in 0..3 {
+        runtime
+            .block_on(tasks.add(
+                "global",
+                &format!("page fixture {index}"),
+                "private fixture",
+            ))
+            .unwrap();
+    }
+    let caller = "w1:p1";
+    let page = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_list",
+        json!({"paged":true,"page_size":2,"page_group":"active"}),
+        caller,
+    )
+    .unwrap();
+    assert_eq!(page["paging_version"], 1);
+    assert_eq!(page["tasks"].as_array().unwrap().len(), 2);
+    assert_eq!(page["order"], "id_asc");
+    assert_eq!(page["total"], 3);
+    let cursor = page["next_cursor"].as_str().unwrap();
+    let last = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_list",
+        json!({"paged":true,"page_size":2,"page_group":"active","cursor":cursor}),
+        caller,
+    )
+    .unwrap();
+    assert_eq!(last["tasks"].as_array().unwrap().len(), 1);
+    assert!(last["next_cursor"].is_null());
+    for paged in [json!(true), json!(false)] {
+        let error = dispatch_task_api(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_list",
+            json!({"paged":paged,"scope":"w9:p9"}),
+            caller,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("private"));
+    }
+    for invalid in [
+        json!({"paged":true,"page_group":"unknown"}),
+        json!({"paged":true,"page_group":"closed","status":"done"}),
+    ] {
+        assert!(
+            dispatch_task_api(&dispatcher, &flock, &runtime, "task_list", invalid, caller).is_err()
+        );
+    }
+    let unknown = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_list",
+        json!({"paged":true,"extra":1}),
+        caller,
+    )
+    .unwrap_err();
+    assert!(unknown.to_string().contains("unknown argument(s): extra"));
+    let legacy = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_list",
+        json!({"limit":1,"page_size":99,"cursor":"ignored legacy arg","priority":"unknown"}),
+        caller,
+    )
+    .unwrap();
+    assert_eq!(legacy["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(legacy.as_object().unwrap().len(), 3, "legacy fields only");
+    assert!(legacy.get("paging_version").is_none());
+    let boolean_opt_in = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_list",
+        json!({"paged":"true","limit":1}),
+        caller,
+    )
+    .unwrap();
+    assert!(boolean_opt_in.get("paging_version").is_none());
+}
