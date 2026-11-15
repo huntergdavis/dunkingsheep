@@ -9,6 +9,7 @@ below also nails down what it cannot see, so nobody later believes it can.
 import os
 import subprocess
 import sys
+import shutil
 import tempfile
 import unittest
 from importlib.machinery import SourceFileLoader
@@ -59,7 +60,9 @@ class SubstitutionRefusalTests(unittest.TestCase):
 
 class SubstitutionRefusalCliTests(unittest.TestCase):
     def run_cli(self, *args, stdin=None):
-        env = dict(os.environ, DUNKINGSHEEP_DIR=tempfile.mkdtemp(prefix="dunk-guard-"))
+        state = tempfile.mkdtemp(prefix="dunk-guard-")
+        self.addCleanup(shutil.rmtree, state, True)  # t3912: never left in /tmp
+        env = dict(os.environ, DUNKINGSHEEP_DIR=state)
         return subprocess.run([sys.executable, CLI, *args], capture_output=True, text=True,
                               timeout=120, env=env, input=stdin)
 

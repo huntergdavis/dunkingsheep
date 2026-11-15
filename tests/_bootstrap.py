@@ -11,6 +11,22 @@ import tempfile
 
 _TMP = tempfile.mkdtemp(prefix="dunkingsheep-tests-")
 
+
+def _remove_own_tmp():
+    """t3912: remove this process's suite directory at exit; 1,956 were left in /tmp.
+
+    Registered FIRST so it runs LAST (atexit is last-in, first-out): the daemon sweeps below
+    still find their sockets under it. DUNKINGSHEEP_TESTS_KEEP_TMP=1 keeps it for a post-mortem.
+    """
+    if os.environ.get("DUNKINGSHEEP_TESTS_KEEP_TMP") == "1":
+        return
+    import shutil
+    shutil.rmtree(_TMP, ignore_errors=True)
+
+
+import atexit as _atexit_tmp
+_atexit_tmp.register(_remove_own_tmp)
+
 # THE SUITE OWNS ITS STATE DIRECTORY (t247). This used to be setdefault(), which meant a run
 # inherited whatever the operator's shell had: with DUNKINGSHEEP_DIR pointing at the live config,
 # a full run read the REAL tasks/inbox databases - and the fixture reaper then refused with
