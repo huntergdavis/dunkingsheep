@@ -43,6 +43,7 @@ def load_parser():
         "omit task queues (the default; overrides --with-tasks)"
     )
     inbox_read.add_argument("--with-tasks", action="store_true", help="include task queues in the response")
+    inbox_read.add_argument("--no-ack", action="store_true", help="mark read without implicit consumption; acknowledge explicitly after display")
     owner_actions = next(a for a in root.choices["owner"]._actions if isinstance(a, argparse._SubParsersAction))
     handoff = owner_actions.add_parser("handoff", help="hand an owner question to the supervisor")
     handoff.add_argument("message_id", help="original owner question ID")

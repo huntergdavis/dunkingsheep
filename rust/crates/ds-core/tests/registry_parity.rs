@@ -108,6 +108,16 @@ fn every_input_schema_equals_the_pythons() {
                 .remove("parent_id")
                 .is_some());
         }
+        if name == "inbox_read" {
+            assert_eq!(
+                got["properties"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("ack")
+                    .unwrap()["type"],
+                "boolean"
+            );
+        }
         if name == "inbox_list" {
             // t4684 summary paging is opt-in and Rust-only; preserve the frozen legacy schema.
             let properties = got["properties"].as_object_mut().unwrap();

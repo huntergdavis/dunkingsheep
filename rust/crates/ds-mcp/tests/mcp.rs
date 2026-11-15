@@ -495,15 +495,16 @@ fn instructions_pin_the_rust_only_compact_inbox_default() {
     // inbox reads to messages only and documents the explicit task opt-in.
     assert!(INSTRUCTIONS.contains("inbox_read returns messages without task queues by default"));
     assert!(INSTRUCTIONS.contains("set include_tasks=true to include them"));
-    assert!(INSTRUCTIONS.contains("use inbox(action=\"recover\") before acknowledging"));
-    assert!(INSTRUCTIONS.contains("A read marks mail read but still requires explicit"));
+    assert!(INSTRUCTIONS.contains("use inbox(action=\"recover\")"));
+    assert!(INSTRUCTIONS.contains("A normal read consumes returned mail"));
+    assert!(INSTRUCTIONS.contains("Set ack=false"));
     let digest = Sha256::digest(INSTRUCTIONS.as_bytes());
     let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
     assert_eq!(
-        "a4e61abd5c7b90814a090b030095fd2662763a6a5ad2c5da8a608438589d1dd2",
+        "b52afe95ddb48a42dfc3fa72b71e24aab95e9656ea8e28ff1557db554fb48232",
         hex
     );
-    assert_eq!(5938, INSTRUCTIONS.len());
+    assert_eq!(6125, INSTRUCTIONS.len());
 }
 
 #[test]
@@ -682,4 +683,55 @@ fn task_audit_mcp_routes_all_transition_reasons_without_exposing_an_actor_parame
         let command = registry::command(&format!("task_{action}")).unwrap();
         assert!(command.params.iter().all(|p| p.name != "actor"));
     }
+}
+
+#[test]
+fn inbox_reader_default_and_manual_options_keep_the_mcp_body_contract() {
+    // Protocol fixture only: the native Store/API tests prove the real commit/recovery.
+    struct InboxCaller(Calls);
+    impl Caller for InboxCaller {
+        fn call(&mut self, cmd: &str, args: Map<String, Value>) -> Result<Value, ClientError> {
+            self.0.borrow_mut().push((cmd.into(), args.clone()));
+            Ok(match cmd {
+                "whoami" => json!({"role":"worker"}),
+                "inbox_read" | "inbox_recover" => {
+                    json!({"mailbox":"Mine","messages":[{"message_id":"i1","body":"fixture body","state":if args.get("ack")==Some(&json!(false)){"read"}else{"acked"}}]})
+                }
+                "inbox_ack" => json!({"changed":[],"still_pending":[]}),
+                _ => panic!("unexpected fixture command {cmd}"),
+            })
+        }
+    }
+    let calls: Calls = Rc::new(RefCell::new(Vec::new()));
+    let recorded = calls.clone();
+    let mut server = McpServer::new(Box::new(move || {
+        Ok(Box::new(InboxCaller(recorded.clone())) as Box<dyn Caller>)
+    }));
+    for arguments in [
+        json!({"action":"read"}),
+        json!({"action":"read","ack":false}),
+        json!({"action":"recover"}),
+    ] {
+        let reply=server.handle(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"inbox","arguments":arguments}})).unwrap();
+        assert_eq!(
+            reply["result"]["structuredContent"]["messages"][0]["body"],
+            "fixture body"
+        );
+        assert_eq!(
+            reply["result"]["structuredContent"]["messages"][0]["message_id"],
+            "i1"
+        );
+    }
+    let calls = calls.borrow();
+    let reads: Vec<_> = calls
+        .iter()
+        .filter(|(cmd, _)| cmd == "inbox_read")
+        .collect();
+    assert_eq!(reads.len(), 2);
+    assert!(reads[0].1.get("ack").is_none());
+    assert_eq!(reads[1].1["ack"], false);
+    assert!(
+        calls.iter().all(|(cmd, _)| cmd != "inbox_ack"),
+        "the adapter does not issue extra ACK calls"
+    );
 }

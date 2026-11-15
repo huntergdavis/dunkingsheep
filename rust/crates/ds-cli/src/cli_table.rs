@@ -476,6 +476,7 @@ pub static ROOT: Cmd = Cmd {
                         Arg { id: "peek", dest: "peek", tri: false, default_int: false, flags: &["--peek"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: Some("do not mark them read"), hidden: false, metavar: None, version: None },
                         Arg { id: "messages_only", dest: "messages_only", tri: false, default_int: false, flags: &["--messages-only"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: Some("omit task queues (the default; overrides --with-tasks)"), hidden: false, metavar: None, version: None },
                         Arg { id: "with_tasks", dest: "with_tasks", tri: false, default_int: false, flags: &["--with-tasks"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: Some("include task queues in the response"), hidden: false, metavar: None, version: None },
+                        Arg { id: "no_ack", dest: "no_ack", tri: false, default_int: false, flags: &["--no-ack"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: Some("mark read without implicit consumption; acknowledge explicitly after display"), hidden: false, metavar: None, version: None },
                     ],
                     groups: &[],
                     sub_dest: None, sub_metavar: None, sub_required: false,

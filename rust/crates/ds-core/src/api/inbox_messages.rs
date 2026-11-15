@@ -241,6 +241,7 @@ pub fn h_inbox_read(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
     let n = limit(&args, 10)?;
     let peek = python_bool_arg(&args, "peek", false);
     let include_tasks = python_bool_arg(&args, "include_tasks", false);
+    let ack = python_bool_arg(&args, "ack", true);
     // Set by the dispatcher for the desk role only (api.rs). The desk response is clamped after this
     // handler returns, so the messages must be chosen before anything is marked read (t3539).
     let desk_clamp = python_bool_arg(&args, "desk_clamp", false);
@@ -254,6 +255,7 @@ pub fn h_inbox_read(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
                 bound_limit(&n)?,
                 true,
                 include_tasks,
+                false,
                 c.self_pane_id(),
             )?;
             let mut bare = if full.tasks.is_some() {
@@ -262,6 +264,7 @@ pub fn h_inbox_read(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
                     m.as_deref(),
                     bound_limit(&n)?,
                     true,
+                    false,
                     false,
                     c.self_pane_id(),
                 )?)
@@ -273,7 +276,7 @@ pub fn h_inbox_read(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
             let now = env.now();
             for read in std::iter::once(&mut full).chain(bare.as_mut()) {
                 for message in &mut read.messages {
-                    message.summary.state = "read".to_string();
+                    message.summary.state = if ack { "acked" } else { "read" }.to_string();
                     message.read_at = Some(now);
                 }
             }
@@ -285,7 +288,8 @@ pub fn h_inbox_read(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
             let marked = if ids.is_empty() {
                 0
             } else {
-                c.flock.inbox_mark_read_ids(env, &full.mailbox, &ids)?
+                c.flock
+                    .inbox_mark_read_ids(env, &full.mailbox, &ids, ack, now)?
             };
             out["marked_read"] = json!(marked);
             for message in full
@@ -301,6 +305,16 @@ pub fn h_inbox_read(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
                     Some(((now - message.summary.created_at) * 1000.0) as i64),
                     Some(message.summary.body_bytes),
                 );
+                if ack {
+                    env.record_metric(
+                        "inbox.acked",
+                        message.pane_id.as_deref(),
+                        &full.mailbox,
+                        message.summary.sender.as_deref(),
+                        Some(0),
+                        None,
+                    );
+                }
             }
             return Ok(out);
         }
@@ -310,6 +324,7 @@ pub fn h_inbox_read(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
             bound_limit(&n)?,
             peek,
             include_tasks,
+            ack,
             c.self_pane_id(),
         )?;
         let mut out = inbox_read_out(&r);

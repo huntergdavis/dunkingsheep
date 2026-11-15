@@ -1563,3 +1563,141 @@ fn read_recovery_filters_legacy_receipt_ids_by_the_same_mailbox_scope_as_read() 
         "queued"
     );
 }
+
+#[test]
+fn implicit_read_retains_recovery_and_explicit_ack_clears_only_named_ids() {
+    let f = Fixture::new();
+    let a = f.send("Mine", "body A");
+    let b = f.send("Mine", "body B");
+    f.store
+        .read_with_receipt("Mine", &[a.clone(), b.clone()], true, None)
+        .unwrap();
+    for id in [&a, &b] {
+        let status = inbox::status(&f.pool(), id, crate::clock::now_s()).unwrap();
+        assert_eq!(status.state, "acked");
+        assert!(status.read_at.is_some() && status.acked_at.is_some());
+    }
+    assert_eq!(
+        inbox::count(&f.pool(), "Mine", &[], crate::clock::now_s())
+            .unwrap()
+            .unread,
+        0
+    );
+    for _ in 0..2 {
+        assert_eq!(f.store.recover_delivery("Mine").unwrap().len(), 2);
+    }
+    assert_eq!(
+        f.store.read_with_receipt("Mine", &[], true, None).unwrap(),
+        0
+    );
+    assert_eq!(f.store.recover_delivery("Mine").unwrap().len(), 2);
+    assert!(f
+        .store
+        .ack(std::slice::from_ref(&a), Some("Mine"))
+        .unwrap()
+        .changed
+        .is_empty());
+    assert_eq!(
+        f.store
+            .note_acked_ids("Mine", &[format!("  {a}  ")])
+            .unwrap(),
+        vec![b.clone()]
+    );
+    let recovered = f.store.recover_delivery("Mine").unwrap();
+    assert_eq!(recovered[0].body, "body B");
+    let c = f.send("Mine", "new batch C");
+    f.store
+        .read_with_receipt("Mine", std::slice::from_ref(&c), true, None)
+        .unwrap();
+    assert_eq!(
+        f.store
+            .note_acked_ids("Mine", std::slice::from_ref(&b))
+            .unwrap(),
+        vec![c.clone()]
+    );
+    assert_eq!(
+        f.store.recover_delivery("Mine").unwrap()[0].body,
+        "new batch C"
+    );
+    assert!(f
+        .store
+        .note_acked_ids("Mine", std::slice::from_ref(&c))
+        .unwrap()
+        .is_empty());
+    assert!(f.store.recover_delivery("Mine").unwrap().is_empty());
+}
+
+#[test]
+fn implicit_read_ack_and_receipt_write_failures_roll_back_state_and_prior_batch() {
+    let f = Fixture::new();
+    let prior = f.send("Mine", "prior body");
+    f.store
+        .mark_read_with_receipt("Mine", std::slice::from_ref(&prior), None)
+        .unwrap();
+    let next = f.send("Mine", "must remain queued on failure");
+    let db = rusqlite::Connection::open(f.store.path()).unwrap();
+    for trigger in [
+        "CREATE TRIGGER read_failure BEFORE UPDATE OF acked_at ON messages BEGIN SELECT RAISE(FAIL,'ack fixture failure'); END;",
+        "CREATE TRIGGER read_failure BEFORE INSERT ON deliveries BEGIN SELECT RAISE(FAIL,'receipt fixture failure'); END;",
+    ] {
+        db.execute_batch(trigger).unwrap();
+        assert!(f.store.read_with_receipt("Mine",std::slice::from_ref(&next),true,None).is_err());
+        let status=inbox::status(&f.pool(),&next,crate::clock::now_s()).unwrap();
+        assert_eq!(status.state,"queued");assert!(status.read_at.is_none() && status.acked_at.is_none());
+        assert_eq!(f.store.recover_delivery("Mine").unwrap()[0].summary.message_id,prior);
+        db.execute_batch("DROP TRIGGER read_failure").unwrap();
+    }
+    let foreign = f.send("Other", "foreign body");
+    assert!(f
+        .store
+        .read_with_receipt("Mine", &[next.clone(), foreign.clone()], true, None)
+        .is_err());
+    assert_eq!(f.store.get_message(&next).unwrap().summary.state, "queued");
+    assert_eq!(
+        f.store.get_message(&foreign).unwrap().summary.state,
+        "queued"
+    );
+    f.store
+        .read_with_receipt("Mine", std::slice::from_ref(&next), true, None)
+        .unwrap();
+    assert_eq!(
+        f.store.recover_delivery("Mine").unwrap()[0]
+            .summary
+            .message_id,
+        next
+    );
+}
+
+#[test]
+fn manual_and_implicit_reads_preserve_unread_watchdog_and_digest_gates() {
+    let f = Fixture::new();
+    for (mailbox, ack) in [("manual", false), ("implicit", true)] {
+        let id = f
+            .store
+            .upsert_digest(DigestUpsert::new(mailbox, mailbox, "fixture digest"))
+            .unwrap();
+        assert_eq!(f.store.digest_waiting(mailbox).unwrap(), Some(id.clone()));
+        let now = crate::clock::now_s() + 1.;
+        let watchdog = crate::watchdog::rules_inbox::InboxDb {
+            path: f.store.path(),
+        };
+        assert!(watchdog.queued(now).unwrap().iter().any(|row| row.0 == id));
+        f.store
+            .read_with_receipt(mailbox, std::slice::from_ref(&id), ack, None)
+            .unwrap();
+        let count = inbox::count(&f.pool(), mailbox, &[], now).unwrap();
+        assert_eq!(count.unread, 0, "same counter used by next-job handoff");
+        assert!(count.oldest_unread_s.is_none());
+        assert!(!watchdog.queued(now).unwrap().iter().any(|row| row.0 == id));
+        assert!(
+            f.store.digest_waiting(mailbox).unwrap().is_none(),
+            "both modes end digest coalescing"
+        );
+        let status = inbox::status(&f.pool(), &id, now).unwrap();
+        assert!(
+            status.read_at.is_some(),
+            "lane activity still records the read"
+        );
+        assert_eq!(status.acked_at.is_some(), ack);
+    }
+}
