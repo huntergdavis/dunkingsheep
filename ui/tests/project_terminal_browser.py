@@ -43,8 +43,10 @@ try:
         page.get_by_role('heading',name='Project: alpha').wait_for()
         assert page.get_by_role('button',name='Open terminal').count() == 1
         assert page.get_by_role('row').filter(has_text='Owner').get_by_role('button',name='Open terminal').count() == 0
+        assert not page.evaluate("performance.getEntriesByType('resource').some(r => /\\/ProjectTerminal-[^/]+\\.js$/.test(r.name))"), 'terminal code loaded before it was opened'
         page.get_by_role('button',name='Open terminal').click()
         page.get_by_text('Connected',exact=True).wait_for()
+        assert page.evaluate("performance.getEntriesByType('resource').some(r => /\\/ProjectTerminal-[^/]+\\.js$/.test(r.name))"), 'terminal chunk did not load on demand'
         page.get_by_text('LIVE-OUTPUT',exact=False).first.wait_for()
         page.locator('.xterm-helper-textarea').focus()
         page.keyboard.type('x')
