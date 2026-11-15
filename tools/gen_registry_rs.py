@@ -498,6 +498,18 @@ def build():
         "}",
         "",
     ]
+    # Internal socket arguments are deliberately absent from public CLI/MCP schemas,
+    # but still come from an explicit generated allowlist used by the dispatcher.
+    lines.extend([
+        "/// Internal socket-only arguments; these do not enlarge public MCP schemas.",
+        "pub fn socket_only_params(name: &str) -> &'static [&'static str] {",
+        "    match name {",
+    ])
+    for name, entry in overlay["commands"].items():
+        if "socket_only_params" in entry:
+            fields = ", ".join(json.dumps(field) for field in entry["socket_only_params"])
+            lines.append(f"        {json.dumps(name)} => &[{fields}],")
+    lines.extend(["        _ => &[],", "    }", "}", ""])
     fixture = {
         "commands": expected,
         "required_metadata": required_metadata,

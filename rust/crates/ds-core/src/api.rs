@@ -1210,7 +1210,10 @@ impl Dispatcher {
         let mut unknown: Vec<&str> = args
             .keys()
             .map(String::as_str)
-            .filter(|key| !command.params.iter().any(|p| p.name == *key))
+            .filter(|key| {
+                !command.params.iter().any(|p| p.name == *key)
+                    && !registry::socket_only_params(name).contains(key)
+            })
             .collect();
         if !unknown.is_empty() {
             unknown.sort_unstable();

@@ -11729,6 +11729,16 @@ fn task_list_pages_are_opt_in_and_preserve_scope_privacy() {
             dispatch_task_api(&dispatcher, &flock, &runtime, "task_list", invalid, caller).is_err()
         );
     }
+    let unknown = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_list",
+        json!({"paged":true,"extra":1}),
+        caller,
+    )
+    .unwrap_err();
+    assert!(unknown.to_string().contains("unknown argument(s): extra"));
     let legacy = dispatch_task_api(
         &dispatcher,
         &flock,

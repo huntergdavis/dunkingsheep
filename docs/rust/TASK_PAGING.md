@@ -1,6 +1,8 @@
 # Opt-in task list pages
 
-Paging is an internal socket/desk-client option on the existing handler. Public
+Paging is an internal socket/desk-client option on the existing handler. Its
+argument names are explicitly allowlisted by generated socket-only registry
+metadata; unknown arguments remain refused. Public
 CLI flags and MCP schemas remain unchanged to preserve their existing contracts
 and the MCP hot-set schema budget. Existing `task_list` calls retain their priority/age ordering, signed `limit`
 semantics, default of 200, validation and response fields. Paging requires the

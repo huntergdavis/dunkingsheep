@@ -332,3 +332,24 @@ fn private_human_producers_are_not_mcp_actions_or_lane_grants() {
     assert!(ds_core::roles::allowed("system", "owner_ingest_thread"));
     assert!(ds_core::roles::allowed("system", "owner_delivered_thread"));
 }
+
+#[test]
+fn task_paging_socket_arguments_are_explicit_and_absent_from_public_schema() {
+    assert_eq!(
+        registry::socket_only_params("task_list"),
+        &["paged", "page_size", "cursor", "priority", "page_group"]
+    );
+    for command in registry::COMMANDS {
+        if command.name != "task_list" {
+            assert!(registry::socket_only_params(command.name).is_empty());
+        }
+    }
+    let schema = registry::input_schema("task_list").unwrap();
+    for key in registry::socket_only_params("task_list") {
+        assert!(schema["properties"].get(key).is_none());
+    }
+    let grouped = registry::grouped_input_schema("task").unwrap();
+    for key in ["paged", "page_size", "cursor", "page_group"] {
+        assert!(grouped["properties"].get(key).is_none());
+    }
+}
