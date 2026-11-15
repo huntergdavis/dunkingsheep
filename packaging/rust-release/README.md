@@ -160,14 +160,20 @@ The packet contract follows the accepted t5007 procedure (`operate.py` SHA256
 `STAGING-MANIFEST.json` records the full source commit, operator, exact three
 units, immutable source/stage/release artifact hashes, baseline PIDs, executables,
 unit-file hashes and `DropInPaths`, candidate drop-in/snippet paths, before/after
-CLI hashes, unchanged poll hashes, dedicated Telegram token path and the three
-reviewed downgrade trigger names. `SHA256SUMS` covers the manifest, artifacts,
+CLI hashes, unchanged poll hashes, dedicated Telegram token path and the explicit
+`rollback_triggers` schema contract. `SHA256SUMS` covers the manifest, artifacts,
 snippets, `launcher.before`, `launcher.pending` and `rollback-triggers.sql`.
 The required `lan_authority` is the reviewed LAN Host header for terminal probes;
 the TCP connection remains loopback. The digest supplied on the command line is
 the SHA256 of `SHA256SUMS` itself.
-The SQL file is review evidence; the native executor permits only the three
-specific t5007 message sidecar trigger removals and retains all tables and rows.
+The SQL file is review evidence, never executed as arbitrary SQL. Modern packets
+set `rollback_triggers: []`: rollback snapshots the quiesced database and retains
+every table, row, index and trigger, including additive mailbox retirement audit
+objects. The original three t5007 sidecar trigger names remain accepted only as
+an explicit historical contract; arbitrary or partial trigger lists are refused.
+An empty list grants no downgrade DDL. The retained snapshot filename
+`inbox-before-trigger-drop.db` is historical and also serves snapshot-only packets;
+its first complete bytes are kept across recovery retries.
 
 The separate private `state/ACTIVATION-GO.json` must contain `packet_sha256`,
 `authority_message`, RFC3339 `valid_from`/`valid_until`, `no_terminal_confirmed:
@@ -197,8 +203,9 @@ snippets, saved old launcher, old executables, baseline configuration, poll and
 snapshot rather than disposable build outputs or staged candidate artifacts.
 Activation and verification retain full source/stage/release validation.
 A completed first SQLite snapshot is
-published without replacement and retained across retries. Recovery accepts
-already-dropped triggers and restarts an old unit left inactive after overlay
+published without replacement and retained across retries. Legacy recovery accepts
+already-dropped triggers; snapshot-only recovery changes no schema. Both restart
+an old unit left inactive after overlay
 removal. Drift causes refusal before removing that overlay. Inspect the private
 state receipts and the reviewed release-specific observation window separately;
 the executor does not infer extra rollback triggers from prose or monitor later
@@ -266,8 +273,9 @@ Before another operator can perform a real native-path release, independently
 review its exact tooling head and supported packet, rehearse its actual switching
 and recovery order against the current consumer floor, and obtain current review
 acceptance and GO. The existing executor still switches daemon first and rolls
-back all three units in reverse order, with the old t5007 trigger-drop contract;
-those assumptions need release-specific compatibility review or a separate fix.
+back all three units in reverse order with the packet's explicit schema contract;
+switching order and rollback-floor compatibility still need release-specific
+review or a separate fix.
 Stable single-drop-in migration, packet authoring, retention/removal and a real
 release through the native tool by a different operator remain parent-task gates.
 
