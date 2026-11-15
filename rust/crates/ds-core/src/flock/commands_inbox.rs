@@ -523,13 +523,46 @@ impl Flock {
         env.store().archive(mailbox, before, states)
     }
 
+    /// Authorize before inspecting the blob or touching the destination. Privileged
+    /// read roles retain their existing scope; ordinary callers must have an own mailbox.
+    pub fn authorize_inbox_fetch(
+        &self,
+        env: &dyn InboxEnv,
+        attachment_id: &rusqlite::types::Value,
+        id_repr: &str,
+        self_pane_id: Option<&str>,
+    ) -> Result<(), DunkError> {
+        let role = match self_pane_id.filter(|pane| !pane.is_empty()) {
+            Some(pane) => env.caller_role(pane)?,
+            None => env.paneless_role()?.unwrap_or_else(|| "anonymous".into()),
+        };
+        if matches!(role.as_str(), "owner" | "web" | "system") {
+            return Ok(());
+        }
+        let own = self.mailbox_or_self(env, None, self_pane_id, false, true)?;
+        if !env
+            .store()
+            .attachment_in_mailbox_bound(attachment_id, &own)?
+        {
+            return Err(refused(format!("no attachment with id {id_repr}")));
+        }
+        Ok(())
+    }
+
     /// `inbox_fetch`: `dest` defaults to the caller's working directory.
     pub fn inbox_fetch(
         &self,
         env: &dyn InboxEnv,
         attachment_id: &str,
         dest: Option<&Path>,
+        self_pane_id: Option<&str>,
     ) -> Result<Fetched, DunkError> {
+        self.authorize_inbox_fetch(
+            env,
+            &rusqlite::types::Value::Text(attachment_id.to_owned()),
+            &py_repr(attachment_id),
+            self_pane_id,
+        )?;
         let cwd;
         let dest = match dest.filter(|d| !d.as_os_str().is_empty()) {
             Some(dest) => dest,

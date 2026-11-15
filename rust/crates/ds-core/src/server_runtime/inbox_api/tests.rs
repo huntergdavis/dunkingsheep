@@ -1859,3 +1859,171 @@ fn inbox_read_recovery_planner_keeps_lost_bodies_and_explicit_ack_scoped() {
         .is_empty());
     dispatcher.close();
 }
+
+#[test]
+fn inbox_fetch_checks_parent_mailbox_before_destination_writes() {
+    let (dir, services) = make_services("fetch-mailbox-scope", factory(None), None);
+    let store = services.flock().stores().inbox.unwrap();
+    let file = dir.path().join("payload.txt");
+    std::fs::write(&file, b"known private fixture bytes").unwrap();
+    let send = |mailbox| {
+        store
+            .send(&crate::inbox_store::Outgoing {
+                mailbox,
+                body: Some("fixture message"),
+                attachments: std::slice::from_ref(&file),
+                ..Default::default()
+            })
+            .unwrap()
+    };
+    let own = send("w1:p1");
+    let foreign = send("w2:p2");
+    let human = send("owner");
+    let attachment = |id: &str| store.get_message(id).unwrap().attachments[0].id.clone();
+    let own_attachment = attachment(&own);
+    let foreign_attachment = attachment(&foreign);
+    let human_attachment = attachment(&human);
+    // Two attachment IDs can share blob bytes; access follows the parent mailbox.
+    let db = rusqlite::Connection::open(store.path()).unwrap();
+    db.execute(
+        "UPDATE messages SET mailbox='w1:p1 (%7)' WHERE id=?",
+        [&own],
+    )
+    .unwrap();
+    let (web, system) = services
+        .flock()
+        .with_roles(|roles, _| {
+            roles.register("w4:p4", "planner", None, None, None, None, None, None)?;
+            Ok((
+                roles.issue_token("web", Some("private-fetch-web"), None)?,
+                roles.issue_token("system", Some("private-fetch-system"), None)?,
+            ))
+        })
+        .unwrap();
+    let dispatcher = services.dispatcher(handlers());
+    let worker = request("w1:p1");
+    let dest = dir.path().join("own-copy");
+    let fetched = dispatcher
+        .dispatch(
+            "inbox_fetch",
+            &json!({"attachment_id":own_attachment,"dest":dest}),
+            &worker,
+        )
+        .unwrap();
+    assert_eq!(fetched["message_id"], own);
+    assert_eq!(
+        std::fs::read(dest.join("payload.txt")).unwrap(),
+        b"known private fixture bytes"
+    );
+    for (name, id) in [
+        ("foreign-copy", &foreign_attachment),
+        ("human-copy", &human_attachment),
+    ] {
+        let dest = dir.path().join(name);
+        let error = dispatcher
+            .dispatch(
+                "inbox_fetch",
+                &json!({"attachment_id":id,"dest":dest}),
+                &worker,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("no attachment with id"));
+        assert!(
+            !dest.exists(),
+            "refusal must precede even destination creation"
+        );
+    }
+    let protected = dir.path().join("existing-copy");
+    std::fs::create_dir(&protected).unwrap();
+    std::fs::write(protected.join("payload.txt"), b"keep destination unchanged").unwrap();
+    assert!(dispatcher
+        .dispatch(
+            "inbox_fetch",
+            &json!({"attachment_id":foreign_attachment,"dest":protected}),
+            &worker
+        )
+        .is_err());
+    assert_eq!(
+        std::fs::read(protected.join("payload.txt")).unwrap(),
+        b"keep destination unchanged"
+    );
+    let bad_dest = dispatcher
+        .dispatch(
+            "inbox_fetch",
+            &json!({"attachment_id":foreign_attachment,"dest":true}),
+            &worker,
+        )
+        .unwrap_err();
+    assert!(
+        bad_dest.to_string().contains("no attachment with id"),
+        "foreign blob validation must not precede authorization"
+    );
+    let owner_dest = dir.path().join("owner-copy");
+    dispatcher
+        .dispatch(
+            "inbox_fetch",
+            &json!({"attachment_id":human_attachment,"dest":owner_dest}),
+            &request("w2:p2"),
+        )
+        .unwrap();
+    assert_eq!(
+        std::fs::read(owner_dest.join("payload.txt")).unwrap(),
+        b"known private fixture bytes"
+    );
+    for (role, token) in [("web", web), ("system", system)] {
+        let ctx = RequestCtx {
+            service_token: Some(token),
+            socket_peer: Some(true),
+            socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
+            ..Default::default()
+        };
+        let dest = dir.path().join(format!("{role}-copy"));
+        dispatcher
+            .dispatch(
+                "inbox_fetch",
+                &json!({"attachment_id":foreign_attachment,"dest":dest}),
+                &ctx,
+            )
+            .unwrap();
+        assert_eq!(
+            std::fs::read(dest.join("payload.txt")).unwrap(),
+            b"known private fixture bytes"
+        );
+    }
+    let unbound_dest = dir.path().join("unbound-copy");
+    let unbound = RequestCtx {
+        socket_peer: Some(true),
+        socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
+        ..Default::default()
+    };
+    assert!(dispatcher
+        .dispatch(
+            "inbox_fetch",
+            &json!({"attachment_id":own_attachment,"dest":unbound_dest}),
+            &unbound
+        )
+        .is_err());
+    assert!(
+        !unbound_dest.exists(),
+        "ordinary fetch cannot infer an own mailbox without a caller pane"
+    );
+    let planner_dest = dir.path().join("planner-copy");
+    assert!(dispatcher
+        .dispatch(
+            "inbox_fetch",
+            &json!({"attachment_id":own_attachment,"dest":planner_dest}),
+            &request("w4:p4")
+        )
+        .is_err());
+    assert!(
+        !planner_dest.exists(),
+        "planner fetch grant stays unchanged"
+    );
+    let status = dispatcher
+        .dispatch("inbox_status", &json!({"message_id":own}), &worker)
+        .unwrap();
+    assert!(status.get("body").is_none());
+    assert!(status["attachments"].is_number());
+    assert!(!status.to_string().contains("known private fixture bytes"));
+    dispatcher.close();
+}

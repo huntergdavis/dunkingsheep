@@ -386,7 +386,7 @@ fn fetch_of_an_unknown_attachment_is_a_plain_refusal() {
     let (e, d) = (env("worker"), tempfile::tempdir().unwrap());
     let f = flock(&d);
     let err = f
-        .inbox_fetch(&e, "nope", Some(d.path()))
+        .inbox_fetch(&e, "nope", Some(d.path()), Some("w1:p1"))
         .unwrap_err()
         .to_string();
     assert_eq!("no attachment with id 'nope'", err);
@@ -1075,4 +1075,18 @@ fn read_recovery_receipt_failure_leaves_mail_queued_and_prior_batch_recoverable(
         .unwrap()
         .1
         .is_empty());
+}
+
+#[test]
+fn attachment_fetch_requires_an_attributable_mailbox_for_ordinary_callers() {
+    let (mut e, d) = (env("worker"), tempfile::tempdir().unwrap());
+    e.paneless = Some("worker");
+    let f = flock(&d);
+    let id = put(&e, "Mine", "fixture");
+    let error = f
+        .authorize_inbox_fetch(&e, &rusqlite::types::Value::Text(id), "'fixture'", None)
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("no mailbox given and no caller pane"));
 }

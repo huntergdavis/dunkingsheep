@@ -227,3 +227,10 @@ lookahead), first/last message IDs and result. No body, subject or sender enters
 Refused/failed query execution after role resolution emits one failure record with the filter
 and cursor; browsing never changes inbox state or sends notices.
 Deploy daemon support before the matching desk. Neither S-F nor S-G is in the S5-only live UI.
+
+
+## Attachment fetch scope
+
+Attachment access follows its parent message's mailbox, using the same canonical and legacy-alias predicate as inbox reads. Ordinary lanes can fetch only attachments in their own mailbox; refusal happens before destination creation or copying bytes. Existing privileged owner/web/system read access remains available. Planners still have no fetch grant. The CLI/MCP request and successful response shapes are unchanged.
+
+`inbox status` remains an unscoped delivery-metadata lookup. It returns more than IDs and timestamps: mailbox/destination/pane/sender, state, body byte size, attachment counts and total size, reason, and notification state/reason/transport receipt metadata. It returns no message body or attachment contents. The attachment-scope change does not alter that existing status policy.
