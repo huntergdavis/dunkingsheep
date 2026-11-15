@@ -3279,7 +3279,8 @@ fn test_owner_only_matches_the_python_superuser_only_set() {
     got.sort_unstable();
     let mut want = expected.to_vec();
     // Rust-only owner decisions have no counterpart in the frozen Python registry.
-    want.extend(["task_owner_answer", "task_owner_question"]);
+    // t5014: the mailbox retirement dry run is owner only.
+    want.extend(["task_owner_answer", "task_owner_question", "inbox_retire"]);
     want.sort_unstable();
     assert_eq!(got, want);
 }
