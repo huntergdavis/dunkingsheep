@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { laneUsage, providerFor } from './lane-usage.js';
+import { harnessSourceText, laneUsage, providerFor } from './lane-usage.js';
 
 const NOW = Date.parse('2026-11-15T12:00:00Z');
 const budget = { providers: [
@@ -59,4 +59,19 @@ test('unknown providers, missing readings and missing data are unavailable with 
 test('a percentage outside 0..100 is clamped for the bar', () => {
   const over = { providers: [{ provider: 'claude', state: 'ok', measured_at: '2026-11-15T11:59:00Z', windows: [{ name: 'w', percent_used: 140 }] }] };
   assert.equal(laneUsage({ harness: 'claude' }, over, NOW).percent, 100);
+});
+
+test('t5043: a stale local estimate says stale, an errored provider is unavailable, and the harness source is named', () => {
+  const stalePi = { providers: [{ provider: 'pi', state: 'unknown', meaning: 'local_session_estimate', measured_at: '2026-11-13T21:00:00Z', windows: [], local_estimate: { session_cost_usd: 0.5 } }] };
+  const usage = laneUsage({ harness: 'pi' }, stalePi, NOW);
+  assert.equal(usage.kind, 'estimate');
+  assert.equal(usage.text, 'estimate, stale: local session cost $0.50');
+  assert.equal(usage.detail, 'measured 39 h ago; a local estimate, not an account limit');
+  const errored = { providers: [{ provider: 'opencode', state: 'error', meaning: 'unknown', measured_at: '2026-11-15T11:59:00Z', reason: 'no provider reading', windows: [] }] };
+  const opencode = laneUsage({ harness: 'opencode' }, errored, NOW);
+  assert.equal(opencode.kind, 'unavailable');
+  assert.match(opencode.detail, /no provider reading/);
+  assert.equal(harnessSourceText({ harness_source: 'launch' }), 'harness from the launch command');
+  assert.equal(harnessSourceText({ harness_source: 'registry' }), 'harness from the pane registry');
+  assert.equal(harnessSourceText({}), '');
 });

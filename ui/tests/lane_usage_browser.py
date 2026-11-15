@@ -20,7 +20,7 @@ member = {'scope': 'project', 'project': 'alpha'}
 lanes = [
     {'pane_id': '%11', 'name': 'Writer A', 'harness': 'claude', 'membership': member, 'state': 'idle'},
     {'pane_id': '%12', 'name': 'Writer B', 'harness': 'claude', 'membership': member, 'state': 'idle'},
-    {'pane_id': '%13', 'name': 'Codex C', 'harness': 'codex', 'membership': member, 'state': 'idle'},
+    {'pane_id': '%13', 'name': 'Codex C', 'harness': 'codex', 'harness_source': 'launch', 'membership': member, 'state': 'idle'},
     {'pane_id': '%14', 'name': 'Pi D', 'harness': 'pi', 'membership': member, 'state': 'idle'},
     {'pane_id': '%15', 'name': 'Shell E', 'harness': None, 'membership': member, 'state': 'idle'},
 ]
@@ -33,7 +33,11 @@ budget = {'state': 'ok', 'providers': [
 def api(route):
     path = urlsplit(route.request.url).path
     if path == '/api/projects': value = {'lanes': lanes}
-    elif path == '/api/ops-board': value = {'budget': budget}
+    elif path == '/api/ops-board':
+        # Ages are relative to the moment of the request, so a slow run cannot move 4 min to 5.
+        budget['providers'][0]['measured_at'] = iso(4)
+        budget['providers'][2]['measured_at'] = iso(1)
+        value = {'budget': budget}
     else: value = {'ok': True, 'channels': []}
     route.fulfill(status=200, content_type='application/json', body=json.dumps(value))
 try:
@@ -51,6 +55,8 @@ try:
             assert page.locator('[data-lane-usage="%11"] [role=meter]').get_attribute('aria-valuenow') == '37'
             c = page.locator('[data-lane-usage="%13"]')
             assert 'usage reading is stale' in c.inner_text() and 'newest snapshot is too old' in c.inner_text()
+            c.locator('summary').click()
+            assert 'harness from the launch command' in c.locator('details').inner_text()
             assert c.locator('[role=meter]').count() == 0, 'no bar for a stale reading'
             d = page.locator('[data-lane-usage="%14"]')
             assert 'estimate: local session cost $0.50' in d.inner_text() and d.locator('[role=meter]').count() == 0

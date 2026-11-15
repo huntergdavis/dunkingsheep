@@ -1,5 +1,5 @@
 import React from 'react';
-import { laneUsage } from './lane-usage.js';
+import { harnessSourceText, laneUsage } from './lane-usage.js';
 
 // t5043: one thin bar under a lane for its provider ACCOUNT's primary usage window. The label
 // on every bar says it is shared by the account, so the same bar under several lanes does not
@@ -19,6 +19,7 @@ export default function LaneUsage({ lane, budget }) {
         {window.resets_at ? ` · resets ${window.resets_at}` : ''}
       </li>)}</ul>}
       {usage.extra && <p>Extra usage: {usage.extra.used_credits ?? 'unknown'} / {usage.extra.monthly_limit ?? 'unknown'} credits</p>}
+      {harnessSourceText(lane) && <p className="lane-usage-source">{harnessSourceText(lane)}</p>}
       <p>These numbers belong to the {usage.account.replace(/^shared: /, '')}, shared by every lane on it. Token totals per lane are not measured yet.</p>
     </details>
   </div>;

@@ -391,6 +391,49 @@ fn roster_lane(lane: &Value) -> bool {
 /// Why a lane's `inbox.unread` is null.
 pub const INBOX_COUNT_FAILED: &str = "the inbox count could not be read";
 
+/// The harnesses a launch record's program can name.
+const KNOWN_HARNESSES: [&str; 4] = ["claude", "codex", "pi", "opencode"];
+
+/// t5043: the harness a launch argv starts, past `env` (its options and `VAR=value`
+/// assignments) and the plain wrappers `nice`, `nohup` and `setsid`. `None` when the program is
+/// not a known harness.
+pub fn launch_harness(argv: &[Value]) -> Option<&'static str> {
+    let mut tokens = argv.iter().filter_map(Value::as_str).peekable();
+    loop {
+        let token = tokens.next()?;
+        let program = token.rsplit('/').next().unwrap_or(token);
+        match program {
+            "env" => {
+                while let Some(next) = tokens.peek() {
+                    if next.starts_with('-') || (next.contains('=') && !next.starts_with('=')) {
+                        let option = tokens.next().unwrap_or_default();
+                        // `env -u NAME` and `env -C DIR` take a separate value.
+                        if matches!(option, "-u" | "--unset" | "-C" | "--chdir") {
+                            tokens.next();
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+            "nice" | "nohup" | "setsid" => {
+                while tokens.peek().is_some_and(|next| next.starts_with('-')) {
+                    // `nice -n 10` takes a separate value.
+                    if tokens.next() == Some("-n") {
+                        tokens.next();
+                    }
+                }
+            }
+            _ => {
+                return KNOWN_HARNESSES
+                    .iter()
+                    .find(|known| **known == program)
+                    .copied()
+            }
+        }
+    }
+}
+
 /// `roster`: detected agents plus live panes with explicit, valid membership.
 pub fn roster(env: &dyn RosterEnv, now: f64) -> Result<Value, String> {
     let mut rows = Vec::new();
@@ -430,7 +473,7 @@ pub fn roster(env: &dyn RosterEnv, now: f64) -> Result<Value, String> {
                 "oldest_unread_s": cell(Value::Null, None, Some(INBOX_COUNT_FAILED)),
             }),
         };
-        let harness = lane["agent"].as_str().filter(|name| !name.is_empty());
+        let registered = lane["agent"].as_str().filter(|name| !name.is_empty());
         // What the lane is DOING comes from its own tool; an absent signal is UNKNOWN.
         let doing = env.activity(lane, now).unwrap_or_else(|error| {
             json!({"state": "unknown", "since": null, "source": "activity", "reason": format!("activity probe failed: {error}")})
@@ -446,6 +489,24 @@ pub fn roster(env: &dyn RosterEnv, now: f64) -> Result<Value, String> {
             let start = record.get("process_start")?.as_str()?;
             Some(env.launch_process_live(lane, pid, start))
         });
+        // t5043: the pane registry names the harness only for lanes started through it. Without
+        // that, the launch record's program answers, unless the record describes a process that
+        // is no longer running here. A program that is not a known harness stays unknown; it is
+        // never guessed from a model name.
+        let (harness, harness_source) = match registered {
+            Some(name) => (Some(name.to_string()), Some("registry")),
+            None => match launch
+                .as_ref()
+                .filter(|_| launch_bound != Some(false))
+                .and_then(|record| record.get("argv"))
+                .and_then(Value::as_array)
+                .and_then(|argv| launch_harness(argv))
+            {
+                Some(name) => (Some(name.to_string()), Some("launch")),
+                None => (None, None),
+            },
+        };
+        let harness = harness.as_deref();
         // A declared model (slice C) is newer than the launch; without one, the launch record
         // and the samples answer.
         let model = declared_cell(
@@ -472,6 +533,7 @@ pub fn roster(env: &dyn RosterEnv, now: f64) -> Result<Value, String> {
             "membership": lane.get("membership").cloned().unwrap_or_else(|| json!({"scope":"unknown","project":null})),
             "name": name.unwrap_or(pane_id),
             "harness": harness,
+            "harness_source": harness_source,
             "model": model,
             "state": doing.get("state").cloned().unwrap_or(Value::Null),
             "state_source": doing.get("source").cloned().unwrap_or(Value::Null),
@@ -594,6 +656,94 @@ mod tests {
         assert_eq!(rows[0]["state"], "unknown");
         assert!(rows[0]["model"]["value"].is_null());
         assert_eq!(rows[1]["membership"]["scope"], "global");
+    }
+
+    #[test]
+    fn the_launch_program_names_the_harness_past_env_and_wrappers() {
+        let argv = |tokens: &[&str]| tokens.iter().map(|t| json!(t)).collect::<Vec<_>>();
+        // The real shapes in launches.json: bare programs, absolute paths, and env starts.
+        assert_eq!(
+            launch_harness(&argv(&["codex", "--no-daemon"])),
+            Some("codex")
+        );
+        assert_eq!(
+            launch_harness(&argv(&["/usr/local/bin/claude", "--model", "x"])),
+            Some("claude")
+        );
+        assert_eq!(launch_harness(&argv(&["pi", "--model", "m"])), Some("pi"));
+        assert_eq!(launch_harness(&argv(&["opencode"])), Some("opencode"));
+        assert_eq!(
+            launch_harness(&argv(&[
+                "env",
+                "CODEX_HOME=/h/.codex-x",
+                "DUNKINGSHEEP_CODEX_STATE_DIR=/s",
+                "codex",
+                "--no-daemon",
+                "--dangerously-bypass-hook-trust",
+            ])),
+            Some("codex")
+        );
+        assert_eq!(
+            launch_harness(&argv(&["env", "-u", "X", "-i", "A=b", "claude"])),
+            Some("claude")
+        );
+        assert_eq!(
+            launch_harness(&argv(&["nice", "-n", "10", "nohup", "pi"])),
+            Some("pi")
+        );
+        // Not a known harness, or nothing after the prefixes: unknown, never guessed.
+        for unknown in [
+            argv(&["bash", "-lc", "codex"]),
+            argv(&["gemini"]),
+            argv(&["env", "A=b"]),
+            argv(&[]),
+            vec![json!(1), json!(null)],
+        ] {
+            assert_eq!(launch_harness(&unknown), None, "{unknown:?}");
+        }
+    }
+
+    #[test]
+    fn a_lane_without_a_registered_agent_takes_its_harness_from_a_live_launch_record() {
+        let launch = json!({"argv": ["env", "CODEX_HOME=/h", "codex", "--no-daemon"], "process_pid": 77, "process_start": "s"});
+        let base = || Env {
+            lanes: vec![
+                json!({"pane_id":"%1","agent":"","agent_name":"a","membership":{"scope":"global","project":null}}),
+                json!({"pane_id":"%2","agent":"claude","agent_name":"b","membership":{"scope":"global","project":null}}),
+            ],
+            launches: [
+                ("%1".to_string(), launch.clone()),
+                ("%2".to_string(), launch.clone()),
+            ]
+            .into(),
+            live_process: Some((77, "s".to_string())),
+            ..Env::default()
+        };
+        let rows = |env: &Env| {
+            roster(env, NOW).unwrap()["lanes"]
+                .as_array()
+                .unwrap()
+                .clone()
+        };
+        let live = rows(&base());
+        let by = |rows: &[Value], pane: &str| {
+            rows.iter()
+                .find(|row| row["pane_id"] == pane)
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(by(&live, "%1")["harness"], "codex");
+        assert_eq!(by(&live, "%1")["harness_source"], "launch");
+        // The registry wins over the launch record.
+        assert_eq!(by(&live, "%2")["harness"], "claude");
+        assert_eq!(by(&live, "%2")["harness_source"], "registry");
+        // A record whose process is gone describes an earlier agent: not used.
+        let stale = rows(&Env {
+            live_process: Some((78, "s".to_string())),
+            ..base()
+        });
+        assert!(by(&stale, "%1")["harness"].is_null());
+        assert!(by(&stale, "%1")["harness_source"].is_null());
     }
 
     #[test]
