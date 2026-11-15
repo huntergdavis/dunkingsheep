@@ -1,7 +1,6 @@
 .owner-inbox { display: flex; flex-direction: column; flex: 1; min-height: 0; padding: 16px; gap: 12px; overflow: auto; }
 .owner-inbox-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
 .owner-inbox-heading h1 { margin: 0; }
-.owner-inbox-heading p { max-width: 70ch; color: var(--dash-muted); margin: 6px 0; }
 .owner-inbox-heading a { color: var(--dash-accent); }
 .owner-inbox-columns { display: grid; grid-template-columns: minmax(260px, 36%) minmax(0, 1fr); flex: 1; min-height: 0; border: 1px solid var(--dash-border); }
 .owner-inbox-list { min-width: 0; overflow: auto; border-right: 1px solid var(--dash-border); }
@@ -28,7 +27,8 @@
 .owner-inbox-filters select { min-width: 0; max-width: 100%; }
 .owner-inbox-filters p { color: var(--dash-muted); margin: 0; }
 
-.owner-inbox-views { display: flex; flex-wrap: wrap; gap: 8px; }
+.owner-inbox-views { display: flex; flex: none; flex-wrap: nowrap; gap: 8px; min-width: 0; max-width: 100%; overflow-x: auto; padding: 4px; margin: -4px; }
+.owner-inbox-views button { flex: 0 0 auto; white-space: nowrap; }
 .owner-inbox-views button[aria-pressed="true"] { border-color: var(--dash-accent); font-weight: 700; }
 
 .owner-thread-message { padding: 12px 0; border-bottom: 1px solid var(--dash-border); }

@@ -30,12 +30,12 @@ export default function OwnerInbox({ api }) {
   const view = INBOX_VIEWS[viewName];
   return <div className="owner-inbox">
     <header className="owner-inbox-heading">
-      <div><h1>{view.label}</h1><p>{view.description}</p></div>
+      <h1>{view.label}</h1>
       <a href="/dash/cos?panel=mailboxes">Browse all mailboxes</a>
       <a href="/dash/cos?panel=conversation">Open conversation / send a message</a>
     </header>
     <nav className="owner-inbox-views" aria-label="Inbox views">
-      {Object.entries(INBOX_VIEWS).map(([name, entry]) => <button key={name} type="button" ref={node => { buttons.current[name] = node; }} aria-pressed={viewName === name}
+      {Object.entries(INBOX_VIEWS).map(([name, entry]) => <button key={name} type="button" ref={node => { buttons.current[name] = node; }} aria-pressed={viewName === name} title={entry.description}
         onClick={() => { focusView.current = true; setRequestedRoot(null); setView(name); }}>{entry.label}</button>)}
     </nav>
     <InboxCompose api={api} onSent={() => setAttempt(value => value + 1)} />
