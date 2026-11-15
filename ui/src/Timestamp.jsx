@@ -1,7 +1,7 @@
 import React, { createContext, useContext } from 'react';
 import { formatTimestamp, timestampIso } from './timestamps.js';
 
-export const ServerTimeZone = createContext(null);
+export const ServerTimeZone = createContext('UTC');
 export const useServerTimeZone = () => useContext(ServerTimeZone);
 
 export default function Timestamp({ value, seconds = false }) {

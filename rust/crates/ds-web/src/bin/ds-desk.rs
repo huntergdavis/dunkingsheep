@@ -26,7 +26,7 @@ fn positive(name: &str, default: i64, minimum: i64) -> Result<i64, Box<dyn Error
         .max(minimum))
 }
 // Resolve the server's configured zone once, before serving requests. An explicit but
-// unsupported TZ remains unknown rather than silently using the host/browser zone.
+// unsupported TZ uses explicitly labelled UTC rather than the browser zone.
 fn time_zone_name(
     tz: Option<&str>,
     localtime: Option<&Path>,
@@ -46,6 +46,7 @@ fn time_zone_name(
     } else {
         timezone_file?.trim()
     };
+    let name = name.strip_prefix("/usr/share/zoneinfo/").unwrap_or(name);
     let name = name
         .strip_prefix("posix/")
         .or_else(|| name.strip_prefix("right/"))
@@ -97,10 +98,14 @@ fn make_config(root: &Path) -> Result<DeskConfig, Box<dyn Error>> {
     let tz = env::var("TZ").ok();
     let localtime = std::fs::canonicalize("/etc/localtime").ok();
     let timezone_file = std::fs::read_to_string("/etc/timezone").ok();
-    let time_zone = time_zone_name(
-        tz.as_deref(),
-        localtime.as_deref(),
-        timezone_file.as_deref(),
+    let time_zone = Some(
+        time_zone_name(
+            tz.as_deref(),
+            localtime.as_deref(),
+            timezone_file.as_deref(),
+        )
+        .filter(|name| Path::new("/usr/share/zoneinfo").join(name).is_file())
+        .unwrap_or_else(|| "UTC".to_owned()),
     );
     Ok(DeskConfig {
         time_zone,

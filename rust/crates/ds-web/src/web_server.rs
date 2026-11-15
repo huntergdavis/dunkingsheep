@@ -111,7 +111,7 @@ use crate::{
 /// temporary paths. Nothing is read from the environment here.
 #[derive(Clone)]
 pub struct DeskConfig {
-    /// Server IANA timezone captured at startup; None means unavailable.
+    /// Server IANA timezone captured at startup; unresolved hosts use labelled UTC.
     pub time_zone: Option<String>,
     /// Desk data directory (`VP_DATA_DIR`): `messages.sqlite3`, `auth.json`, `uploads/`.
     pub data_dir: PathBuf,

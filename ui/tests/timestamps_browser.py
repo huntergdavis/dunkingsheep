@@ -100,14 +100,14 @@ try:
         label.wait_for()
         assert '09:05 PM GMT+1' in label.inner_text(), label.inner_text()
         page.close()
-        # Unknown server configuration must not fall back to Tokyo or UTC.
+        # Unresolved server configuration uses explicitly labelled UTC, never Tokyo.
         server_zone = None
         page = context.new_page()
         page.route('**/api/**', api)
         page.goto(base + '/dash/tasks', wait_until='domcontentloaded')
         label = page.locator('.tasks-checked time')
         label.wait_for()
-        assert label.inner_text() == 'Time unavailable'
+        assert label.inner_text() == 'Sun, Nov 15, 2026, 08:05 PM UTC'
         assert label.get_attribute('title') == '2026-11-15T20:05:00.000Z'
         context.close()
         browser.close()

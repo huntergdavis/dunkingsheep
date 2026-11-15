@@ -1,5 +1,5 @@
 import { useServerTimeZone } from './Timestamp';
-import { formatTimestamp } from './timestamps.js';
+import { formatTimestamp, timestampIso } from './timestamps.js';
 import React, { useEffect, useRef, useState } from 'react';
 import { useMessageScroll, mergeMessages } from './useMessageScroll';
 import { CodewheelPicker } from './codewheel-picker.jsx';
@@ -163,7 +163,7 @@ function PoolradPlay({ vpChannel, standalone = false, embedded = false }) {
       <label>Quick load
         <select value={stateSlot} onChange={e => setStateSlot(e.target.value)} disabled={!status?.running || statesBusy || states.length === 0} aria-label="Save state to load">
           <option value="">{states.length ? 'Choose a save…' : 'No save states yet'}</option>
-          {states.map(s => <option key={s.slot} value={s.slot}>{`${s.slot}. ${s.tag} — ${formatTimestamp(s.created, timeZone)}`}</option>)}
+          {states.map(s => <option key={s.slot} value={s.slot} title={timestampIso(s.created) || undefined}>{`${s.slot}. ${s.tag} — ${formatTimestamp(s.created, timeZone)}`}</option>)}
         </select>
       </label>
       <button onClick={loadState} disabled={!status?.running || statesBusy || !stateSlot}>Load state</button>

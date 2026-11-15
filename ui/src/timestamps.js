@@ -11,17 +11,18 @@ export function formatTimestamp(value, timeZone, seconds = false) {
   // A context entry's date-only statement has no time or offset to convert.
   if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
   const iso = timestampIso(value, seconds);
-  if (!iso || typeof timeZone !== 'string' || !timeZone) return 'Time unavailable';
+  if (!iso) return 'Time unavailable';
+  const zone = typeof timeZone === 'string' && timeZone ? timeZone : 'UTC';
   try {
-    if (cachedZone !== timeZone) {
+    if (cachedZone !== zone) {
       cachedFormatter = new Intl.DateTimeFormat('en-US', {
-        timeZone, weekday: 'short', year: 'numeric', month: 'short', day: 'numeric',
+        timeZone: zone, weekday: 'short', year: 'numeric', month: 'short', day: 'numeric',
         hour: '2-digit', minute: '2-digit', hour12: true, timeZoneName: 'short',
       });
-      cachedZone = timeZone;
+      cachedZone = zone;
     }
     return cachedFormatter.format(new Date(iso));
   } catch {
-    return 'Time unavailable';
+    return zone === 'UTC' ? 'Time unavailable' : formatTimestamp(value, 'UTC', seconds);
   }
 }

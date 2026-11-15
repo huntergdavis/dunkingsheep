@@ -25,6 +25,6 @@ test('preserves instants and date-only provenance without guessing a client zone
     assert.equal(timestampIso(value), null);
     assert.equal(formatTimestamp(value, 'America/Los_Angeles'), 'Time unavailable');
   }
-  assert.equal(formatTimestamp(seconds, null, true), 'Time unavailable');
-  assert.equal(formatTimestamp(seconds, 'not/a-zone', true), 'Time unavailable');
+  assert.ok(formatTimestamp(seconds, null, true).endsWith('08:05 PM UTC'));
+  assert.ok(formatTimestamp(seconds, 'not/a-zone', true).endsWith('08:05 PM UTC'));
 });
