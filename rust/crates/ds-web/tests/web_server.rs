@@ -1718,12 +1718,12 @@ fn tasks_and_information_pass_the_production_path_gate() {
     assert_eq!(server.shutdown(), Ok(()));
 }
 
-/// Discover literal route registrations independently of the admission list, then ask the real
-/// router which methods are mounted. A registered API must never reach the static fallback at
-/// the production HTTP boundary. This catches a new handler even if its isolated tests pass.
-#[test]
-fn registered_api_handlers_are_admitted_by_the_production_path_gate() {
-    let mut paths = std::collections::BTreeSet::new();
+/// Every `/api` route pattern the desk's sources register with `.route(...)`, independently of
+/// the admission list. A registration whose path is a `const` (`.route(TASKS, ...)`) is resolved
+/// from that const's string literal; a registration whose path cannot be read at all (built at
+/// run time) is returned as an error, so it cannot hide from the checks below (t5163).
+fn registered_api_patterns() -> (std::collections::BTreeSet<String>, Vec<String>) {
+    let mut sources = Vec::new();
     let mut directories = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")];
     while let Some(dir) = directories.pop() {
         for entry in std::fs::read_dir(dir).unwrap() {
@@ -1731,18 +1731,91 @@ fn registered_api_handlers_are_admitted_by_the_production_path_gate() {
             if path.is_dir() {
                 directories.push(path);
             } else if path.extension().is_some_and(|ext| ext == "rs") {
-                let source = std::fs::read_to_string(path).unwrap();
-                for registration in source.split(".route(").skip(1) {
-                    if let Some(literal) = registration.trim_start().strip_prefix('"') {
-                        let pattern = literal.split('"').next().unwrap();
-                        if pattern.starts_with("/api/") {
-                            paths.insert(concrete_path(pattern));
-                        }
-                    }
-                }
+                sources.push((path.clone(), std::fs::read_to_string(path).unwrap()));
             }
         }
     }
+    // `const NAME: &str = "...";` anywhere in the sources.
+    let mut consts = std::collections::BTreeMap::new();
+    for (_, source) in &sources {
+        for line in source.lines() {
+            let line = line
+                .trim_start()
+                .trim_start_matches("pub ")
+                .trim_start_matches("pub(crate) ");
+            let Some(rest) = line.strip_prefix("const ") else {
+                continue;
+            };
+            let Some((name, value)) = rest.split_once(": &str = \"") else {
+                continue;
+            };
+            if let Some(value) = value.split('"').next() {
+                consts.insert(name.trim().to_string(), value.to_string());
+            }
+        }
+    }
+    let mut patterns = std::collections::BTreeSet::new();
+    let mut unresolved = Vec::new();
+    for (path, source) in &sources {
+        for registration in source.split(".route(").skip(1) {
+            let head = registration.trim_start();
+            let pattern = if let Some(literal) = head.strip_prefix('"') {
+                literal.split('"').next().unwrap().to_string()
+            } else {
+                let ident: String = head
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
+                    .collect();
+                let name = ident.rsplit("::").next().unwrap_or(&ident).to_string();
+                match consts.get(&name) {
+                    Some(value) => value.clone(),
+                    None => {
+                        unresolved.push(format!(
+                            "{}: .route({})",
+                            path.display(),
+                            head.chars().take(40).collect::<String>()
+                        ));
+                        continue;
+                    }
+                }
+            };
+            if pattern.starts_with("/api/") {
+                patterns.insert(pattern);
+            }
+        }
+    }
+    (patterns, unresolved)
+}
+
+/// t5163: the discovery reads a const path, and refuses a path it cannot read.
+#[test]
+fn route_discovery_reads_const_paths_and_reports_unreadable_ones() {
+    let (patterns, unresolved) = registered_api_patterns();
+    assert!(
+        patterns.contains("/api/tasks") && patterns.contains("/api/project-context/project/{name}")
+    );
+    assert!(
+        unresolved.is_empty(),
+        "route paths that cannot be read from the sources (use a literal or a const):\n{}",
+        unresolved.join("\n")
+    );
+}
+
+/// Discover route registrations independently of the admission list, then ask the real router
+/// which methods are mounted. A registered API must never reach the static fallback at the
+/// production HTTP boundary. This catches a new handler even if its isolated tests pass.
+/// Through the served desk (t5163): anonymous, every mounted route is refused with 401 unless it
+/// is one of the deliberately public routes (or validates its inputs first, 422); signed in,
+/// every mounted GET reaches its handler rather than the static page (a handler's own 404, or a
+/// 502 from the absent fixture daemon, still means it was routed).
+#[test]
+fn registered_api_handlers_are_admitted_by_the_production_path_gate() {
+    let (patterns, unresolved) = registered_api_patterns();
+    assert!(unresolved.is_empty(), "{unresolved:?}");
+    let paths: std::collections::BTreeSet<String> = patterns
+        .iter()
+        .map(|pattern| concrete_path(pattern))
+        .collect();
     assert!(paths.contains("/api/tasks") && paths.contains("/api/project-context/project/probe"));
     let (_root, config) = fixture();
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1765,14 +1838,46 @@ fn registered_api_handlers_are_admitted_by_the_production_path_gate() {
         mounted
     });
     assert!(mounted.iter().any(|(_, path)| path == "/api/tasks"));
+    // Routes that answer without a session on purpose.
+    const PUBLIC: [&str; 4] = ["/api/login", "/api/logout", "/api/health", "/api/version"];
+    // Routes whose required inputs are validated before the session, as FastAPI does: without
+    // them the answer is 422, which still serves nothing.
+    const VALIDATES_FIRST: [&str; 2] = ["/api/capability", "/api/uploads"];
     let server = Server::start(config);
-    for (method, path) in mounted {
-        let response = request(server.addr, &method, &path, &[], None);
-        assert_ne!(
-            response.text(),
-            "<h1>missing page</h1>",
-            "registered {method} {path} was sent to the static fallback"
+    let mut failures = Vec::new();
+    for (method, path) in &mounted {
+        let response = request(server.addr, method, path, &[], None);
+        if response.text() == "<h1>missing page</h1>" {
+            failures.push(format!(
+                "registered {method} {path} was sent to the static fallback"
+            ));
+        } else if !PUBLIC.contains(&path.as_str())
+            && response.status != 401
+            && !(VALIDATES_FIRST.contains(&path.as_str()) && response.status == 422)
+        {
+            failures.push(format!(
+                "{method} {path} without a session answered {} instead of 401",
+                response.status
+            ));
+        }
+    }
+    let cookie = format!("vp_session={}", login(server.addr));
+    for (method, path) in mounted.iter().filter(|(method, _)| method == "GET") {
+        let response = request(
+            server.addr,
+            method,
+            path,
+            &[("Cookie", cookie.as_str())],
+            None,
         );
+        // A handler may answer 404 itself (no such attachment, no dashboard checkout); only the
+        // static fallback page means the request was not routed.
+        if response.text() == "<h1>missing page</h1>" {
+            failures.push(format!(
+                "signed-in {method} {path} reached the static fallback"
+            ));
+        }
     }
     assert_eq!(server.shutdown(), Ok(()));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
