@@ -705,6 +705,17 @@ async fn operations_metrics(
     }
 }
 
+/// The caller's identity, for routes outside this module (t3250).
+pub(crate) async fn authenticate_identity(
+    backend: &dyn AuthBackend,
+    headers: &HeaderMap,
+    scheme: RequestScheme,
+) -> Result<Identity, Response> {
+    authenticate(backend, headers, scheme)
+        .await
+        .map_err(IntoResponse::into_response)
+}
+
 async fn authenticate(
     backend: &dyn AuthBackend,
     headers: &HeaderMap,

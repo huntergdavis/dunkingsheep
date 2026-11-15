@@ -1,0 +1,32 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { provenance, splitEntries, standing, viewStateText } from './project-info.js';
+
+test('every non-ok state has a plain sentence, with the reason when there is one', () => {
+  assert.equal(viewStateText({ state: 'ok' }), '');
+  assert.equal(viewStateText({ state: 'not_mapped' }), 'No information store is mapped for this project.');
+  assert.equal(viewStateText({ state: 'mapping_invalid', reason: 'the directory is not an absolute path' }),
+    'The mapping for this project is invalid: the directory is not an absolute path.');
+  assert.equal(viewStateText({ state: 'no_match' }), 'No entry matches the search.');
+  assert.equal(viewStateText(null), 'Loading…');
+  assert.equal(viewStateText({ state: 'weird' }), 'Unknown state.');
+});
+
+test('ground truths are kept apart from facts, in their order', () => {
+  const split = splitEntries([
+    { slug: 'g1', ground_truth: true }, { slug: 'f1', ground_truth: false }, { slug: 'g2', ground_truth: true }, { slug: 'h1' },
+  ]);
+  assert.deepEqual(split.groundTruths.map(e => e.slug), ['g1', 'g2']);
+  assert.deepEqual(split.others.map(e => e.slug), ['f1', 'h1']);
+  assert.deepEqual(splitEntries(undefined), { groundTruths: [], others: [] });
+});
+
+test('provenance and standing say what the entry is and whether to trust it', () => {
+  assert.equal(provenance({ type: 'rule', authority: 'owner', source: 'owner mail', stated: '2026-11-01' }),
+    'rule · authority: owner · source: owner mail · stated 2026-11-01');
+  assert.equal(provenance({}), '');
+  assert.deepEqual(standing({ retired: true, superseded_by: 'x', stale: true }),
+    ['retired', 'superseded by x', 'stale: re-check before trusting']);
+  assert.deepEqual(standing({ error: 'no front matter' }), ['unreadable: no front matter']);
+  assert.deepEqual(standing({}), []);
+});
