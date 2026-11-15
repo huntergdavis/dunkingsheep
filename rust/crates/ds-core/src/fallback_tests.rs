@@ -666,11 +666,18 @@ fn codex_swap_reports_its_required_args() {
     assert_eq!(decision["to"], "codex");
     assert_eq!(
         decision["wiring"]["args"],
-        json!(["-s", "danger-full-access", "-a", "never"])
+        json!(["--no-daemon", "-s", "danger-full-access", "-a", "never"])
     );
     // i33219 finding 4: paired native producers now exist, so a relauncher must wire codex's
     // turn producer rather than skip it.
     assert_eq!(decision["wiring"]["emits_turn_events"], true);
+}
+
+#[test]
+fn a_relaunched_codex_lane_runs_without_the_shared_daemon() {
+    // t4553: the relaunch wiring for codex starts it with --no-daemon.
+    let args = harness_wiring("codex")["args"].clone();
+    assert_eq!(args[0], "--no-daemon", "{args}");
 }
 
 #[test]

@@ -563,13 +563,20 @@ mod tests {
             None
         )
         .is_ok());
-        assert!(switch_argv(
+        // t4553: a model switch keeps --no-daemon.
+        let switched = switch_argv(
             &v(&["codex", "-c", "k=v", "-s", "workspace-write", "--no-daemon"]),
             "s",
             Some("m"),
-            None
+            None,
         )
-        .is_ok());
+        .unwrap();
+        assert!(
+            switched.contains(&"--no-daemon".to_string()),
+            "{switched:?}"
+        );
+        let again = switch_argv(&switched, "s", Some("n"), None).unwrap();
+        assert!(again.contains(&"--no-daemon".to_string()), "{again:?}");
     }
 
     #[test]

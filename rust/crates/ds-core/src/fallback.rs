@@ -57,11 +57,13 @@ pub fn tier_providers(tier: &str) -> &'static [&'static str] {
 pub fn harness_wiring(tier: &str) -> Value {
     match tier {
         "codex" => json!({
-            "args": ["-s", "danger-full-access", "-a", "never"],
+            // t4553: a worker's Codex runs without the shared app-server daemon, so its tool
+            // calls keep their own pane ancestry instead of sharing the owner's detached root.
+            "args": ["--no-daemon", "-s", "danger-full-access", "-a", "never"],
             // t310/t264 recorded that codex could not emit turn events; the paired native
             // producers accepted since then supersede that, so a relauncher must wire it.
             "emits_turn_events": true,
-            "note": "codex needs -s danger-full-access -a never; paired native turn producers now exist",
+            "note": "codex needs --no-daemon -s danger-full-access -a never; paired native turn producers now exist",
         }),
         "claude" => json!({
             "args": [],

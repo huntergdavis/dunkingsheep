@@ -89,6 +89,42 @@ fn result(
         .map_err(|e| DunkError::Refused(format!("{prefix}: {e}")))
 }
 
+/// t4553: a worker or reviewer Codex lane runs with `--no-daemon`, so its tool calls keep their
+/// own pane ancestry and never share the owner's detached app-server root. Returns the argv to
+/// start and a warning when it was changed or could not be. Any other role (owner, the VP seat,
+/// none given), any other program, and an argv that already has the flag are left alone. A
+/// `codex resume` argv is also left alone: whether a session created under the daemon resumes
+/// intact without it is not established.
+pub fn worker_codex_argv(
+    mut argv: Vec<String>,
+    role: Option<&str>,
+) -> (Vec<String>, Option<String>) {
+    let role = role.map(|role| role.trim().to_ascii_lowercase());
+    let worker = matches!(role.as_deref(), Some("worker" | "reviewer"));
+    let codex = argv
+        .first()
+        .is_some_and(|program| program.rsplit('/').next() == Some("codex"));
+    if !worker || !codex || argv.iter().any(|token| token == "--no-daemon") {
+        return (argv, None);
+    }
+    let role = role.unwrap_or_default();
+    if argv.get(1).map(String::as_str) == Some("resume") {
+        return (
+            argv,
+            Some(format!(
+                "--no-daemon not added to a {role} 'codex resume' command: a session created under the daemon is not known to resume intact without it"
+            )),
+        );
+    }
+    argv.insert(1, "--no-daemon".into());
+    (
+        argv,
+        Some(format!(
+            "added --no-daemon to the {role} Codex command (t4553): worker and reviewer Codex lanes do not share the app-server daemon"
+        )),
+    )
+}
+
 pub fn h_start_agent(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let name = required(&args, "name")?;
     let command = required(&args, "command")?;
@@ -97,6 +133,12 @@ pub fn h_start_agent(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         return Err(DunkError::Refused("agent name is required".into()));
     }
     let argv = split_command(&text(command)).map_err(DunkError::Refused)?;
+    let role_arg = arg(&args, "role");
+    let (argv, no_daemon_warning) =
+        worker_codex_argv(argv, role_arg.as_str().filter(|_| truthy(role_arg)));
+    if let Some(warning) = &no_daemon_warning {
+        eprintln!("start-agent: {warning}");
+    }
     if argv.is_empty() {
         return Err(DunkError::Refused(
             "command is required (e.g. 'claude' or 'codex --model gpt-5')".into(),
@@ -161,7 +203,9 @@ pub fn h_start_agent(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         }
         let project=context.flock.lane_project_set(panes,id,membership).map_err(|error|DunkError::Refused(format!("agent started in {id}, but project membership was not recorded: {error}")))?;
         context.flock.set_last_message(format!("Started agent {name}"));
-        Ok(json!({"agent":agent,"pane_id":pane_id,"name":name,"argv":started.get("argv").filter(|v|truthy(v)).cloned().unwrap_or_else(||json!(argv)),"child_pid":child_pid,"role":role,"membership":project}))
+        let mut reply=json!({"agent":agent,"pane_id":pane_id,"name":name,"argv":started.get("argv").filter(|v|truthy(v)).cloned().unwrap_or_else(||json!(argv)),"child_pid":child_pid,"role":role,"membership":project});
+        if let Some(warning)=&no_daemon_warning { reply["warnings"]=json!([warning]); }
+        Ok(reply)
     })
 }
 pub fn h_rename(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
@@ -269,6 +313,36 @@ pub(super) fn split_command(text: &str) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_and_reviewer_codex_get_no_daemon_and_nobody_else_does() {
+        let v = |a: &[&str]| a.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+        let (argv, warning) =
+            super::worker_codex_argv(v(&["codex", "--model", "m"]), Some("worker"));
+        assert_eq!(argv, v(&["codex", "--no-daemon", "--model", "m"]));
+        assert!(warning.unwrap().contains("added --no-daemon to the worker"));
+        let (argv, _) = super::worker_codex_argv(v(&["/opt/bin/codex"]), Some(" Reviewer "));
+        assert_eq!(argv, v(&["/opt/bin/codex", "--no-daemon"]));
+        // Already there, another program, or not a worker/reviewer: untouched, no warning.
+        for (argv, role) in [
+            (v(&["codex", "-m", "x", "--no-daemon"]), Some("worker")),
+            (v(&["claude"]), Some("worker")),
+            (v(&["codex"]), Some("owner")),
+            (v(&["codex"]), Some("vp")),
+            (v(&["codex"]), Some("planner")),
+            (v(&["codex"]), None),
+            (v(&["codexx"]), Some("worker")),
+        ] {
+            assert_eq!(super::worker_codex_argv(argv.clone(), role), (argv, None));
+        }
+        // A resume is not changed until resuming a daemon-created session without it is proven.
+        let resume = v(&["codex", "resume", "s-1"]);
+        let (argv, warning) = super::worker_codex_argv(resume.clone(), Some("worker"));
+        assert_eq!(argv, resume);
+        assert!(warning
+            .unwrap()
+            .contains("not added to a worker 'codex resume'"));
+    }
     #[test]
     fn agent_command_shlex_preserves_python_whitespace_and_errors() {
         assert_eq!(

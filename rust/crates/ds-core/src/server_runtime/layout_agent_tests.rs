@@ -334,6 +334,15 @@ fn layout_agent_role_success_preserves_raw_fields_and_final_message() {
     let saved: Value =
         serde_json::from_slice(&std::fs::read(dir.path().join("roles.json")).unwrap()).unwrap();
     assert_eq!(saved["lanes"]["w1:p-probe"]["role"], "worker");
+    // t4553: the worker's Codex was started with --no-daemon, and the reply says so.
+    assert_eq!(out["argv"], json!(["codex", "--no-daemon"]), "{out}");
+    assert!(
+        out["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("added --no-daemon"),
+        "{out}"
+    );
 }
 #[test]
 fn layout_agent_verification_failure_precedes_launch_and_role_writeback() {
