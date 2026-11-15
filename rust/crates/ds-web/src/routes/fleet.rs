@@ -40,6 +40,11 @@ pub enum FleetError {
 /// implement Python _post_message(direct=True), preserving the supplied identity.
 pub trait FleetSources: Send + Sync + 'static {
     fn registry(&self) -> Result<Value, FleetError>;
+    /// t4644: the names start-agent registered for panes (the terminal registry), by pane id.
+    /// Trusted, unlike a terminal title. Empty when it cannot be read.
+    fn registered_names(&self) -> HashMap<String, String> {
+        HashMap::new()
+    }
     fn session_mtimes(&self) -> Result<HashMap<String, f64>, FleetError>;
     fn inventory(&self, routed: &[String]) -> Value;
     fn configured_channels(&self) -> HashMap<String, Value>;
@@ -552,6 +557,7 @@ async fn api_fleet(
         return state.unavailable("pane roster contains an invalid pane");
     }
     let registry = state.sources.registry().unwrap_or(json!({}));
+    let registered_names = state.sources.registered_names();
     let mut activity = HashMap::new();
     let mut sessions = HashMap::new();
     let mut waiting = HashMap::new();
@@ -614,8 +620,12 @@ async fn api_fleet(
         } else {
             recorded
         };
+        // t4644: the lane registry, then the name start-agent registered for the pane; only
+        // then the pane's label or the roster's name (which may be tmux's window name).
         let name = if truth(recorded) {
             recorded.clone()
+        } else if let Some(registered) = registered_names.get(id).filter(|n| !n.trim().is_empty()) {
+            json!(registered)
         } else if truth(&pane["label"]) {
             pane["label"].clone()
         } else if let Some(listed) = roster_names
@@ -839,6 +849,7 @@ mod tests {
         replies: Mutex<HashMap<String, Value>>,
         now: Mutex<f64>,
         registry: Mutex<Value>,
+        registered: Mutex<HashMap<String, String>>,
         turns: Mutex<HashMap<String, f64>>,
         summary_error: Mutex<Option<String>>,
         local_failure: Mutex<bool>,
@@ -908,6 +919,9 @@ mod tests {
         }
     }
     impl FleetSources for Fake {
+        fn registered_names(&self) -> HashMap<String, String> {
+            self.registered.lock().unwrap().clone()
+        }
         fn registry(&self) -> Result<Value, FleetError> {
             if *self.local_failure.lock().unwrap() {
                 return Err(FleetError::Other("registry unavailable".into()));
@@ -1437,6 +1451,46 @@ mod tests {
         let differ: HashMap<String, i64> = [("lane".to_string(), 9), ("%1".to_string(), 2)].into();
         assert_eq!(lane_unread(&differ, "%1", "lane"), Some(2));
     }
+    /// t4644: a pane missing from the lane registry is named by the terminal registry (what
+    /// start-agent recorded), not by tmux's window name or the roster's fallback; the terminal
+    /// title is never used.
+    #[test]
+    fn fleet_rows_use_the_registered_name_before_tmux_names() {
+        let f = Fake::setup();
+        f.reply("list_panes", json!({"panes":[
+            {"pane_id":"%5","agent":"codex","cwd":"/a","terminal_title_stripped":"FORGED TITLE","tab_label":"tmux"},
+            {"pane_id":"%6","agent":"codex","cwd":"/b","tab_label":"bash"},
+        ]}));
+        f.reply("state_latest", json!({"rows":[]}));
+        f.reply(
+            "roster",
+            json!({"lanes":[{"name":"tmux","pane_id":"%5"},{"name":"bash","pane_id":"%6"}]}),
+        );
+        f.reply("owner_stats", json!({"pending":[]}));
+        f.reply(
+            "delivery_capability",
+            json!({"send":"guarded","drains":false}),
+        );
+        f.registered
+            .lock()
+            .unwrap()
+            .insert("%5".into(), "fixture-worker".into());
+        let (s, v) = http(app(f, true), "/api/fleet", None);
+        assert_eq!(s, 200);
+        let name = |pane: &str| {
+            v["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["pane_id"] == pane)
+                .unwrap()["name"]
+                .clone()
+        };
+        assert_eq!(name("%5"), "fixture-worker");
+        // Not registered: the old fallback (the roster's name) stays.
+        assert_eq!(name("%6"), "bash");
+    }
+
     #[test]
     fn fleet_rows_filter_sort_and_activity_precedence() {
         let f = Fake::setup();

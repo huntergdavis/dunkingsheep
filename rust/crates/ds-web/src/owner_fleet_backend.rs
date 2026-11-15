@@ -340,6 +340,39 @@ impl OwnerWebBackend for OwnerFleetBackend {
 }
 
 impl FleetSources for OwnerFleetBackend {
+    fn registered_names(&self) -> HashMap<String, String> {
+        // The terminal registry start-agent writes: DUNKINGSHEEP_TMUX_REGISTRY, else
+        // tmux-panes.json beside the lane registry. `{"panes": {"%5": {"name": ...}}}`.
+        let path = std::env::var_os("DUNKINGSHEEP_TMUX_REGISTRY")
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| self.config.lane_registry.with_file_name("tmux-panes.json"));
+        let Ok(metadata) = fs::metadata(&path) else {
+            return HashMap::new();
+        };
+        if metadata.len() > MAX_REGISTRY_BYTES {
+            return HashMap::new();
+        }
+        fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|value| value.get("panes").and_then(Value::as_object).cloned())
+            .map(|panes| {
+                panes
+                    .into_iter()
+                    .filter_map(|(pane, entry)| {
+                        let name = entry
+                            .get("name")
+                            .and_then(Value::as_str)?
+                            .trim()
+                            .to_string();
+                        (!name.is_empty()).then_some((pane, name))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn registry(&self) -> Result<Value, FleetError> {
         let metadata = match fs::metadata(&self.config.lane_registry) {
             Ok(metadata) => metadata,
