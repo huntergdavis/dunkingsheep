@@ -434,7 +434,7 @@ impl Flock {
         mailbox: Option<&str>,
         self_pane_id: Option<&str>,
     ) -> Result<(String, Vec<Message>), DunkError> {
-        let key = self.mailbox_or_self(env, mailbox, self_pane_id, false, false)?;
+        let key = self.mailbox_or_self(env, mailbox, self_pane_id, false, true)?;
         let messages = env.store().recover_delivery(&key)?;
         Ok((key, messages))
     }
@@ -954,11 +954,9 @@ impl Flock {
             .iter()
             .map(|m| m.summary.message_id.clone())
             .collect();
-        let marked = env.store().mark_read(&ids, None)?;
-        // t128: the mark commits BEFORE the socket response reaches the client, so a
-        // response lost after this point used to silently consume the batch. The receipt
-        // bounds recovery to the latest delivered batch per mailbox.
-        env.store().record_delivery(&key, &ids, None)?;
+        // t128/t4695: commit the mark and its bounded recovery receipt together.
+        // A receipt failure must not leave read mail with no recoverable body.
+        let marked = env.store().mark_read_with_receipt(&key, &ids, None)?;
         let now = env.now();
         for message in &mut messages {
             message.summary.state = "read".to_string();
@@ -989,9 +987,7 @@ impl Flock {
         mailbox: &str,
         ids: &[String],
     ) -> Result<usize, DunkError> {
-        let marked = env.store().mark_read(ids, None)?;
-        env.store().record_delivery(mailbox, ids, None)?;
-        Ok(marked)
+        env.store().mark_read_with_receipt(mailbox, ids, None)
     }
 }
 

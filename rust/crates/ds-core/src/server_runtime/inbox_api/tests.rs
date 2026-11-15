@@ -1763,3 +1763,99 @@ fn inbox_thread_human_producers_require_the_registered_bridge_label() {
         .is_err());
     dispatcher.close();
 }
+
+#[test]
+fn inbox_read_recovery_planner_keeps_lost_bodies_and_explicit_ack_scoped() {
+    let (_dir, services) = make_services("planner-read-recovery", factory(None), None);
+    services
+        .flock()
+        .with_roles(|roles, _| {
+            roles
+                .register("w4:p4", "planner", None, None, None, None, None, None)
+                .map(|_| ())
+        })
+        .unwrap();
+    let store = services.flock().stores().inbox.unwrap();
+    let send = |mailbox, body| {
+        store
+            .send(&crate::inbox_store::Outgoing {
+                mailbox,
+                body: Some(body),
+                ..Default::default()
+            })
+            .unwrap()
+    };
+    let a = send("w4:p4", "planner fixture body A");
+    let b = send("w4:p4", "planner fixture body B");
+    let other = send("w1:p1", "other lane fixture");
+    let dispatcher = services.dispatcher(handlers());
+    let planner = request("w4:p4");
+    dispatcher
+        .dispatch("inbox_read", &json!({"peek":true}), &planner)
+        .unwrap();
+    assert_eq!(store.get_message(&a).unwrap().summary.state, "queued");
+    assert!(crate::inbox::pending_delivery(store.read_pool(), "w4:p4")
+        .unwrap()
+        .is_none());
+    let read = dispatcher
+        .dispatch("inbox_read", &json!({}), &planner)
+        .unwrap();
+    assert!(
+        read.get("tasks").is_none(),
+        "messages-only default stays unchanged"
+    );
+    assert_eq!(read["marked_read"], 2);
+    for id in [&a, &b] {
+        let message = store.get_message(id).unwrap();
+        assert_eq!(message.summary.state, "read");
+        assert!(
+            crate::inbox::status(store.read_pool(), id, 0.0)
+                .unwrap()
+                .acked_at
+                .is_none(),
+            "a read still requires explicit acknowledgment"
+        );
+    }
+    // The caller loses this result after commit; neither an empty read nor another
+    // lost recovery response should destroy the recorded body batch (t128).
+    drop(read);
+    assert!(dispatcher
+        .dispatch("inbox_read", &json!({}), &planner)
+        .unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    for _ in 0..2 {
+        let recovered = dispatcher
+            .dispatch("inbox_recover", &json!({}), &planner)
+            .unwrap();
+        assert_eq!(recovered["messages"][0]["body"], "planner fixture body A");
+        assert_eq!(recovered["messages"][1]["body"], "planner fixture body B");
+    }
+    assert!(dispatcher
+        .dispatch("inbox_recover", &json!({"mailbox":"w1:p1"}), &planner)
+        .is_err());
+    assert!(dispatcher
+        .dispatch("inbox_ack", &json!({"message_ids":other}), &planner)
+        .is_err());
+    assert_eq!(store.get_message(&other).unwrap().summary.state, "queued");
+    let ack = dispatcher
+        .dispatch("inbox_ack", &json!({"message_ids":a}), &planner)
+        .unwrap();
+    assert_eq!(ack["still_pending"], json!([b]));
+    let rest = dispatcher
+        .dispatch("inbox_recover", &json!({}), &planner)
+        .unwrap();
+    assert_eq!(rest["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(rest["messages"][0]["body"], "planner fixture body B");
+    dispatcher
+        .dispatch("inbox_ack", &json!({"message_ids":b}), &planner)
+        .unwrap();
+    assert!(dispatcher
+        .dispatch("inbox_recover", &json!({}), &planner)
+        .unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    dispatcher.close();
+}

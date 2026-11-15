@@ -495,13 +495,15 @@ fn instructions_pin_the_rust_only_compact_inbox_default() {
     // inbox reads to messages only and documents the explicit task opt-in.
     assert!(INSTRUCTIONS.contains("inbox_read returns messages without task queues by default"));
     assert!(INSTRUCTIONS.contains("set include_tasks=true to include them"));
+    assert!(INSTRUCTIONS.contains("use inbox(action=\"recover\") before acknowledging"));
+    assert!(INSTRUCTIONS.contains("A read marks mail read but still requires explicit"));
     let digest = Sha256::digest(INSTRUCTIONS.as_bytes());
     let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
     assert_eq!(
-        "c8d89699e639ed9f88dd2803b1a9df1e4a9ba641c0c93f877d596d1a5ef6f335",
+        "a4e61abd5c7b90814a090b030095fd2662763a6a5ad2c5da8a608438589d1dd2",
         hex
     );
-    assert_eq!(5323, INSTRUCTIONS.len());
+    assert_eq!(5938, INSTRUCTIONS.len());
 }
 
 #[test]

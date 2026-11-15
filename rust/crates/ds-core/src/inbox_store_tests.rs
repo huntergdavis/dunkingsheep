@@ -1513,3 +1513,53 @@ fn thread_sidecar_is_additive_and_preserves_legacy_schema_and_sql() {
     drop(store);
     Store::open(&path, dir.path().join("blobs")).unwrap();
 }
+
+#[test]
+fn read_recovery_filters_legacy_receipt_ids_by_the_same_mailbox_scope_as_read() {
+    let fixture = Fixture::new();
+    let own = fixture.send("lane", "own legacy fixture");
+    let foreign = fixture.send("other", "foreign fixture");
+    let db = rusqlite::Connection::open(fixture.store.path()).unwrap();
+    db.execute("UPDATE messages SET mailbox='lane (%7)' WHERE id=?", [&own])
+        .unwrap();
+    assert!(fixture
+        .store
+        .mark_read_with_receipt("lane", &[own.clone(), foreign.clone()], Some(10.0))
+        .is_err());
+    assert_eq!(
+        fixture.store.get_message(&own).unwrap().summary.state,
+        "queued"
+    );
+    assert_eq!(
+        fixture.store.get_message(&foreign).unwrap().summary.state,
+        "queued"
+    );
+    // Old or malformed receipts must not turn an authorized mailbox recovery into
+    // access to a body outside that mailbox; valid legacy aliases still work.
+    fixture
+        .store
+        .record_delivery("lane", &[own.clone(), foreign.clone()], None)
+        .unwrap();
+    let recovered = fixture.store.recover_delivery("lane").unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].summary.message_id, own);
+    assert_eq!(recovered[0].body, "own legacy fixture");
+    assert_eq!(
+        crate::inbox::pending_delivery(&fixture.pool(), "lane")
+            .unwrap()
+            .unwrap()
+            .message_ids,
+        vec![own.clone()]
+    );
+    assert_eq!(
+        fixture
+            .store
+            .mark_read_with_receipt("lane", std::slice::from_ref(&own), Some(20.0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        fixture.store.get_message(&foreign).unwrap().summary.state,
+        "queued"
+    );
+}

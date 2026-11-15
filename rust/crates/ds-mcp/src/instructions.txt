@@ -17,7 +17,15 @@ everyone). task(action="follow") asks the daemon to PUSH the next task to you wh
 pane is idle, reusing the dunk idle gate and guarded inbox nudge, so you do not
 poll. task(action="add|list|read|update|assign|block|unblock") manage the queue. scope is 'global' (default, fleet-wide) or
 'self' (your pane only). inbox_read returns messages without task queues by default;
-set include_tasks=true to include them. task(action="metrics") is the timeseries-friendly query endpoint
+set include_tasks=true to include them. A read marks mail read but still requires explicit
+acknowledgment after you receive and display the bodies. If a read response is
+lost or contains no bodies, use inbox(action="recover") before acknowledging.
+Recovery replays your latest non-empty batch; empty reads preserve it. Every
+inbox-reading role, including planners, can recover and acknowledge its own
+mail under the same mailbox authorization as read. Ordinary lanes must not
+recover foreign mail. After displaying the recovered bodies,
+inbox(action="ack", message_ids=[...]) confirms only those IDs. A newer
+non-empty read replaces the one-batch buffer. task(action="metrics") is the timeseries-friendly query endpoint
 (queue depth, status/priority/scope mix, per-assignee load, created/claimed/
 completed throughput in hourly or daily buckets, completion and claim latency)
 for a status board or the CTO. Everything is priority order, dependency

@@ -1002,3 +1002,77 @@ fn thread_origin_is_daemon_stamped_and_a_lane_cannot_claim_human_ingress() {
     assert_eq!(info["sender_route_kind"], "human");
     assert_eq!(info["recipient_route_kind"], "lane");
 }
+
+// t4695: preserves the response-loss contract of tests/test_dunk_response_loss.py (t128).
+#[test]
+fn read_recovery_refuses_foreign_lane_and_owner_mailboxes() {
+    let (e, d) = (env("worker"), tempfile::tempdir().unwrap());
+    let f = flock(&d);
+    for mailbox in ["Other", "owner"] {
+        let id = put(&e, mailbox, "private fixture body");
+        e.store
+            .record_delivery(mailbox, std::slice::from_ref(&id), None)
+            .unwrap();
+        let before = crate::inbox::pending_delivery(e.store.read_pool(), mailbox)
+            .unwrap()
+            .unwrap();
+        assert!(
+            f.inbox_recover(&e, Some(mailbox), Some("w1:p1")).is_err(),
+            "ordinary lane must not recover a foreign mailbox"
+        );
+        let after = crate::inbox::pending_delivery(e.store.read_pool(), mailbox)
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.message_ids, after.message_ids);
+        assert_eq!(before.delivered_at, after.delivered_at);
+    }
+}
+
+#[test]
+fn read_recovery_receipt_failure_leaves_mail_queued_and_prior_batch_recoverable() {
+    let (e, d) = (env("worker"), tempfile::tempdir().unwrap());
+    let f = flock(&d);
+    let prior = put(&e, "Mine", "previous delivered fixture");
+    f.inbox_read_with_options(&e, None, 10, false, false, Some("w1:p1"))
+        .unwrap();
+    let id = put(&e, "Mine", "body must not disappear");
+    let db = rusqlite::Connection::open(e.store.path()).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_receipt BEFORE INSERT ON deliveries BEGIN SELECT RAISE(ABORT, 'receipt failed'); END;").unwrap();
+    let error = f
+        .inbox_read_with_options(&e, None, 10, false, false, Some("w1:p1"))
+        .unwrap_err();
+    assert!(error.to_string().contains("receipt failed"));
+    let message = e.store.get_message(&id).unwrap();
+    assert_eq!(
+        message.summary.state, "queued",
+        "failed receipt commit must roll back read marking"
+    );
+    assert!(message.read_at.is_none());
+    assert_eq!(
+        e.store.recover_delivery("Mine").unwrap()[0]
+            .summary
+            .message_id,
+        prior
+    );
+    db.execute_batch("DROP TRIGGER fail_receipt").unwrap();
+    let read = f
+        .inbox_read_with_options(&e, None, 10, false, false, Some("w1:p1"))
+        .unwrap();
+    assert_eq!(read.messages[0].summary.message_id, id);
+    assert_eq!(read.marked_read, Some(1));
+    // Discard that response, perform an empty read, then recover it and explicitly ack.
+    assert!(f
+        .inbox_read_with_options(&e, None, 10, false, false, Some("w1:p1"))
+        .unwrap()
+        .messages
+        .is_empty());
+    let (_, recovered) = f.inbox_recover(&e, None, Some("w1:p1")).unwrap();
+    assert_eq!(recovered[0].body, "body must not disappear");
+    f.inbox_ack(&e, std::slice::from_ref(&id), None, Some("w1:p1"))
+        .unwrap();
+    assert!(f
+        .inbox_recover(&e, None, Some("w1:p1"))
+        .unwrap()
+        .1
+        .is_empty());
+}

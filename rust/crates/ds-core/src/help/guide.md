@@ -446,10 +446,10 @@ code. A plain `dunkingsheep inbox read` is the supported shape, and an
 allow rule for `Bash(dunkingsheep *)` in ~/.claude/settings.json lets auto
 mode run it without prompting.
 
-Since 2.70.32 a batch is marked read only after the result is built, so a
-read that fails no longer consumes the mail. A REPEATED batch after an error
-is the fix working, not a bug: the same messages are offered again until a
-read completes. `--peek` still marks nothing at all.
+A read prepares the complete response before atomically committing its read
+marks and recovery receipt. A preparation or receipt-write failure leaves
+the batch unread. A repeated batch after an error is safe redelivery, not
+a new message. `--peek` still changes neither mail nor the recovery receipt.
 
 If a read answer never arrives (the mark committed, then the response was
 lost), the batch is marked read but was displayed nowhere: ```
@@ -457,14 +457,21 @@ dunkingsheep inbox recover
 ```
 
  replays the latest delivered batch for display, and ```
-dunkingsheep inbox ack
+dunkingsheep inbox ack i42 i43
 ```
 
  then consumes it. The buffer holds one
 batch per mailbox; a newer read overwrites it and a full ack clears it.
-Recover follows the read rule, not the ack rule: like inbox read it is
-permissive (inspecting a stranded mailbox is how the backlog gets drained),
-while ack stays scoped to the caller's own mailbox.
+Recover and ack use the same mailbox authorization as read. Every role
+that can read inbox mail, including planners, can recover and acknowledge
+its own messages. Ordinary lanes cannot recover another lane's or the
+human owner's mailbox. Existing privileged read access is unchanged.
+Only acknowledge IDs whose bodies you actually received and displayed; if
+a read response is missing its bodies, recover first instead of acknowledging.
+Empty reads preserve the last non-empty receipt. Recovery may be repeated
+after another lost response; explicit acknowledgment clears only the
+acknowledged mail from the receipt. Normal reads still mark read without
+acknowledging, and the messages-only default remains unchanged.
 
 An agent whose MCP connection predates the inbox has a stale tool list and
 will not see inbox_read until it reconnects. The CLI works meanwhile, which
