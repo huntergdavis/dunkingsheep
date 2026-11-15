@@ -631,6 +631,35 @@ impl Roles {
         parsed
     }
 
+    /// t4782: the units a system token with this label may be used from, from the `"units"`
+    /// section of `system-token-panes.json`: `{"units": {"<label>": ["dunkingsheep-x.service"]}}`.
+    /// `None` when the file or its `"units"` section is absent, or the file is not trusted (the
+    /// same rule as the pane list): today's behaviour, no unit check. A label the section does
+    /// not name lists no unit.
+    pub fn system_token_units(&self, label: &str) -> Option<Vec<String>> {
+        let path = self.tokens_path.parent()?.join(SYSTEM_TOKEN_PANES_FILE);
+        let meta = std::fs::metadata(&path).ok()?;
+        {
+            use std::os::unix::fs::MetadataExt;
+            if !system_token_panes_trusted(meta.uid(), meta.mode(), nix::unistd::geteuid().as_raw())
+            {
+                return None;
+            }
+        }
+        let listed: Value = serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
+        let units = listed.get("units")?.as_object()?;
+        Some(
+            units
+                .get(label)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|unit| unit.as_str().map(str::trim).map(String::from))
+                .filter(|unit| !unit.is_empty())
+                .collect(),
+        )
+    }
+
     /// Non-secret label for a currently valid owner token; never return its value or hash.
     pub fn owner_token_audit_label(&mut self, token: &str) -> Result<Option<String>, DunkError> {
         if token.is_empty() {
