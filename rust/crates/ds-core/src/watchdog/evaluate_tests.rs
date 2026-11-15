@@ -379,3 +379,54 @@ fn python_missing_store_error(path: &std::path::Path) -> String {
     assert!(output.status.success());
     String::from_utf8(output.stdout).unwrap().trim().to_string()
 }
+
+#[test]
+fn seven_inventory_rules_share_one_provider_and_report_fixture_counts() {
+    let fixture = Fixture::new();
+    fixture.tasks_db();
+    fixture.inbox_db();
+    Connection::open(fixture.path("inbox.db")).unwrap().execute_batch(
+        "ALTER TABLE messages ADD COLUMN sender TEXT; ALTER TABLE messages ADD COLUMN read_at REAL;"
+    ).unwrap();
+    let rules = [
+        "fleet.assignment_starvation",
+        "host.load",
+        "inbox.ambiguous_sender",
+        "inbox.unread_dead",
+        "inbox.unread_live",
+        "lane.idle_holding_task",
+        "lane.working_without_task",
+    ];
+    let mut config = fixture.config(&rules);
+    config["panes"]["source"] = json!("daemon");
+    config["panes"]["pane_id_pattern"] = json!("^%[0-9]+$");
+    let calls = Cell::new(0);
+    let provider = || {
+        calls.set(calls.get() + 1);
+        Ok(Some(Panes::from([
+            ("%81".into(), "working".into()),
+            ("%82".into(), "idle".into()),
+        ])))
+    };
+    let host = |_: &Path| {
+        Ok(HostSample {
+            load1: 100.0,
+            load5: Some(100.0),
+            cpus: 1,
+            used_fraction: 0.5,
+            free_bytes: 50_000_000_000,
+            inode_used_fraction: 0.1,
+        })
+    };
+    let _heavy = test_seam::fix_heavy_jobs(0);
+    let result = evaluate(&config, NOW, Some(&provider), Some(&host), Some(&rules));
+    assert_eq!(result["errors"], json!([]));
+    assert_eq!(result["skipped"], json!([]));
+    assert_eq!(calls.get(), 1);
+    let findings = result["findings"].as_array().unwrap();
+    for rule in rules {
+        let count = findings.iter().filter(|f| f["rule"] == rule).count();
+        let expected = usize::from(matches!(rule, "host.load" | "lane.working_without_task"));
+        assert_eq!(count, expected, "{rule}: {result}");
+    }
+}
