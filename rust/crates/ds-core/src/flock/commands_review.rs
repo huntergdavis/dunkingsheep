@@ -43,6 +43,15 @@ impl GitHubTransport for BorrowedGitHubTransport<'_> {
 }
 
 impl ReviewTaskActor for &Flock {
+    fn pr_author<'a>(
+        &'a self,
+        repo: &'a str,
+        number: i64,
+        head: &'a str,
+    ) -> ReviewFuture<'a, Result<Option<crate::tasks::pr_author::Attribution>, String>> {
+        <Flock as ReviewTaskActor>::pr_author(self, repo, number, head)
+    }
+
     fn set_accounting_pr<'a>(
         &'a self,
         id: &'a str,
@@ -318,6 +327,7 @@ impl Flock {
                     "pr": wire.get("pr").cloned().unwrap_or(Value::Null),
                     "head": wire.get("head").and_then(Value::as_str).unwrap_or_default().chars().take(12).collect::<String>(),
                     "author": wire.get("author").cloned().unwrap_or(Value::Null),
+                    "author_provenance": wire.get("body").and_then(Value::as_str).and_then(|body|body.lines().rev().find_map(|l|l.strip_prefix("Author provenance: "))),
                     "reviewer": reviewer,
                     "age_s": age_s,
                     "verdict": wire.get("verdict").cloned().unwrap_or(Value::Null),

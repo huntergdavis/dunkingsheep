@@ -824,7 +824,7 @@ pub static COMMANDS: &[Command] = &[
     Command {
         name: "pr_wait",
         description: "One-shot durable PR wait. Supply target=owner/repo#PR and optional full head SHA, list=true, or cancel=ID. Sends one inbox notice; read-only on GitHub. Driven by review-sync.",
-        params: &[Param { name: "target", schema: "{\"type\":\"string\"}" }, Param { name: "head", schema: "{\"type\":\"string\"}" }, Param { name: "list", schema: "{\"type\":\"boolean\"}" }, Param { name: "cancel", schema: "{\"type\":\"integer\"}" }],
+        params: &[Param { name: "target", schema: "{\"type\":\"string\"}" }, Param { name: "head", schema: "{\"type\":\"string\"}" }, Param { name: "author_task", schema: "{\"type\":\"string\",\"description\":\"Declare authorship from caller-owned live work-task lease; requires full head. Ordinary waiters are not authors.\"}" }, Param { name: "list", schema: "{\"type\":\"boolean\"}" }, Param { name: "cancel", schema: "{\"type\":\"integer\"}" }],
         dispatch_required: &[],
         required: &[],
         mcp: true,

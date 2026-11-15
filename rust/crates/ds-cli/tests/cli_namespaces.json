@@ -16326,6 +16326,7 @@
    "wait"
   ],
   "namespace": {
+   "author_task": null,
    "cancel": null,
    "command": "pr",
    "head": null,
@@ -16345,6 +16346,7 @@
    "--json"
   ],
   "namespace": {
+   "author_task": null,
    "cancel": null,
    "command": "pr",
    "head": null,
@@ -16364,6 +16366,7 @@
    "wait"
   ],
   "namespace": {
+   "author_task": null,
    "cancel": null,
    "command": "pr",
    "head": null,
@@ -16384,6 +16387,7 @@
    "x"
   ],
   "namespace": {
+   "author_task": null,
    "cancel": null,
    "command": "pr",
    "head": "x",
@@ -16400,9 +16404,31 @@
   "argv": [
    "pr",
    "wait",
+   "--author-task",
+   "x"
+  ],
+  "namespace": {
+   "author_task": "x",
+   "cancel": null,
+   "command": "pr",
+   "head": null,
+   "json": false,
+   "list": false,
+   "no_start_daemon": false,
+   "pr_command": "wait",
+   "self_pane": null,
+   "socket": null,
+   "target": null
+  }
+ },
+ {
+  "argv": [
+   "pr",
+   "wait",
    "--list"
   ],
   "namespace": {
+   "author_task": null,
    "cancel": null,
    "command": "pr",
    "head": null,
@@ -16423,6 +16449,7 @@
    "1"
   ],
   "namespace": {
+   "author_task": null,
    "cancel": 1,
    "command": "pr",
    "head": null,

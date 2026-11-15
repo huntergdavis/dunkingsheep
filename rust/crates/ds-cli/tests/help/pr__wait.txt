@@ -1,13 +1,16 @@
-usage: dunkingsheep pr wait [-h] [--head HEAD] [--list] [--cancel CANCEL]
-                            [--json]
+usage: dunkingsheep pr wait [-h] [--head HEAD] [--author-task AUTHOR_TASK]
+                            [--list] [--cancel CANCEL] [--json]
                             [target]
 
 positional arguments:
-  target           owner/repo#PR
+  target                owner/repo#PR
 
 options:
-  -h, --help       show this help message and exit
-  --head HEAD      full expected head SHA
-  --list           list your waits and poll timestamps
-  --cancel CANCEL  cancel your wait by ID
+  -h, --help            show this help message and exit
+  --head HEAD           full expected head SHA
+  --author-task AUTHOR_TASK
+                        declare authorship using your identity-bound live
+                        work-task lease; requires --head
+  --list                list your waits and poll timestamps
+  --cancel CANCEL       cancel your wait by ID
   --json

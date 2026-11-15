@@ -695,3 +695,70 @@ fn pr_wait_production_sweep_delivers_pending_event_once_through_inbox_send() {
     f.dispatch("review_sync", json!({}), "%owner").unwrap();
     assert_eq!(store.read("owner", 10, true, false).unwrap().len(), 1);
 }
+
+#[test]
+fn review_author_registration_uses_bound_caller_not_wait_observers() {
+    let f = Fixture::with(&["reviewer"], lanes());
+    f.services
+        .flock()
+        .remember_lane("%worker", "wait-worker", true);
+    f.services
+        .flock()
+        .remember_lane("%reviewer", "wait-reviewer", true);
+    let tasks = f.tasks();
+    let head = "a".repeat(40);
+    f.dispatch(
+        "pr_wait",
+        json!({"target":"o/r#7","head":head}),
+        "%reviewer",
+    )
+    .unwrap();
+    assert!(f
+        .block_on(tasks.pr_author("o/r", 7, &head))
+        .unwrap()
+        .is_none());
+    let pid = i64::from(std::process::id());
+    let start = crate::proc::process_start(pid).unwrap();
+    let task = f
+        .block_on(tasks.add_with(
+            "global",
+            "writer task",
+            "private fixture",
+            AddOptions {
+                assignees: vec!["%worker".into()],
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    f.block_on(tasks.claim_next(
+        "global",
+        "%worker",
+        crate::tasks::ClaimOptions {
+            caller: Some((pid, Some(start.clone()), None)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let args = json!({"target":"o/r#7","head":head,"author_task":task.id});
+    assert!(f.dispatch("pr_wait", args.clone(), "%worker").is_err());
+    let request = RequestCtx {
+        self_pane_id: Some("%worker".into()),
+        identity_bound: Some(true),
+        caller: Some(crate::proc::Caller::new(
+            Some(pid),
+            Some(start),
+            None,
+            Some("%worker".into()),
+            "agent",
+        )),
+        ..Default::default()
+    };
+    let result = f
+        .services
+        .production_dispatcher()
+        .dispatch("pr_wait", &args, &request)
+        .unwrap();
+    assert_eq!(result["authorship"]["author"], "%worker");
+    assert_eq!(result["authorship"]["contributors"], json!(["%worker"]));
+    assert!(f.endpoint.requests().is_empty());
+}

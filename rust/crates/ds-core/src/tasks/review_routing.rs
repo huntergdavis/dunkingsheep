@@ -75,6 +75,9 @@ pub(super) fn apply(
                 .filter(|a| !a.is_empty()),
         );
     }
+    if let (Some(repo), Some(pr)) = (repo, pr) {
+        authors.extend(super::pr_author::contributors(conn, repo, pr).map_err(db::map_sqlite)?);
+    }
     let mut candidates = snapshot.candidates;
     candidates.sort_by(|a, b| a.pane.cmp(&b.pane));
     candidates.dedup_by(|a, b| a.pane == b.pane);
@@ -113,7 +116,7 @@ pub(super) fn apply(
         format!("reviewer inventory unavailable: {error}")
     } else if project.is_none() {
         "repository has no explicit project mapping".into()
-    } else if authors.is_empty() {
+    } else if author.is_none_or(str::is_empty) {
         "author provenance unavailable".into()
     } else {
         match eligible.len() {
@@ -379,6 +382,37 @@ mod tests {
             .unwrap()
             .iter()
             .all(|c| c["eligible"] == false && c["reason"].is_string()));
+    }
+
+    #[tokio::test]
+    async fn review_author_unknown_even_with_recorded_workers_never_assigns() {
+        let tasks = setup("unknown-with-workers", &["%2"]).await;
+        tasks
+            .add_with(
+                "global",
+                "related work",
+                "",
+                AddOptions {
+                    repo: Some("o/r".into()),
+                    pr: Some("7".into()),
+                    assignees: vec!["%1".into()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let (task, meta) = file(
+            &tasks,
+            Snapshot {
+                candidates: vec![candidate("%2")],
+                unavailable: None,
+            },
+            None,
+        )
+        .await;
+        assert!(decode_list(Some(&task.assignees)).is_empty());
+        assert_eq!(meta["reason"], "author provenance unavailable");
+        assert_eq!(meta["known_authors"], json!(["%1"]));
     }
 
     #[tokio::test]

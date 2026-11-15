@@ -398,3 +398,62 @@ pub fn git_credential(ns: &Map<String, Value>, stdin: &mut dyn BufRead) -> Outco
         code: 0,
     }
 }
+
+/// An older daemon may ignore a new optional parameter: never report that as attribution.
+pub fn pr_wait_command(ns: &Map<String, Value>, args: Map<String, Value>) -> Outcome {
+    let mut client = match connect(ns) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let result = match call(&mut client, "pr_wait", args.clone()) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if !confirmed_pr_author(&args, &result) {
+        return fail("daemon did not confirm authorship (the wait may be registered); use an attribution-aware daemon and repeat the same command".into(),2);
+    }
+    finish(ns, &result, &|v| {
+        format!("{}\n", serde_json::to_string_pretty(v).unwrap())
+    })
+}
+fn confirmed_pr_author(args: &Map<String, Value>, result: &Value) -> bool {
+    let Some(task) = args.get("author_task").and_then(Value::as_str) else {
+        return true;
+    };
+    let a = &result["authorship"];
+    a["declaration_task"].as_str() == Some(task)
+        && a["head"]
+            .as_str()
+            .zip(args.get("head").and_then(Value::as_str))
+            .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+        && a["author"].as_str().is_some_and(|s| !s.is_empty())
+        && a["declared_by"].as_str().is_some_and(|s| {
+            !s.is_empty()
+                && a["contributors"]
+                    .as_array()
+                    .is_some_and(|v| v.iter().any(|p| p.as_str() == Some(s)))
+        })
+}
+#[cfg(test)]
+mod pr_author_receipt_tests {
+    use super::*;
+    #[test]
+    fn review_author_cli_requires_explicit_receipt_from_new_daemon() {
+        let args = json!({"head":"a".repeat(40),"author_task":"t1"})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(!confirmed_pr_author(
+            &args,
+            &json!({"registered":true,"id":1})
+        ));
+        let mut receipt = json!({"authorship":{"head":"a".repeat(40),"declaration_task":"t1","declared_by":"%2","author":"%1","contributors":["%1","%2"]}});
+        assert!(confirmed_pr_author(&args, &receipt));
+        receipt["authorship"]["head"] = json!("b".repeat(40));
+        assert!(!confirmed_pr_author(&args, &receipt));
+        assert!(confirmed_pr_author(
+            &Map::new(),
+            &json!({"registered":true})
+        ));
+    }
+}

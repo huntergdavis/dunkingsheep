@@ -282,7 +282,7 @@ def build():
     commands.append(RustOnlyTaskBatchClaim())
     pr_wait = RustOnlyTaskOwner(
         "pr_wait", "One-shot durable PR wait. Supply target=owner/repo#PR and optional full head SHA, list=true, or cancel=ID. Sends one inbox notice; read-only on GitHub. Driven by review-sync.",
-        {"target": {"type": "string"}, "head": {"type": "string"},
+        {"target": {"type": "string"}, "head": {"type": "string"}, "author_task": {"type": "string", "description": "Declare authorship from caller-owned live work-task lease; requires full head. Ordinary waiters are not authors."},
          "list": {"type": "boolean"}, "cancel": {"type": "integer"}}, [])
     pr_wait.mcp = True
     pr_wait.owner_only = False

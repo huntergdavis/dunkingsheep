@@ -637,6 +637,32 @@ impl Flock {
         raw_subject: Option<&Value>,
         raw_attachments: Option<&Value>,
     ) -> Result<SendResult, DunkError> {
+        self.inbox_send_wire_keyed(env, args, raw_subject, raw_attachments, None)
+    }
+    /// Trusted daemon notices only. No socket/CLI parameter exposes the transport key.
+    pub(crate) fn inbox_review_notice(
+        &self,
+        env: &dyn InboxEnv,
+        args: &SendArgs,
+        key: &str,
+    ) -> Result<SendResult, DunkError> {
+        let subject = args.subject.map(|s| Value::String(s.into()));
+        self.inbox_send_wire_keyed(
+            env,
+            args,
+            subject.as_ref(),
+            Some(&Value::Array(vec![])),
+            Some(key),
+        )
+    }
+    fn inbox_send_wire_keyed(
+        &self,
+        env: &dyn InboxEnv,
+        args: &SendArgs,
+        raw_subject: Option<&Value>,
+        raw_attachments: Option<&Value>,
+        key: Option<&str>,
+    ) -> Result<SendResult, DunkError> {
         let self_pane = args.self_pane_id.filter(|p| !p.is_empty());
         if let Some(system) = args.system_sender {
             if !SYSTEM_SENDERS.contains(&system) {
@@ -829,28 +855,51 @@ impl Flock {
                 } else {
                     Some(own.into_iter().collect())
                 };
+            if let Some(key) = key {
+                context.dedupe_external_id = true;
+                context.transport_ref = Some(crate::inbox_store::ThreadTransportRef {
+                    transport: "review-notice".into(),
+                    channel: "review".into(),
+                    external_id: key.into(),
+                    parent_external_id: None,
+                });
+            }
             Some(context)
         };
-        let snapshot = env.store().send_snapshot_wire_agent_only(
-            &Outgoing {
-                mailbox: &mailbox,
-                body: Some(&body),
-                subject: subject.as_deref(),
-                sender: sender.as_deref(),
-                mailbox_label: Some(&label),
-                pane_id: pane_id.as_deref(),
-                attachments: args.attach,
-                transport: args.human_origin.then_some("web"),
-                thread,
-                ..Default::default()
-            },
-            stored_subject,
-            raw_attachments,
-            args.agent_only,
-        )?;
+        let outgoing = Outgoing {
+            mailbox: &mailbox,
+            body: Some(&body),
+            subject: subject.as_deref(),
+            sender: sender.as_deref(),
+            mailbox_label: Some(&label),
+            pane_id: pane_id.as_deref(),
+            attachments: args.attach,
+            transport: args.human_origin.then_some("web"),
+            thread,
+            ..Default::default()
+        };
+        let (snapshot, created) = if key.is_some() {
+            env.store().send_thread_snapshot_wire(
+                &outgoing,
+                stored_subject,
+                raw_attachments,
+                args.agent_only,
+            )?
+        } else {
+            (
+                env.store().send_snapshot_wire_agent_only(
+                    &outgoing,
+                    stored_subject,
+                    raw_attachments,
+                    args.agent_only,
+                )?,
+                true,
+            )
+        };
         let message_id = snapshot.summary.message_id.clone();
         let mut notified = false;
-        if args.notify
+        if created
+            && args.notify
             && (args.wake_quiet
                 || !recipient_is_quiet(
                     env.inbox_silent_mailboxes().as_deref(),

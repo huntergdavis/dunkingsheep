@@ -150,6 +150,7 @@ def load_parser():
     wait = actions.add_parser("wait", help="register a PR wait, then end the turn")
     wait.add_argument("target", nargs="?", help="owner/repo#PR")
     wait.add_argument("--head", help="full expected head SHA")
+    wait.add_argument("--author-task", dest="author_task", help="declare authorship using your identity-bound live work-task lease; requires --head")
     wait.add_argument("--list", action="store_true", help="list your waits and poll timestamps")
     wait.add_argument("--cancel", type=int, help="cancel your wait by ID")
     wait.add_argument("--json", action="store_true", default=argparse.SUPPRESS)

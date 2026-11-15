@@ -54,6 +54,15 @@ pub trait ReviewTaskStore {
 /// Async actor operations needed by the source-faithful ReviewSync methods.
 /// Production uses `Tasks`; tests inject a recording actor without opening a live DB.
 pub trait ReviewTaskActor {
+    fn pr_author<'a>(
+        &'a self,
+        _repo: &'a str,
+        _number: i64,
+        _head: &'a str,
+    ) -> ReviewFuture<'a, Result<Option<crate::tasks::pr_author::Attribution>, String>> {
+        Box::pin(async { Ok(None) })
+    }
+
     fn accounting_review<'a>(
         &'a self,
         _repo: &'a str,
@@ -145,6 +154,19 @@ pub trait ReviewTaskActor {
 }
 
 impl ReviewTaskActor for Tasks {
+    fn pr_author<'a>(
+        &'a self,
+        repo: &'a str,
+        number: i64,
+        head: &'a str,
+    ) -> ReviewFuture<'a, Result<Option<crate::tasks::pr_author::Attribution>, String>> {
+        Box::pin(async move {
+            Tasks::pr_author(self, repo, number, head)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
     fn accounting_review<'a>(
         &'a self,
         repo: &'a str,
@@ -335,6 +357,20 @@ fn attached_review_tasks(flock: &Flock) -> Result<std::sync::Arc<Tasks>, crate::
 }
 
 impl ReviewTaskActor for Flock {
+    fn pr_author<'a>(
+        &'a self,
+        repo: &'a str,
+        number: i64,
+        head: &'a str,
+    ) -> ReviewFuture<'a, Result<Option<crate::tasks::pr_author::Attribution>, String>> {
+        Box::pin(async move {
+            let tasks = attached_review_tasks(self).map_err(|e| e.to_string())?;
+            Tasks::pr_author(&tasks, repo, number, head)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
     fn accounting_review<'a>(
         &'a self,
         repo: &'a str,
@@ -2589,6 +2625,11 @@ where
     X: GitHubTransport,
 {
     async fn explicit_author(&self, repo: &str, pr: &ReviewPull) -> Option<String> {
+        match self.flock.pr_author(repo, pr.number, &pr.head).await {
+            Ok(Some(attribution)) => return attribution.author,
+            Err(_) => return None,
+            Ok(None) => {}
+        }
         let authors = self.flock.authors_of(repo, pr.number).await.ok()?;
         let mut authors: std::collections::BTreeSet<_> = authors.into_iter().collect();
         authors.extend(self.branch_task_authors(repo, pr).await.ok()?);
@@ -3046,7 +3087,17 @@ where
                     continue;
                 }
                 let expected_verdict_ids = Vec::new();
-                let body = review_body(&pr, &detail, author.as_deref());
+                let mut body = review_body(&pr, &detail, author.as_deref());
+                let source = match self.flock.pr_author(&repo, pr.number, &pr.head).await {
+                    Ok(Some(a)) => format!(
+                        "guarded author-task declaration; task {}; accumulated contributors: {}",
+                        a.task.as_deref().unwrap_or("none for this head"),
+                        a.contributors.join(", ")
+                    ),
+                    Ok(None) if author.is_some() => "existing explicit task evidence".to_owned(),
+                    _ => "unknown: no unambiguous current-head attribution".to_owned(),
+                };
+                body.push_str(&format!("\nAuthor provenance: {source}\n"));
                 let id = match self
                     .flock
                     .add_review_task(ReviewTaskRequest {

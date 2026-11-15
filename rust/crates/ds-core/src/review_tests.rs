@@ -4967,3 +4967,69 @@ async fn sweep_refreshes_live_reviews_after_github_and_cancels_only_older_heads(
     );
     assert_eq!(2, sync.transport.requests.lock().unwrap().len());
 }
+
+#[tokio::test]
+async fn review_author_declaration_resolves_exact_head_and_does_not_carry_to_new_head() {
+    let dir = crate::testsupport::dir("review-author-exact");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let work = store
+        .add_with(
+            "global",
+            "work",
+            "",
+            AddOptions {
+                assignees: vec!["%260".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let pid = i64::from(std::process::id());
+    let start = crate::proc::process_start(pid).unwrap();
+    store
+        .claim_next(
+            "global",
+            "%260",
+            crate::tasks::ClaimOptions {
+                caller: Some((pid, Some(start.clone()), None)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let head = "a".repeat(40);
+    let caller =
+        crate::proc::Caller::new(Some(pid), Some(start), None, Some("%260".into()), "agent");
+    store
+        .declare_pr_author(
+            &work.id,
+            "o/r",
+            7,
+            &head,
+            "%260",
+            &caller,
+            crate::clock::now_s(),
+        )
+        .await
+        .unwrap();
+    let sync = ReviewSync::with_transport(
+        store,
+        FakeReviewTokens(Ok("test-token".into())),
+        FakeReviewPolicy { required: 2 },
+        "https://api.example.test",
+        FakeReviewTransport::with_responses([]),
+    );
+    let v = open_pull(7, &head, "arbitrary/not-a-task");
+    let mut flat = v[0].clone();
+    flat["head"] = flat["head"]["sha"].clone();
+    let pull = parse_review_pull("o/r", &flat).unwrap();
+    assert_eq!(
+        sync.explicit_author("o/r", &pull).await.as_deref(),
+        Some("%260")
+    );
+    let v = open_pull(7, &"b".repeat(40), "arbitrary/not-a-task");
+    let mut flat = v[0].clone();
+    flat["head"] = flat["head"]["sha"].clone();
+    let pull = parse_review_pull("o/r", &flat).unwrap();
+    assert!(sync.explicit_author("o/r", &pull).await.is_none());
+}
