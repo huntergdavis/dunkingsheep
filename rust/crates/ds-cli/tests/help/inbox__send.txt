@@ -1,6 +1,6 @@
 usage: dunkingsheep inbox send [-h] [--subject SUBJECT] [--agent-only]
                                [--attach PATH] [--no-notify] [--literal]
-                               [--body-file PATH]
+                               [--body-file PATH] [--reply-to PARENT_ID]
                                to [body ...]
 
 positional arguments:
@@ -18,5 +18,6 @@ options:
                         ($( ${ or a backtick)
   --body-file PATH      read the body from a file ('-' for stdin): immune to
                         shell substitution
+  --reply-to PARENT_ID  explicit versioned parent message ID
 
 example: dunkingsheep inbox send reviewer 'PR 12 is ready' -s 'review'

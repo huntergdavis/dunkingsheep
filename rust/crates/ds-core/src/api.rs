@@ -1002,6 +1002,7 @@ impl Dispatcher {
     /// Register the T39 owner delivery and mailbox view handlers.
     pub fn register_owner_delivered_message_state_reply_stats(&mut self) {
         self.register("owner_delivered", h_owner_delivered);
+        self.register("owner_delivered_thread", h_owner_delivered_thread);
         self.register("owner_page", h_owner_page);
         self.register("owner_page_confirmed", h_owner_page_confirmed);
         self.register("message_state", h_message_state);
@@ -1013,6 +1014,7 @@ impl Dispatcher {
         self.register("owner_handoff", h_owner_handoff);
         self.register("owner_reply", h_owner_reply);
         self.register("owner_ingest", h_owner_ingest);
+        self.register("owner_ingest_thread", h_owner_ingest_thread);
         self.register("owner_outbox", h_owner_outbox);
     }
 
@@ -2059,6 +2061,57 @@ pub fn h_report_list(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
     crate::report::report_list_handler(context, args)
 }
 
+/// Private bridge receipt records all external chunks atomically with delivery.
+pub fn h_owner_delivered_thread(
+    context: &HandlerContext<'_>,
+    args: Args,
+) -> Result<Value, DunkError> {
+    require_telegram_thread_bridge(context)?;
+    let string = |key: &str| {
+        args.get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| DunkError::Refused(format!("{key} is required")))
+    };
+    let id = string("message_id")?;
+    let transport = string("transport")?;
+    if transport != "telegram" {
+        return Err(DunkError::Refused(
+            "bridge receipts require telegram transport".into(),
+        ));
+    }
+    let channel = string("transport_channel")?;
+    let ids = args
+        .get("transport_message_ids")
+        .and_then(Value::as_array)
+        .ok_or_else(|| DunkError::Refused("transport message IDs must be an array".into()))?;
+    if ids.is_empty() || ids.len() > 100 {
+        return Err(DunkError::Refused("invalid transport message IDs".into()));
+    }
+    let references = ids
+        .iter()
+        .map(|id| {
+            id.as_str()
+                .map(|id| crate::inbox_store::ThreadTransportRef {
+                    transport: transport.into(),
+                    channel: channel.into(),
+                    external_id: id.into(),
+                    parent_external_id: None,
+                })
+                .ok_or_else(|| DunkError::Refused("invalid transport message ID".into()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let stores = context.flock.stores();
+    let store = stores
+        .inbox
+        .as_ref()
+        .ok_or_else(|| DunkError::Refused("inbox unavailable".into()))?;
+    let message = store.mark_delivered_with_refs(id, Some(transport), None, references)?;
+    Ok(
+        json!({"message":owner_message_value(&message),"transport":transport,"delivered_at":message.summary.delivered_at}),
+    )
+}
+
 /// `dunk_api.h_owner_delivered`.
 pub fn h_owner_delivered(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let message_id = args
@@ -2127,6 +2180,23 @@ pub fn h_owner_conversation(context: &HandlerContext<'_>, args: Args) -> Result<
         let conversation = crate::owner::OwnerConversations::new(context.flock, context.env)
             .conversation_filtered_cursor(limit, before_id, context.self_pane_id(), filter)?;
         let mut value = serde_json::to_value(conversation).map_err(DunkError::from)?;
+        if filter.thread_view().is_some() {
+            let revision = if let Some(first) =
+                value["messages"].as_array().and_then(|rows| rows.first())
+            {
+                first["view_revision"]
+                    .as_u64()
+                    .ok_or_else(|| DunkError::Refused("missing thread view revision".into()))?
+            } else {
+                context
+                    .flock
+                    .stores()
+                    .inbox
+                    .ok_or_else(|| DunkError::Refused("owner inbox store is not attached".into()))?
+                    .thread_view_revision()?
+            };
+            value["view_revision"] = json!(revision);
+        }
         if filtered {
             value["source_filter"] = json!(filter.name());
             value["include_internal"] = json!(filter.include_internal());
@@ -2298,23 +2368,159 @@ pub fn h_owner_page_confirmed(
     }))
 }
 
+/// The bridge has a dedicated registered token; unrelated system timers cannot claim a human.
+fn require_telegram_thread_bridge(context: &HandlerContext<'_>) -> Result<(), DunkError> {
+    let role = context
+        .flock
+        .caller_role(context.self_pane_id(), context.env)?;
+    let label = match context.request.service_token.as_deref() {
+        Some(token) => context
+            .flock
+            .with_roles(|roles, _| roles.token_label(token))?,
+        None => None,
+    };
+    if context.self_pane_id().is_some()
+        || role != "system"
+        || label.as_deref() != Some("telegram-bridge")
+    {
+        return Err(DunkError::Refused(
+            "thread operation requires the dedicated telegram-bridge service token".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Internal producer operation; the public legacy ingest cannot claim human provenance.
+pub fn h_owner_ingest_thread(
+    context: &HandlerContext<'_>,
+    mut args: Args,
+) -> Result<Value, DunkError> {
+    args.insert("threaded".into(), json!(true));
+    h_owner_ingest(context, args)
+}
+
 /// `dunk_api.h_owner_ingest`.
 pub fn h_owner_ingest(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
-    let ingested = crate::owner::OwnerConversations::new(context.flock, context.env).ingest_wire(
-        crate::owner::conversations::OwnerIngestWire {
-            body: args.get("body"),
-            transport: args.get("transport"),
-            external_id: args.get("external_id"),
-            subject: args.get("subject"),
-            attachments: args.get("attach"),
-        },
-        context.self_pane_id(),
-    )?;
+    let service = crate::owner::OwnerConversations::new(context.flock, context.env);
+    let wire = crate::owner::conversations::OwnerIngestWire {
+        body: args.get("body"),
+        transport: args.get("transport"),
+        external_id: args.get("external_id"),
+        subject: args.get("subject"),
+        attachments: args.get("attach"),
+    };
+    let threaded = match args.get("threaded") {
+        None | Some(Value::Bool(false)) => false,
+        Some(Value::Bool(true)) => true,
+        _ => return Err(DunkError::Refused("threaded must be a boolean".into())),
+    };
+    let ingested = if threaded {
+        let role = context
+            .flock
+            .caller_role(context.self_pane_id(), context.env)?;
+        if context.self_pane_id().is_some() || !matches!(role.as_str(), "web" | "system") {
+            return Err(DunkError::Refused(
+                "threaded human ingress requires the web or bridge service".into(),
+            ));
+        }
+        if role == "system" {
+            require_telegram_thread_bridge(context)?;
+        }
+        let expected_transport = if role == "web" { "web" } else { "telegram" };
+        if args.get("transport").and_then(Value::as_str) != Some(expected_transport) {
+            return Err(DunkError::Refused(
+                "human ingress transport does not match its producer".into(),
+            ));
+        }
+        let mut thread = crate::inbox_store::ThreadWrite::root(
+            crate::inbox_store::ThreadKind::Human,
+            crate::inbox_store::ThreadSender::Human,
+        );
+        thread.sender_route = crate::inbox_store::ThreadRoute::Human;
+        thread.recipient_route = crate::inbox_store::ThreadRoute::Vp;
+        thread.route_reply = true;
+        thread.parent_id = match args.get("parent_id") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(id)) if crate::inbox::valid_message_id(id) => Some(id.clone()),
+            _ => return Err(DunkError::Refused("invalid parent message ID".into())),
+        };
+        let reference = |key: &str| -> Result<Option<String>, DunkError> {
+            match args.get(key) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::String(s)) if !s.is_empty() && s.len() <= 160 => Ok(Some(s.clone())),
+                _ => Err(DunkError::Refused("invalid transport reference".into())),
+            }
+        };
+        let channel = reference("transport_channel")?;
+        let external = reference("transport_message_id")?;
+        match (channel, external) {
+            (None, None) => {
+                if reference("parent_transport_id")?.is_some() {
+                    return Err(DunkError::Refused(
+                        "transport parent requires message coordinates".into(),
+                    ));
+                }
+            }
+            (Some(channel), Some(external_id)) => {
+                let transport = args
+                    .get("transport")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        DunkError::Refused("transport reference requires a transport".into())
+                    })?;
+                thread.transport_ref = Some(crate::inbox_store::ThreadTransportRef {
+                    transport: transport.to_owned(),
+                    channel,
+                    external_id,
+                    parent_external_id: reference("parent_transport_id")?,
+                });
+            }
+            _ => {
+                return Err(DunkError::Refused(
+                    "transport channel and message ID must be provided together".into(),
+                ))
+            }
+        }
+        service.ingest_lineage_wire(wire, thread, context.self_pane_id())?
+    } else {
+        if [
+            "parent_id",
+            "transport_channel",
+            "transport_message_id",
+            "parent_transport_id",
+        ]
+        .iter()
+        .any(|key| args.get(*key).is_some_and(|v| !v.is_null()))
+        {
+            return Err(DunkError::Refused(
+                "lineage requires authenticated threaded ingress".into(),
+            ));
+        }
+        service.ingest_wire(wire, context.self_pane_id())?
+    };
     // t1613: a new Telegram question nudges the desk once. The web route tells the desk itself.
     // t4645/t4671: tell the single registered owner lane for new Telegram and web questions. For
     // web the desk pane is only looked up, never nudged here, so an owner lane that is also the
     // desk the web route tells is not told twice.
-    if !ingested.duplicate {
+    let thread_info = if threaded {
+        context
+            .flock
+            .stores()
+            .inbox
+            .as_ref()
+            .map(|store| store.thread_info(&ingested.message.summary.message_id))
+            .transpose()?
+            .flatten()
+    } else {
+        None
+    };
+    let lane_reply = thread_info
+        .as_ref()
+        .is_some_and(|t| t["recipient_route_kind"] == "lane");
+    if !ingested.duplicate && lane_reply {
+        notify_thread_lane(context, &ingested.message);
+    }
+    if !ingested.duplicate && !lane_reply {
         let desk_pane = match ingested.transport.as_str() {
             "telegram" => Some(nudge_desk_for_telegram(context, &ingested.message)),
             "web" => Some(default_desk_pane_id(context)),
@@ -2329,11 +2535,48 @@ pub fn h_owner_ingest(context: &HandlerContext<'_>, args: Args) -> Result<Value,
             );
         }
     }
-    Ok(json!({
-        "message": owner_message_value(&ingested.message),
-        "duplicate": ingested.duplicate,
-        "transport": ingested.transport,
-    }))
+    let mut result = json!({"message":owner_message_value(&ingested.message),"duplicate":ingested.duplicate,"transport":ingested.transport});
+    if threaded {
+        result["thread"] = json!(thread_info);
+    }
+    Ok(result)
+}
+
+fn notify_thread_lane(context: &HandlerContext<'_>, message: &crate::inbox_store::Message) {
+    let _ = context.env.with_inbox_env(&mut |env| {
+        let (mailbox, label, pane) =
+            context
+                .flock
+                .resolve_mailbox(env, &message.summary.mailbox, None, false, "")?;
+        if crate::inbox::normalise_mailbox(&mailbox)
+            != crate::inbox::normalise_mailbox(&message.summary.mailbox)
+        {
+            return Ok(Value::Null);
+        }
+        if let Some(pane) = pane {
+            if !crate::flock::commands_inbox::recipient_is_quiet(
+                env.inbox_silent_mailboxes().as_deref(),
+                &mailbox,
+                &label,
+                Some(&pane),
+            ) {
+                let count = context.flock.inbox_count(env, Some(&mailbox), None)?.unread;
+                let notice = crate::flock::commands_inbox::notice_text(
+                    &mailbox,
+                    count,
+                    message.summary.sender.as_deref(),
+                    message.summary.subject.as_deref(),
+                );
+                if env
+                    .fold_into_queued_notice(&pane, &notice, &message.summary.message_id)
+                    .is_none()
+                {
+                    env.send_now(&pane, &notice, &message.summary.message_id)?;
+                }
+            }
+        }
+        Ok(Value::Null)
+    });
 }
 
 /// Best effort: a missing desk or a refused write never fails the ingest, because the mailbox row is
@@ -2364,6 +2607,8 @@ fn nudge_desk_for_telegram(
                 agent_only: false,
                 role_sender: None,
                 wake_quiet: false,
+                parent_id: None,
+                human_origin: false,
             },
             None,
             None,
@@ -2416,6 +2661,8 @@ fn nudge_owner_lane_for_owner_message(
                 agent_only: false,
                 role_sender: None,
                 wake_quiet: true,
+                parent_id: None,
+                human_origin: false,
             },
             None,
             None,
@@ -2817,6 +3064,8 @@ pub fn h_review_sync(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
                             agent_only: false,
                             role_sender: None,
                             wake_quiet: false,
+                            parent_id: None,
+                            human_origin: false,
                         },
                     )?;
                     Ok(Value::Null)

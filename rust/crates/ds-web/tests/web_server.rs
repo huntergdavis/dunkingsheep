@@ -1406,9 +1406,10 @@ fn pane_inbox_is_reachable_through_the_composed_desk_without_weakening_auth() {
             "delivery_capability" if args.get("target") == Some(&json!("%7")) => {
                 Ok(json!({"alive": true, "send": "guarded"}))
             }
-            "inbox_send" => Ok(json!({
+            "inbox_send_human" => Ok(json!({
                 "message_id": "i501", "state": "queued", "mailbox": "fixture-lane",
-                "notified": true
+                "notified": true,
+                "thread": {"thread_version":1,"root_id":"i501","parent_id":null,"conversation_kind":"human","sender_kind":"human"}
             })),
             _ => Err("not provided by this fixture".to_owned()),
         }
@@ -1434,16 +1435,19 @@ fn pane_inbox_is_reachable_through_the_composed_desk_without_weakening_auth() {
     assert_eq!(stored.json()["message_id"], "i501");
     assert_eq!(stored.json()["outcome"], "stored");
     assert_eq!(stored.json()["notified"], true);
+    assert_eq!(stored.json()["thread"]["root_id"], "i501");
+    assert_eq!(stored.json()["thread"]["sender_kind"], "human");
     let sends: Vec<_> = daemon
         .sent()
         .into_iter()
-        .filter(|sent| sent.command == "inbox_send")
+        .filter(|sent| matches!(sent.command.as_str(), "inbox_send" | "inbox_send_human"))
         .collect();
     assert_eq!(
         sends.len(),
         1,
         "unauthorized requests must not reach the daemon"
     );
+    assert_eq!(sends[0].command, "inbox_send_human");
     assert_eq!(sends[0].args["to"], "%7");
     assert_eq!(sends[0].args["body"], "hello lane");
     assert_eq!(sends[0].token.as_deref(), Some("web-desk-test-token"));

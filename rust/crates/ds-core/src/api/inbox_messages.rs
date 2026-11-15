@@ -7,6 +7,7 @@ impl Dispatcher {
     pub fn register_inbox_messages(&mut self) {
         for (name, handler) in [
             ("inbox_send", h_inbox_send as Handler),
+            ("inbox_send_human", h_inbox_send_human as Handler),
             ("inbox_send_agent_only", h_inbox_send_agent_only as Handler),
             ("inbox_count", h_inbox_count),
             ("inbox_list", h_inbox_list),
@@ -419,6 +420,15 @@ pub fn h_inbox_fetch(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkEr
     })
 }
 
+pub fn h_inbox_send_human(c: &HandlerContext<'_>, mut args: Args) -> Result<Value, DunkError> {
+    if c.self_pane_id().is_some() || c.flock.caller_role(None, c.env)? != "web" {
+        return Err(DunkError::Refused(
+            "human inbox sends require the web service".into(),
+        ));
+    }
+    args.insert("human_origin".into(), json!(true));
+    h_inbox_send(c, args)
+}
 pub fn h_inbox_send(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let to = args
         .get("to")
@@ -458,6 +468,16 @@ pub fn h_inbox_send(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
             .caller_role(None, c.env)
             .is_ok_and(|role| role == "web"))
     .then_some(crate::flock::mailbox::OWNER_DESK);
+    let parent_id = match args.get("parent_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(id)) if crate::inbox::valid_message_id(id) => Some(id.as_str()),
+        _ => return Err(DunkError::Refused("invalid parent message ID".into())),
+    };
+    let human_origin = match args.get("human_origin") {
+        None | Some(Value::Bool(false)) => false,
+        Some(Value::Bool(true)) => true,
+        _ => return Err(DunkError::Refused("human_origin must be a boolean".into())),
+    };
     c.env.with_inbox_env(&mut |env| {
         let r = c.flock.inbox_send_wire(
             env,
@@ -476,12 +496,22 @@ pub fn h_inbox_send(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
                     _ => return Err(DunkError::Refused("agent_only must be a boolean".into())),
                 },
                 wake_quiet: false,
+                parent_id,
+                human_origin,
             },
             args.get("subject"),
             args.get("attach"),
         )?;
         let mut out = owner_message_value(&r.snapshot);
         out["notified"] = json!(r.notified);
+        let thread = if human_origin {
+            env.store().thread_info(&r.snapshot.summary.message_id)?
+        } else {
+            None
+        };
+        if let Some(thread) = thread {
+            out["thread"] = thread;
+        }
         if let Some(v) = r.redirected {
             out["redirected"] = v;
         }

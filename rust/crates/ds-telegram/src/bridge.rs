@@ -464,6 +464,15 @@ impl<D: Daemon, B: Bot> Bridge<D, B> {
             "telegram:{}",
             update.get("update_id").map(display).unwrap_or_default()
         );
+        let transport_message_id = message
+            .get("message_id")
+            .and_then(as_int)
+            .ok_or_else(|| BridgeError::Value("Telegram message has no message ID".into()))?
+            .to_string();
+        let parent_transport_id = message
+            .pointer("/reply_to_message/message_id")
+            .and_then(as_int)
+            .map(|id| id.to_string());
         if let Some(spec) = attachment_spec(message)? {
             if spec
                 .file_size
@@ -491,11 +500,14 @@ impl<D: Daemon, B: Bot> Bridge<D, B> {
                 &content,
             )?;
             let ingested = self.daemon.call(
-                "owner_ingest",
+                "owner_ingest_thread",
                 args(json!({
                     "body": text,
                     "transport": "telegram",
                     "external_id": external_id,
+                "transport_channel": display(&chat_id),
+                "transport_message_id": transport_message_id,
+                "parent_transport_id": parent_transport_id,
                     "subject": Value::Null,
                     "attach": [staged],
                 })),
@@ -505,6 +517,13 @@ impl<D: Daemon, B: Bot> Bridge<D, B> {
                 let _ = std::fs::remove_dir(parent);
             }
             let ingested = ingested?;
+            if ingested
+                .pointer("/thread/unresolved_parent")
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                self.send_text(&chat_id,"That earlier message is unavailable as a thread parent. Your message starts a new conversation.")?;
+            }
             let message_id = ingested
                 .pointer("/message/message_id")
                 .map(display)
@@ -532,11 +551,14 @@ impl<D: Daemon, B: Bot> Bridge<D, B> {
         // t594: the question is a row in the ONE owner mailbox, recorded with its transport. The
         // daemon dedupes on external_id, so a redelivered update returns the row it produced.
         let ingested = self.daemon.call(
-            "owner_ingest",
+            "owner_ingest_thread",
             args(json!({
                 "body": text,
                 "transport": "telegram",
                 "external_id": external_id,
+                "transport_channel": display(&chat_id),
+                "transport_message_id": transport_message_id,
+                "parent_transport_id": parent_transport_id,
                 "subject": Value::Null,
             })),
         )?;
@@ -544,6 +566,13 @@ impl<D: Daemon, B: Bot> Bridge<D, B> {
             .pointer("/message/message_id")
             .map(display)
             .unwrap_or_default();
+        if ingested
+            .pointer("/thread/unresolved_parent")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            self.send_text(&chat_id,"That earlier message is unavailable as a thread parent. Your message starts a new conversation.")?;
+        }
         let again = if truthy(ingested.get("duplicate")) {
             " (already recorded)"
         } else {
@@ -614,21 +643,24 @@ impl<D: Daemon, B: Bot> Bridge<D, B> {
         let Bridge {
             paths, daemon, bot, ..
         } = self;
+        let sent_ids = std::cell::RefCell::new(Vec::<String>::new());
         let send = |body: &str| -> Result<(), BridgeError> {
+            sent_ids.borrow_mut().clear();
             for part in chunks(body, CHUNK_LIMIT) {
-                bot.call(
-                    "sendMessage",
-                    args(json!({"chat_id": chat_id, "text": part})),
-                )?;
+                let receipt =
+                    bot.call("sendMessage", args(json!({"chat_id":chat_id,"text":part})))?;
+                let id = receipt.get("message_id").and_then(as_int).ok_or_else(|| {
+                    BridgeError::Value(
+                        "Telegram send returned no message ID; delivery is unconfirmed".into(),
+                    )
+                })?;
+                sent_ids.borrow_mut().push(id.to_string());
             }
             Ok(())
         };
         let mark = |message_id: &str, kind: &str| -> Result<(), BridgeError> {
             if kind == KIND_REPLY || kind == KIND_MAILBOX_PAGE {
-                daemon.call(
-                    "owner_delivered",
-                    args(json!({"message_id": message_id, "transport": "telegram"})),
-                )?;
+                daemon.call("owner_delivered_thread",args(json!({"message_id":message_id,"transport":"telegram","transport_channel":display(&chat_id),"transport_message_ids":sent_ids.borrow().clone()})))?;
                 if kind == KIND_REPLY {
                     return Ok(());
                 }

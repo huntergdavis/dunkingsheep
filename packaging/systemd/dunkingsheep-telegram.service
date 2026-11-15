@@ -15,7 +15,7 @@ Type=simple
 # the cutover needed two drop-ins to start it. Every working unit here runs the
 # installed CLI wrapper instead, which carries its own path and takes a subcommand.
 ExecStart=/home/hunter/.local/bin/dunkingsheep --no-start-daemon telegram-bridge run
-Environment=DUNKINGSHEEP_SERVICE_TOKEN_FILE=%h/.config/dunkingsheep/system-token
+Environment=DUNKINGSHEEP_SERVICE_TOKEN_FILE=%h/.config/dunkingsheep/telegram-bridge-token
 # NO WorkingDirectory: no working unit sets one, and there is no `current` to point at.
 # NO DUNKINGSHEEP_DIR: that variable is the CONFIG dir (dunk_server derives SOCKET_PATH
 # and LOG_FILE from it), so a release path would send the bridge hunting for the daemon

@@ -42,6 +42,8 @@ fn post_inbox(
         agent_only,
         role_sender: None,
         wake_quiet,
+        parent_id: None,
+        human_origin: false,
     };
     let sent = flock
         .inbox_send(env, &args)

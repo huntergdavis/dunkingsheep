@@ -974,3 +974,31 @@ fn quiet_recipient_matches_after_redirect_in_both_directions() {
         );
     }
 }
+
+#[test]
+fn thread_origin_is_daemon_stamped_and_a_lane_cannot_claim_human_ingress() {
+    let (mut e, d) = (env("worker"), tempfile::tempdir().unwrap());
+    let f = flock(&d);
+    let mut args = send("w1:p2", Some("w1:p1"));
+    args.notify = false;
+    args.human_origin = true;
+    assert!(f.inbox_send(&e, &args).is_err());
+    args.human_origin = false;
+    let agent = f.inbox_send(&e, &args).unwrap();
+    let info = e.store.thread_info(&agent.message_id).unwrap().unwrap();
+    assert_eq!(info["sender_kind"], "agent");
+    assert_eq!(info["conversation_kind"], "other");
+    e.paneless = Some("web");
+    let mut args = send("w1:p2", None);
+    args.notify = false;
+    let legacy = f.inbox_send(&e, &args).unwrap();
+    assert!(e.store.thread_info(&legacy.message_id).unwrap().is_none());
+    args.human_origin = true;
+    args.role_sender = Some(super::mailbox::OWNER_DESK);
+    let human = f.inbox_send(&e, &args).unwrap();
+    let info = e.store.thread_info(&human.message_id).unwrap().unwrap();
+    assert_eq!(info["sender_kind"], "human");
+    assert_eq!(info["conversation_kind"], "human");
+    assert_eq!(info["sender_route_kind"], "human");
+    assert_eq!(info["recipient_route_kind"], "lane");
+}

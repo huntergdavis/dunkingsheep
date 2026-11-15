@@ -211,6 +211,16 @@ pub const WEB_DENIED: [&str; 30] = [
 /// get `READ_ONLY` plus their own extras; an UNKNOWN role gets `READ_ONLY` only (the
 /// Python's `ALLOW.get(role, READ_ONLY)`).
 pub fn allowed(role: &str, command: &str) -> bool {
+    if command == "owner_delivered_thread" {
+        return role == "system";
+    }
+    if command == "owner_ingest_thread" {
+        return matches!(role, "web" | "system");
+    }
+    if command == "inbox_send_human" {
+        return role == "web";
+    }
+
     if command == "pr_wait" {
         return matches!(role, "owner" | "planner" | "worker" | "reviewer");
     }

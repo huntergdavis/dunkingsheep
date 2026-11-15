@@ -4465,6 +4465,9 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                 let mut args = Map::new();
                 args.insert("to".into(), ns.get("to").cloned().unwrap_or(Value::Null));
                 args.insert("body".into(), Value::String(body));
+                if let Some(parent) = ns.get("parent_id").filter(|v| !v.is_null()) {
+                    args.insert("parent_id".into(), parent.clone());
+                }
                 let subject = ns.get("subject").and_then(Value::as_str).unwrap_or("");
                 let agent_only = matches!(ns.get("agent_only"), Some(Value::Bool(true)));
                 if agent_only

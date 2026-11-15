@@ -643,6 +643,14 @@ mod tests {
                 Err("fake refusal".into())
             }
         }
+        // A failed assertion must also reap the private oracle and release inherited FDs.
+        struct OracleProcess(std::process::Child);
+        impl Drop for OracleProcess {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
         let script = r#"
 import dunk_http, dunk_terminal
@@ -662,14 +670,16 @@ server = ThreadingHTTPServer(('127.0.0.1', 0), dunk_http.Handler)
 print(server.server_port, flush=True)
 server.serve_forever()
 "#;
-        let mut child = Command::new("python3")
-            .args(["-u", "-c", script])
-            .env("PYTHONPATH", root)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start CPython oracle");
-        let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut child = OracleProcess(
+            Command::new("python3")
+                .args(["-u", "-c", script])
+                .env("PYTHONPATH", root)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("start CPython oracle"),
+        );
+        let mut output = std::io::BufReader::new(child.0.stdout.take().unwrap());
         let mut port = String::new();
         output.read_line(&mut port).unwrap();
         let port = port.trim().parse::<u16>().expect("oracle port");
@@ -811,8 +821,7 @@ server.serve_forever()
             );
         }
         compare_expect_continue(port, router(FakeDaemon::default(), OracleBackend));
-        child.kill().unwrap();
-        child.wait().unwrap();
+        drop(child);
     }
 
     fn compare_oracle_request(port: u16, app: Router, request: &[u8], case: usize) {

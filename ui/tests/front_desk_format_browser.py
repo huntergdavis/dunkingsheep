@@ -54,7 +54,7 @@ def mock(route):
                             'created_at': '2026-11-08T00:00:00Z', 'attachments': []},
                            {'id': 2, 'role': 'owner', 'body': RAW,
                             'created_at': '2026-11-08T00:01:00Z', 'attachments': []}]}
-        value.update({'next_before': None, 'source_filter': 'human_threads', 'include_internal': False})
+        value.update({'next_before': None, 'view_revision':0, 'source_filter': 'human_threads', 'include_internal': False})
         for row in value['items']:
             row.update({'audience': None, 'conversation_source': 'human', 'mailbox': 'owner', 'thread_version': 1, 'parent_id': None, 'root_id': f"i{row['id']}", 'conversation_kind': 'human', 'sender_kind': 'human' if row.get('role') == 'owner' else 'agent'})
     else:

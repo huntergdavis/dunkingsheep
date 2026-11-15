@@ -382,10 +382,10 @@ fn h_inbox_fetch_matches_python() {
 }
 
 #[test]
-fn inbox_registration_inventory_has_exactly_fourteen_unique_handlers() {
+fn inbox_registration_inventory_has_exactly_fifteen_unique_handlers() {
     let h = handlers();
     let names = h.registration_attempts();
-    assert_eq!(names.len(), 14);
+    assert_eq!(names.len(), 15);
     let unique = names
         .iter()
         .copied()
@@ -394,6 +394,7 @@ fn inbox_registration_inventory_has_exactly_fourteen_unique_handlers() {
         unique,
         std::collections::BTreeSet::from([
             "inbox_send",
+            "inbox_send_human",
             "inbox_send_agent_only",
             "inbox_count",
             "inbox_list",
@@ -1554,5 +1555,211 @@ fn inbox_body_view_only_owner_and_web_can_retrieve_even_with_agent_opt_in() {
         "owner body"
     );
     assert!(store.get_message(&id).unwrap().read_at.is_none());
+    dispatcher.close();
+}
+
+#[test]
+fn inbox_vp_recipient_snapshot_is_independent_of_service_token_role() {
+    let (_dir, services) = make_services("thread-target-role", factory(None), None);
+    let dispatcher = services.dispatcher(handlers());
+    let store = services.flock().stores().inbox.unwrap();
+    let (web, system) = services
+        .flock()
+        .with_roles(|roles, _| {
+            Ok((
+                roles.issue_token("web", Some("private-web-fixture"), None)?,
+                roles.issue_token("system", Some("private-system-fixture"), None)?,
+            ))
+        })
+        .unwrap();
+    for (command, token, kind, sender) in [
+        ("inbox_send_human", &web, "human", "human"),
+        ("inbox_send", &system, "vp", "system"),
+    ] {
+        let ctx = RequestCtx {
+            service_token: Some(token.clone()),
+            socket_peer: Some(true),
+            socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
+            ..RequestCtx::default()
+        };
+        let sent = dispatcher
+            .dispatch(
+                command,
+                &json!({"to":"w2:p2","body":"recorded target role","notify":false}),
+                &ctx,
+            )
+            .unwrap();
+        let info = store
+            .thread_info(sent["message_id"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(info["conversation_kind"], kind);
+        assert_eq!(info["sender_kind"], sender);
+        assert_eq!(info["recipient_route_kind"], "vp");
+    }
+    let worker = dispatcher
+        .dispatch(
+            "inbox_send",
+            &json!({"to":"w2:p2","body":"worker coordination","notify":false}),
+            &request("w1:p1"),
+        )
+        .unwrap();
+    assert!(
+        worker.get("thread").is_none(),
+        "legacy send shape must not expose lineage"
+    );
+    let read = dispatcher
+        .dispatch(
+            "inbox_read",
+            &json!({"mailbox":worker["mailbox"],"peek":true}),
+            &request("w2:p2"),
+        )
+        .unwrap();
+    assert!(
+        read["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row.get("thread").is_none()),
+        "legacy reads keep their old shape for versioned rows"
+    );
+    let info = store
+        .thread_info(worker["message_id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(info["conversation_kind"], "vp");
+    assert_eq!(info["sender_kind"], "agent");
+    assert_eq!(info["recipient_route_kind"], "vp");
+    assert!(dispatcher
+        .dispatch(
+            "inbox_send_agent_only",
+            &json!({"to":"owner","body":"explicit agent audience","notify":false}),
+            &request("w1:p1")
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("agent-only cannot target the human owner mailbox"));
+    for (command, target, recipient) in [
+        ("inbox_send", "owner", "human"),
+        ("inbox_send_agent_only", "w2:p2", "vp"),
+    ] {
+        let sent = dispatcher
+            .dispatch(
+                command,
+                &json!({"to":target,"body":"recorded audience routing","notify":false}),
+                &request("w1:p1"),
+            )
+            .unwrap();
+        let id = sent["message_id"].as_str().unwrap();
+        let info = store.thread_info(id).unwrap().unwrap();
+        assert_eq!(info["conversation_kind"], "vp");
+        assert_eq!(info["recipient_route_kind"], recipient);
+        let human = store
+            .conversation_thread_cursor(100, None, crate::owner::ConversationFilter::HumanThreads)
+            .unwrap();
+        assert_eq!(
+            human.iter().any(|row| row["id"] == id),
+            recipient == "human"
+        );
+    }
+    dispatcher.close();
+}
+
+#[test]
+fn inbox_thread_human_producers_require_the_registered_bridge_label() {
+    let (_dir, services) = make_services("thread-producer-label", factory(None), None);
+    let mut registered = handlers();
+    registered.register_owner_reply_ingest_outbox();
+    registered.register_owner_delivered_message_state_reply_stats();
+    let dispatcher = services.dispatcher(registered);
+    let token = |role, label| {
+        services
+            .flock()
+            .with_roles(|roles, _| roles.issue_token(role, Some(label), None))
+            .unwrap()
+    };
+    let context = |token: String| RequestCtx {
+        service_token: Some(token),
+        socket_peer: Some(true),
+        socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
+        ..Default::default()
+    };
+    for label in [
+        "timers",
+        "cos-heartbeat",
+        "watchdog",
+        "system",
+        "telegram-bridge-lookalike",
+    ] {
+        let ctx = context(token("system", label));
+        for (command, args) in [
+            (
+                "owner_ingest_thread",
+                json!({"body":"must not be human","transport":"telegram"}),
+            ),
+            (
+                "owner_delivered_thread",
+                json!({"message_id":"i999","transport":"telegram","transport_channel":"42","transport_message_ids":["3"]}),
+            ),
+        ] {
+            let error = dispatcher.dispatch(command, &args, &ctx).unwrap_err();
+            assert!(
+                error.to_string().contains("dedicated telegram-bridge"),
+                "{label}: {error}"
+            );
+        }
+        if label == "watchdog" {
+            let page = dispatcher
+                .dispatch(
+                    "owner_page",
+                    &json!({"body":"recorded alert","class":"outage"}),
+                    &ctx,
+                )
+                .unwrap();
+            let store = services.flock().stores().inbox.unwrap();
+            let info = store
+                .thread_info(page["message"]["message_id"].as_str().unwrap())
+                .unwrap()
+                .unwrap();
+            assert_eq!(info["conversation_kind"], "vp");
+            assert_eq!(info["sender_kind"], "system");
+            assert!(store
+                .conversation_thread_cursor(
+                    100,
+                    None,
+                    crate::owner::ConversationFilter::HumanThreads
+                )
+                .unwrap()
+                .is_empty());
+        }
+    }
+    let bridge = context(token("system", "telegram-bridge"));
+    let accepted = dispatcher.dispatch("owner_ingest_thread", &json!({"body":"paired human message","transport":"telegram","transport_channel":"42","transport_message_id":"1"}), &bridge).unwrap();
+    assert_eq!(accepted["thread"]["sender_kind"], "human");
+    let id = &accepted["message"]["message_id"];
+    dispatcher.dispatch("owner_delivered_thread", &json!({"message_id":id,"transport":"telegram","transport_channel":"42","transport_message_ids":["2"]}), &bridge).unwrap();
+    assert!(dispatcher
+        .dispatch(
+            "owner_ingest_thread",
+            &json!({"body":"wrong transport","transport":"web"}),
+            &bridge
+        )
+        .is_err());
+    let web = context(token("web", "desk"));
+    let human = dispatcher
+        .dispatch(
+            "owner_ingest_thread",
+            &json!({"body":"authenticated web human","transport":"web"}),
+            &web,
+        )
+        .unwrap();
+    assert_eq!(human["thread"]["sender_kind"], "human");
+    assert!(dispatcher
+        .dispatch(
+            "owner_ingest_thread",
+            &json!({"body":"wrong transport","transport":"telegram"}),
+            &web
+        )
+        .is_err());
     dispatcher.close();
 }

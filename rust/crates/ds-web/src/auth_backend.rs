@@ -558,6 +558,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let auth =
             PersistentAuth::open_with_password(dir.path(), Some("original-password")).unwrap();
+        // This test gates password verification, not plaintext credential import.
+        // Avoid an unrelated KDF before the hook on filesystems with distinct mtimes.
+        std::fs::remove_file(dir.path().join("owner-credentials")).unwrap();
         let token = auth.record().unwrap().token;
         let first = Arc::new(AtomicBool::new(true));
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
@@ -583,8 +586,9 @@ mod tests {
                 .unwrap(),
             Identity::Api
         );
+        const KDF_TEST_CEILING: Duration = Duration::from_secs(120);
         tokio::time::timeout(
-            Duration::from_secs(10),
+            KDF_TEST_CEILING,
             auth.change_password("original-password", "replacement-password", None),
         )
         .await

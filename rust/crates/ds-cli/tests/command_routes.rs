@@ -5334,6 +5334,8 @@ fn cli_route_58_commands_map() {
     assert!(r.contains(
         "inbox_list(mailbox, unread_only, limit, newest_first, before, literal_mailbox, include_agent)"
     ));
+    assert!(r.contains("inbox_send(to*, body*, subject, attach, system_sender, notify, parent_id)"));
+    assert!(r.contains("inbox_send_agent_only(to*, body*, subject, attach, notify, parent_id)"));
     let strip = |text: &str| {
         let mut skip_description = false;
         text.lines()
@@ -5358,6 +5360,8 @@ fn cli_route_58_commands_map() {
                         "inbox_list(mailbox, unread_only, limit, newest_first, before, literal_mailbox, include_agent)",
                         "inbox_list(mailbox, unread_only, limit)",
                     ).replace("owner_conversation(limit, before, before_id, source_filter, include_internal)", "owner_conversation(limit, before)")
+                    .replace("inbox_send(to*, body*, subject, attach, system_sender, notify, parent_id)", "inbox_send(to*, body*, subject, attach, system_sender, notify)")
+                    .replace("inbox_send_agent_only(to*, body*, subject, attach, notify, parent_id)", "inbox_send_agent_only(to*, body*, subject, attach, notify)")
                     .replace("task_read(id*, summary, notes, note_kind, before_note)", "task_read(id*)")
                     .replace("task_note(id*, event, reason, note_kind)", "task_note(id*, event, reason)")
                     .replace("task_complete(id*, by, verdict, landed, note, next)", "task_complete(id*, by, verdict, landed)")
@@ -5404,6 +5408,16 @@ fn cli_route_58_commands_map() {
                 .unwrap()
                 .contains("default false")
         );
+        // t5026: exact parents extend the Rust send schema; preserve every legacy field/order.
+        for name in ["inbox_send", "inbox_send_agent_only"] {
+            let row = r.iter_mut().find(|row| row["name"] == name).unwrap();
+            let parent = row["input_schema"]["properties"]
+                .as_object_mut()
+                .unwrap()
+                .remove("parent_id")
+                .unwrap();
+            assert_eq!(parent["type"], "string");
+        }
         let conversation = r
             .iter_mut()
             .find(|row| row["name"] == "owner_conversation")

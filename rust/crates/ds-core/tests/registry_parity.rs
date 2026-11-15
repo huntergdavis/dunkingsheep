@@ -20,6 +20,9 @@ fn every_python_command_is_present_and_no_extra_ones_are() {
     // the public CLI help, which must match Python.
     let rust_only = [
         "inbox_get",
+        "inbox_send_human",
+        "owner_ingest_thread",
+        "owner_delivered_thread",
         "pr_wait",
         "task_owner_answer",
         "task_owner_question",
@@ -93,6 +96,13 @@ fn every_input_schema_equals_the_pythons() {
                     .remove(key)
                     .is_some());
             }
+        }
+        if matches!(name.as_str(), "inbox_send" | "inbox_send_agent_only") {
+            assert!(got["properties"]
+                .as_object_mut()
+                .unwrap()
+                .remove("parent_id")
+                .is_some());
         }
         if name == "inbox_list" {
             // t4684 summary paging is opt-in and Rust-only; preserve the frozen legacy schema.
@@ -289,4 +299,32 @@ fn atomic_completion_fields_are_available_to_socket_and_mcp() {
         assert_eq!(schema["properties"]["note"]["type"], "string");
         assert_eq!(schema["properties"]["next"]["type"], "boolean");
     }
+}
+
+#[test]
+fn private_human_producers_are_not_mcp_actions_or_lane_grants() {
+    for command in [
+        "inbox_send_human",
+        "owner_ingest_thread",
+        "owner_delivered_thread",
+    ] {
+        assert!(!registry::command(command).unwrap().mcp);
+        for role in [
+            "owner",
+            "worker",
+            "reviewer",
+            "planner",
+            "desk",
+            "anonymous",
+        ] {
+            assert!(
+                !ds_core::roles::allowed(role, command),
+                "{role} cannot claim human transport provenance through {command}"
+            );
+        }
+    }
+    assert!(ds_core::roles::allowed("web", "inbox_send_human"));
+    assert!(ds_core::roles::allowed("web", "owner_ingest_thread"));
+    assert!(ds_core::roles::allowed("system", "owner_ingest_thread"));
+    assert!(ds_core::roles::allowed("system", "owner_delivered_thread"));
 }

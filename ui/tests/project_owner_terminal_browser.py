@@ -23,7 +23,7 @@ def api(route):
         value = {'lanes':[{'pane_id':'%1','name':'owner','membership':{'scope':'global'}}, {'pane_id':'%3','name':'Worker','membership':{'scope':'project','project':'alpha'}}]}
     elif path == '/api/terminals': value = [{'pane_id':'%1','name':'__owner_terminal__','agent':'owner','cols':80,'rows':24}]
     elif path == '/api/fleet': value = {'state':'ok','rows':[{'pane_id':'%1','name':'owner','project':None}], 'unrouted':{'state':'ok','rows':[]}}
-    elif path == '/api/owner-thread': value = {'items':[], 'next_before':None, 'source_filter':parse_qs(urlsplit(route.request.url).query)['filter'][0], 'include_internal':False}
+    elif path == '/api/owner-thread': value = {'items':[], 'next_before':None, 'view_revision':0, 'source_filter':parse_qs(urlsplit(route.request.url).query)['filter'][0], 'include_internal':False}
     elif path == '/api/channels': value = {'channels':[{'id':'cos','name':'Owner','pane_id':'%1','can_message':True,'status':'ready'}]}
     elif path.endswith('/resize'): value = {'cols':80,'rows':24}
     else: value = {'ok':True,'channels':[]}

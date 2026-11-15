@@ -40,7 +40,7 @@ def fulfill(route, value, status=200):
 def response(view,before):
     rows = ([HUMAN_OLD] if before else [HUMAN]) if view == 'human_threads' else ([VP_OLD] if before else [TAGGED,VP]) if view == 'vp_threads' else [HISTORY_UNKNOWN,HISTORY_OTHER,HISTORY_TAGGED,HISTORY]
     cursor = None if before or view == 'historical' else 'i201' if view == 'human_threads' else 'i401'
-    return {'items':rows,'next_before':cursor,'source_filter':view,'include_internal':False}
+    return {'items':rows,'next_before':cursor,'view_revision':0, 'source_filter':view,'include_internal':False}
 def mock(route):
     path=urlsplit(route.request.url).path;query=parse_qs(urlsplit(route.request.url).query)
     calls.append((route.request.method,path,query))

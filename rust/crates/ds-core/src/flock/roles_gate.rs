@@ -213,6 +213,28 @@ impl Flock {
         work(roles, legacy.as_ref())
     }
 
+    /// A target snapshot from the registry, independent of this request's token and role cache.
+    pub(crate) fn registered_pane_role(
+        &self,
+        pane: &str,
+        pane_info: Option<&Value>,
+    ) -> Result<Option<String>, DunkError> {
+        let mut guard = self.role_stores.lock().expect("role stores lock");
+        let RoleStores { roles, legacy } = &mut *guard;
+        let Some(roles) = roles.as_mut() else {
+            return Ok(None);
+        };
+        let role = roles.role_of(Some(pane), pane_info)?;
+        let legacy_owner = legacy
+            .as_ref()
+            .is_some_and(|allow| allow.panes.contains(pane));
+        Ok(Some(if role == roles.default && legacy_owner {
+            "owner".to_owned()
+        } else {
+            role
+        }))
+    }
+
     /// `set_service_token`.
     pub fn set_service_token(&self, token: Option<&str>) {
         self.with_caller(|state| {

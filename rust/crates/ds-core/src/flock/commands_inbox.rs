@@ -168,6 +168,10 @@ pub struct SendArgs<'a> {
     /// Notify the recipient even when `DUNKINGSHEEP_INBOX_SILENT_MAILBOXES` lists it. Only the
     /// daemon's own Telegram owner-lane nudge sets this (t4645); it is not a wire argument.
     pub wake_quiet: bool,
+    /// An explicit new parent, validated against the authenticated caller's read scope.
+    pub parent_id: Option<&'a str>,
+    /// Set only by the authenticated owner web route, never by an ordinary lane.
+    pub human_origin: bool,
 }
 
 /// Project lifecycle reports use the daemon's existing inbox store and the reserved owner
@@ -686,6 +690,78 @@ impl Flock {
                     .to_string(),
             ));
         }
+        let role = match self_pane {
+            Some(pane) => env.caller_role(pane)?,
+            None => env.paneless_role()?.unwrap_or_else(|| "anonymous".into()),
+        };
+        if args.human_origin && (self_pane.is_some() || role != "web") {
+            return Err(refused(
+                "human origin requires the authenticated web service".into(),
+            ));
+        }
+        let thread = if role == "web" && !args.human_origin {
+            if args.parent_id.is_some() {
+                return Err(refused(
+                    "a threaded web reply requires an owner session".into(),
+                ));
+            }
+            None // Old services remain the prior format, without invented human provenance.
+        } else {
+            use crate::inbox_store::{ThreadKind, ThreadRoute, ThreadSender, ThreadWrite};
+            let actor = if args.human_origin {
+                ThreadSender::Human
+            } else if self_pane.is_some() {
+                ThreadSender::Agent
+            } else {
+                ThreadSender::System
+            };
+            let recipient_is_vp = match pane_id.as_deref() {
+                None => false,
+                Some(pane) => {
+                    let info = env
+                        .list_panes()
+                        .into_iter()
+                        .find(|row| row["pane_id"].as_str() == Some(pane));
+                    self.registered_pane_role(pane, info.as_ref())?.as_deref() == Some("owner")
+                }
+            };
+            let kind = if actor == ThreadSender::Human {
+                ThreadKind::Human
+            } else if role == "owner"
+                || recipient_is_vp
+                || crate::inbox::normalise_mailbox(&mailbox) == "owner"
+            {
+                ThreadKind::Vp
+            } else {
+                ThreadKind::Other
+            };
+            let own = self_pane.and_then(|pane| self.own_mailbox(env, pane).ok());
+            let mut context = ThreadWrite::root(kind, actor);
+            context.parent_id = args.parent_id.map(str::to_owned);
+            context.sender_route = if actor == ThreadSender::Human {
+                ThreadRoute::Human
+            } else if role == "owner" {
+                ThreadRoute::Vp
+            } else {
+                own.clone()
+                    .map(ThreadRoute::Lane)
+                    .unwrap_or(ThreadRoute::None)
+            };
+            context.recipient_route = if crate::inbox::normalise_mailbox(&mailbox) == "owner" {
+                ThreadRoute::Human
+            } else if recipient_is_vp {
+                ThreadRoute::Vp
+            } else {
+                ThreadRoute::Lane(mailbox.clone())
+            };
+            context.allowed_parent_mailboxes =
+                if matches!(role.as_str(), "owner" | "web" | "system") {
+                    None
+                } else {
+                    Some(own.into_iter().collect())
+                };
+            Some(context)
+        };
         let snapshot = env.store().send_snapshot_wire_agent_only(
             &Outgoing {
                 mailbox: &mailbox,
@@ -695,6 +771,8 @@ impl Flock {
                 mailbox_label: Some(&label),
                 pane_id: pane_id.as_deref(),
                 attachments: args.attach,
+                transport: args.human_origin.then_some("web"),
+                thread,
                 ..Default::default()
             },
             stored_subject,

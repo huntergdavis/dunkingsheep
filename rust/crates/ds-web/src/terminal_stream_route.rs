@@ -1356,7 +1356,17 @@ mod tests {
         );
         let server = PrivateServer(socket.clone());
         assert!(std::process::Command::new("tmux")
-            .args(["-L", &server.0, "new-session", "-d", "-s", "fixture", "cat"])
+            .args([
+                "-L",
+                &server.0,
+                "-f",
+                "/dev/null",
+                "new-session",
+                "-d",
+                "-s",
+                "fixture",
+                "cat"
+            ])
             .status()
             .unwrap()
             .success());
