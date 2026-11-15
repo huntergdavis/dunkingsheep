@@ -563,6 +563,11 @@ cleared with `task unblock`.
 
 After pushing, a writer runs one command:
 `dunkingsheep pr wait OWNER/REPO#PR --head FULL_SHA --author-task TASK_ID`.
+Declare immediately after every push (and after creating the PR), before marking
+the PR ready for review. If review-sync has already filed an unjudged review for
+that exact head, the declaration fills its unknown author and provenance in the
+same transaction and lifts the unknown-author claim hold. It does not change a
+known author, a judged review, or a review of another head.
 Use the full pushed SHA and your currently claimed work task. The guarded daemon
 records your authenticated process-bound lane and task for that exact PR head.
 The first declaration binds that work task to its repository/PR; a mismatched

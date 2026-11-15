@@ -95,36 +95,33 @@ async fn superseded_head_declaration_does_not_attach_to_current_or_cancelled_rev
 
 #[tokio::test]
 async fn late_declaration_does_not_rewrite_known_or_judged_reviews() {
-    let dir = crate::testsupport::dir("late-review-protected");
-    let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
-    let (task, caller) = work(&tasks, "%1").await;
-    let head = "a".repeat(40);
-    let known = review(&tasks, &head, Some("%other")).await;
-    let judged = review(&tasks, &head, None).await;
-    tasks
-        .set_verdict_with_author_guard(&judged.id, "accept", Some("%2"), true)
-        .await
-        .unwrap();
-    tasks
-        .declare_pr_author(&task, "o/r", 7, &head, "%1", &caller, crate::clock::now_s())
-        .await
-        .unwrap();
-    let known_after = tasks.get(&known.id).await.unwrap();
-    let judged_after = tasks.get(&judged.id).await.unwrap();
-    assert_eq!(
+    for mode in ["known", "judged"] {
+        let dir = crate::testsupport::dir(&format!("late-review-protected-{mode}"));
+        let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+        let (task, caller) = work(&tasks, "%1").await;
+        let head = "a".repeat(40);
+        let author = (mode == "known").then_some("%other");
+        let row = review(&tasks, &head, author).await;
+        if mode == "judged" {
+            tasks
+                .set_verdict_with_author_guard(&row.id, "accept", Some("%2"), true)
+                .await
+                .unwrap();
+        }
         tasks
-            .review_facts(&known.id)
+            .declare_pr_author(&task, "o/r", 7, &head, "%1", &caller, crate::clock::now_s())
             .await
-            .unwrap()
-            .author
-            .as_deref(),
-        Some("%other")
-    );
-    assert_eq!(known_after.body, known.body);
-    assert_eq!(tasks.review_facts(&judged.id).await.unwrap().author, None);
-    assert_eq!(judged_after.body, judged.body);
-    assert_eq!(
-        tasks.verdict_of(&judged.id).await.unwrap().as_deref(),
-        Some("accept")
-    );
+            .unwrap();
+        assert_eq!(
+            tasks.review_facts(&row.id).await.unwrap().author.as_deref(),
+            author
+        );
+        assert_eq!(tasks.get(&row.id).await.unwrap().body, row.body);
+        if mode == "judged" {
+            assert_eq!(
+                tasks.verdict_of(&row.id).await.unwrap().as_deref(),
+                Some("accept")
+            );
+        }
+    }
 }
