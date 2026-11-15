@@ -2065,6 +2065,9 @@ fn inbox_fetch_checks_parent_mailbox_before_destination_writes() {
     let own = send("w1:p1");
     let foreign = send("w2:p2");
     let human = send("owner");
+    // The fake backend does not list w4:p4. Give the planner an attributable
+    // mailbox so its foreign fetch reaches the parent-mailbox authorization.
+    send("w4:p4");
     let attachment = |id: &str| store.get_message(id).unwrap().attachments[0].id.clone();
     let own_attachment = attachment(&own);
     let foreign_attachment = attachment(&foreign);
