@@ -14,7 +14,7 @@ server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 base = f'http://127.0.0.1:{server.server_port}'
 lanes = [
-    {'pane_id':'%1','name':'Worker','membership':{'scope':'project','project':'alpha'}},
+    {'pane_id':'%21','name':'Worker','membership':{'scope':'project','project':'alpha'}},
     {'pane_id':'%2','name':'Owner','membership':{'scope':'project','project':'alpha'}},
 ]
 received = []
@@ -22,7 +22,7 @@ connections = []
 def api(route):
     path = urlsplit(route.request.url).path
     if path == '/api/projects': value = {'lanes':lanes}
-    elif path == '/api/terminals': value = [{'pane_id':'%1','name':'worker','cols':80,'rows':24}]
+    elif path == '/api/terminals': value = [{'pane_id':'%21','name':'worker','cols':80,'rows':24}]
     elif path.endswith('/resize'): value = {'cols':80,'rows':24}
     else: value = {'ok':True,'channels':[]}
     route.fulfill(status=200, content_type='application/json', body=json.dumps(value))

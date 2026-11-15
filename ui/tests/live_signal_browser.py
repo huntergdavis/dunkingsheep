@@ -8,7 +8,7 @@ import os
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from playwright.sync_api import sync_playwright
 
@@ -68,16 +68,18 @@ try:
                 requests.clear()
                 page = browser.new_page(viewport={'width': width, 'height': 900})
                 page.route('**/api/**', mock)
-                page.goto(base + '/dash/cos', wait_until='domcontentloaded')
+                # /dash/cos opens the Inbox (t5010); the conversation with Live signal is this panel.
+                page.goto(base + '/dash/cos?panel=conversation', wait_until='domcontentloaded')
                 page.get_by_role('button', name='Live signal').click()
-                page.wait_for_url('**/dash/fleet*')
-                if case == 'matched':
-                    page.get_by_test_id('pane-text').get_by_text('fixture terminal output').wait_for()
+                # t4646 retired the Terminals page: Live signal opens the lane in Projects, with
+                # the conversation's pane when it has one.
+                page.wait_for_url('**/dash/projects*')
+                query = parse_qs(urlsplit(page.url).query)
+                if case == 'missing':
+                    assert 'pane' not in query, page.url
                 else:
-                    page.get_by_text('Choose an agent to view or message.').wait_for()
-                    page.wait_for_timeout(300)
-                    assert page.get_by_test_id('pane-text').count() == 0
-                    assert not any(path == '/api/pane-text' for _, path in requests), requests
+                    assert query.get('pane') == [pane_id], page.url
+                assert not any(path == '/api/pane-text' for _, path in requests), requests
                 assert not any(method != 'GET' and path != '/api/viewport' for method, path in requests), requests
                 page.close()
         browser.close()
