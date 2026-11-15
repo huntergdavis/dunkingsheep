@@ -227,14 +227,17 @@ fn handle_request(mut stream: UnixStream, state: &DaemonState) {
         "delivery_capability" => {
             json!({"alive":alive,"agent_alive":alive,"send":script.route,"drains":false})
         }
-        "owner_ingest" => {
+        "owner_ingest" | "owner_ingest_thread" => {
             let external_id = request["args"]["external_id"].clone();
             let duplicate = external_id.is_string()
                 && state.requests.lock().unwrap().iter().any(|earlier| {
-                    earlier["cmd"] == "owner_ingest"
-                        && earlier["args"]["external_id"] == external_id
+                    earlier["cmd"] == command && earlier["args"]["external_id"] == external_id
                 });
-            json!({"message":{"message_id":"i42"},"duplicate":duplicate})
+            let mut receipt = json!({"message":{"message_id":"i42"},"duplicate":duplicate});
+            if command == "owner_ingest_thread" {
+                receipt["thread"] = json!({"thread_version":1,"root_id":"i42","parent_id":null,"conversation_kind":"human","sender_kind":"human"});
+            }
+            receipt
         }
         "owner_conversation" => {
             json!({"messages":[{"id":"i4","sender":null,"transport":"web","body":"hello","created_at":1793400000,"answered":false}],"waiting":[]})
@@ -1028,7 +1031,15 @@ async fn owner_send_forwards_external_id_and_passes_duplicate_through() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(second["message_id"], "i42");
     assert_eq!(second["duplicate"], true);
-    assert_eq!(daemon.last_args("owner_ingest")["external_id"], "ext-42");
+    assert_eq!(first["thread"]["root_id"], "i42");
+    assert_eq!(first["thread"]["parent_id"], Value::Null);
+    assert_eq!(second["thread"], first["thread"]);
+    assert_eq!(daemon.count("owner_ingest_thread"), 2);
+    assert_eq!(daemon.count("owner_ingest"), 0);
+    assert_eq!(
+        daemon.last_args("owner_ingest_thread")["external_id"],
+        "ext-42"
+    );
     daemon.finish();
 }
 
