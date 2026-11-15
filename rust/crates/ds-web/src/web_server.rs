@@ -524,7 +524,15 @@ where
                         | "/api/mailboxes"
                         | "/api/mailbox-messages"
                         | "/api/mailbox-message"
+                        | "/api/tasks"
+                        | "/api/tasks/metrics"
+                        | "/api/project-context"
+                        | "/api/project-context/global"
                 ))
+            || (request.method() == Method::GET
+                && decoded
+                    .strip_prefix("/api/project-context/project/")
+                    .is_some_and(|name| !name.is_empty() && !name.contains('/')))
             || (request.method() == Method::POST && decoded == "/api/ops-board/question")
             || (request.method() == Method::POST && decoded == "/api/pane-inbox")
             || (self.terminal_stream && is_terminal_route(&decoded))
