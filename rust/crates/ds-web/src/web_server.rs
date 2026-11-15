@@ -36,6 +36,7 @@
 //!   the version and options for owner answers. Python has no equivalent route.
 //! - `POST /api/pane-inbox` is a Rust desk extension (t4644): the quick-message dialog stores an inbox
 //!   message for a live lane through the daemon's inbox send. Python has no equivalent route.
+//! - `GET /api/session` is a Rust desk extension: startup validates identity without loading channels.
 //! - `PYTHON_ROUTES` is a hand-maintained copy of the P0 routes in web/app.py. The integration test
 //!   `python_routes_match_the_mounted_routes` checks it against the mounted axum routes and the
 //!   Python source, in both directions.
@@ -520,7 +521,8 @@ where
             || (request.method() == Method::GET
                 && matches!(
                     decoded.as_str(),
-                    "/api/projects"
+                    "/api/session"
+                        | "/api/projects"
                         | "/api/mailboxes"
                         | "/api/mailbox-messages"
                         | "/api/mailbox-message"
