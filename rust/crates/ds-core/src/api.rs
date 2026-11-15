@@ -4454,6 +4454,40 @@ pub fn h_task_delete(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
 
 /// `dunk_api.h_task_list`.
 pub fn h_task_list(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    if args.get("paged") == Some(&Value::Bool(true)) {
+        let status = task_string_arg(&args, "status", "task_list")?
+            .filter(|value| !value.is_empty())
+            .map(crate::tasks::validate_status)
+            .transpose()?;
+        let group = task_string_arg(&args, "page_group", "task_list")?;
+        if group.is_some() && (status.is_some() || !matches!(group, Some("active" | "closed"))) {
+            return Err(DunkError::Refused(
+                "page_group must be active or closed and cannot combine with status".into(),
+            ));
+        }
+        let options = crate::tasks::page::TaskPageOptions {
+            scope: task_string_arg(&args, "scope", "task_list")?.map(str::to_owned),
+            status: status.or_else(|| group.map(str::to_owned)),
+            priority: task_string_arg(&args, "priority", "task_list")?.map(str::to_owned),
+            assignee: task_string_arg(&args, "assignee", "task_list")?.map(str::to_owned),
+            kind: task_string_arg(&args, "kind", "task_list")?.map(str::to_owned),
+            cursor: task_string_arg(&args, "cursor", "task_list")?.map(str::to_owned),
+            page_size: python_int_arg(&args, "page_size", 50)?,
+            include_done: python_bool_arg(&args, "include_done", true),
+            needs_owner: python_bool_arg(&args, "needs_owner", false),
+        };
+        let mut page = context.block_on(
+            context
+                .flock
+                .task_list_page(options, context.self_pane_id()),
+        )??;
+        if let Some(tasks) = page.get_mut("tasks").and_then(Value::as_array_mut) {
+            for task in tasks {
+                *task = with_block_kind(task.take());
+            }
+        }
+        return Ok(page);
+    }
     let scope = task_string_arg(&args, "scope", "task_list")?;
     let status = task_string_arg(&args, "status", "task_list")?;
     let assignee = task_string_arg(&args, "assignee", "task_list")?;

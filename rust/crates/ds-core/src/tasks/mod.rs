@@ -46,6 +46,7 @@ mod lease_handover;
 pub mod next_job;
 pub mod next_job_runtime;
 pub(crate) mod owner_handoff;
+pub mod page;
 mod pane_view;
 pub mod pr_wait;
 pub mod wire;

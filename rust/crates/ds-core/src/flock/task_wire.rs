@@ -402,6 +402,22 @@ impl Flock {
         Ok((explicit, rows))
     }
 
+    pub async fn task_list_page(
+        &self,
+        mut options: crate::tasks::page::TaskPageOptions,
+        pane: Option<&str>,
+    ) -> Result<Value, DunkError> {
+        options.scope = match options.scope.as_deref().map(str::trim) {
+            None | Some("") | Some("all") => None,
+            Some(_) => Some(Self::task_scope(options.scope.as_deref(), pane, "global")?),
+        };
+        let scope = options.scope.clone();
+        let mut page = self.task_store()?.list_page(options, pane).await?;
+        page["scope"] = json!(scope.unwrap_or_else(|| "visible".into()));
+        page["pane_id"] = json!(pane);
+        Ok(page)
+    }
+
     /// Authorize and read full row/notes inside the store's single snapshot callback.
     pub async fn task_read_history_wire(
         &self,

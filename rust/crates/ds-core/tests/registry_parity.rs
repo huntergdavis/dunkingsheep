@@ -115,6 +115,13 @@ fn every_input_schema_equals_the_pythons() {
                 assert!(properties.remove(key).is_some());
             }
         }
+        if name == "task_list" {
+            // t3599 opt-in task pages are Rust-only; compare every legacy property.
+            let properties = got["properties"].as_object_mut().unwrap();
+            for key in ["paged", "page_size", "cursor", "priority", "page_group"] {
+                assert!(properties.remove(key).is_some());
+            }
+        }
         if name == "task_add" {
             // t4701: a new task takes its creator lane's project; the two overrides are
             // Rust-only (the Python task store had no project mapping).
@@ -331,4 +338,17 @@ fn private_human_producers_are_not_mcp_actions_or_lane_grants() {
     assert!(ds_core::roles::allowed("web", "owner_ingest_thread"));
     assert!(ds_core::roles::allowed("system", "owner_ingest_thread"));
     assert!(ds_core::roles::allowed("system", "owner_delivered_thread"));
+}
+
+#[test]
+fn task_paging_groups_do_not_collide_with_mutation_status_enum() {
+    let schema = registry::grouped_input_schema("task").unwrap();
+    assert_eq!(schema["properties"]["paged"]["type"], "boolean");
+    assert_eq!(
+        schema["properties"]["page_group"]["enum"],
+        serde_json::json!(["active", "closed"])
+    );
+    let statuses = schema["properties"]["status"]["enum"].as_array().unwrap();
+    assert!(!statuses.contains(&serde_json::json!("active")));
+    assert!(!statuses.contains(&serde_json::json!("closed")));
 }
