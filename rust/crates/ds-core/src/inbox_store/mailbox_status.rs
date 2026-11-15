@@ -433,6 +433,64 @@ mod tests {
         assert_eq!(rows(&store).len(), 6);
     }
 
+    /// t5370: late mail that reopens a retired mailbox appends exactly one 'reopened' row to the
+    /// append-only audit, and that row cannot be changed or removed.
+    #[test]
+    fn a_reopen_appends_one_audit_row_that_cannot_be_changed() {
+        let (_dir, store) = store();
+        send(&store, "gone");
+        age(&store, "gone", 20.0);
+        store
+            .retire_mailboxes(&["gone".to_string()], "test", "%308", crate::clock::now_s())
+            .unwrap();
+        let rows = |store: &Store| -> Vec<(String, String, String)> {
+            store
+                .writer
+                .call(|connection| {
+                    let mut statement = connection
+                        .prepare(
+                            "SELECT mailbox, outcome, actor FROM mailbox_retire_audit ORDER BY id",
+                        )
+                        .map_err(map_sqlite)?;
+                    let found = statement
+                        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                        .map_err(map_sqlite)?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(map_sqlite)?;
+                    Ok(found)
+                })
+                .unwrap()
+        };
+        let before = rows(&store);
+        assert_eq!(before.last().map(|row| row.1.as_str()), Some("retired"));
+        // Late mail reopens it: exactly one row is appended.
+        send(&store, "gone");
+        let after = rows(&store);
+        assert_eq!(after.len(), before.len() + 1, "{after:?}");
+        assert_eq!(
+            after.last().unwrap(),
+            &(
+                "gone".to_string(),
+                "reopened".to_string(),
+                "inbox".to_string()
+            )
+        );
+        // More mail to an active mailbox appends nothing.
+        send(&store, "gone");
+        assert_eq!(rows(&store).len(), after.len());
+        // Append-only.
+        let tamper = |sql: &'static str| {
+            store
+                .writer
+                .call(move |connection| connection.execute(sql, []).map_err(map_sqlite))
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(tamper("UPDATE mailbox_retire_audit SET outcome = 'x'").contains("append-only"));
+        assert!(tamper("DELETE FROM mailbox_retire_audit").contains("append-only"));
+        assert_eq!(rows(&store).len(), after.len());
+    }
+
     #[test]
     fn mail_for_a_retired_mailbox_reopens_it_and_nothing_is_lost() {
         let (_dir, store) = store();
