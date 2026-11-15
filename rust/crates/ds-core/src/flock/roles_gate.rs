@@ -169,6 +169,62 @@ pub(crate) fn is_system_unit(unit: &str) -> bool {
         })
 }
 
+/// t4782: everything that does not fit about a system-token caller running in a dunkingsheep
+/// unit. Empty when the owner has no unit list (`listed` is `None`): today's behaviour.
+///
+/// * the unit is not listed for the token's label;
+/// * the unit is transient (made by `systemd-run`, which can name it anything): its definition is
+///   in the user manager's transient directory, not in a unit file;
+/// * the executable is outside the releases root, or cannot be read. Any release revision counts:
+///   the units do not all run the same one.
+pub(crate) fn system_unit_findings(
+    unit: &str,
+    exe: Option<&std::path::Path>,
+    listed: Option<&[String]>,
+    transient_dir: &std::path::Path,
+    releases_root: Option<&std::path::Path>,
+) -> Vec<String> {
+    let Some(listed) = listed else {
+        return Vec::new();
+    };
+    let mut findings = Vec::new();
+    if !listed.iter().any(|allowed| allowed == unit) {
+        findings.push(format!("unit {unit} is not listed for this token"));
+    }
+    if std::fs::symlink_metadata(transient_dir.join(unit)).is_ok() {
+        findings.push("a transient unit (systemd-run), not a unit file".into());
+    }
+    match (exe, releases_root) {
+        (None, _) => findings.push("its executable could not be read".into()),
+        (Some(exe), Some(root)) if !exe.starts_with(root) => {
+            findings.push(format!("its executable is outside {}", root.display()))
+        }
+        _ => {}
+    }
+    findings
+}
+
+/// t4782: where the user manager keeps transient units (`$XDG_RUNTIME_DIR/systemd/transient`).
+fn transient_unit_dir() -> std::path::PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(format!("/run/user/{}", nix::unistd::geteuid().as_raw()))
+        })
+        .join("systemd/transient")
+}
+
+/// t4782: the releases root this daemon runs from (`.../releases/<release>/<binary>`), or `None`
+/// when it is not running from a release (a development build), which skips the executable check.
+pub(crate) fn releases_root_of(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let root = exe.parent()?.parent()?;
+    (root.file_name()? == "releases").then(|| root.to_path_buf())
+}
+
+fn releases_root() -> Option<std::path::PathBuf> {
+    releases_root_of(&std::env::current_exe().ok()?)
+}
+
 /// Token labels whose use from an unlisted pane is refused now, not warned about.
 pub(crate) const ENFORCED_SYSTEM_LABELS: [&str; 1] = ["timers"];
 
@@ -553,7 +609,9 @@ impl Flock {
     /// * a place that cannot be established: accepted for this release with a warning.
     fn system_token_peer_check(&self, env: &dyn PaneInfoEnv, label: &str) -> Result<(), DunkError> {
         let unknown = || refuse("system token refused: peer identity unavailable");
-        let verified_unit = || -> Option<String> {
+        // The caller's unit and executable, read between two checks that it is still the same
+        // process.
+        let verified_unit = || -> Option<(String, Option<std::path::PathBuf>, i64, String)> {
             if self.socket_peer_ok() != Some(true) {
                 return None;
             }
@@ -568,11 +626,14 @@ impl Flock {
             }
             let unit =
                 unit_of_cgroup(&std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?)?;
-            // The pid must still be the same process after the read.
-            crate::proc::process_alive(pid, Some(start)).then_some(unit)
+            let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+            // The pid must still be the same process after the reads.
+            crate::proc::process_alive(pid, Some(start))
+                .then(|| (unit, exe, pid, start.to_string()))
         };
-        let peer = match verified_unit().filter(|unit| is_system_unit(unit)) {
-            Some(unit) => SystemPeer::Unit(unit),
+        let found = verified_unit().filter(|(unit, ..)| is_system_unit(unit));
+        let peer = match &found {
+            Some((unit, ..)) => SystemPeer::Unit(unit.clone()),
             None => match self.peer_place(env, &unknown) {
                 Ok(place) if place.matched.is_empty() => SystemPeer::Detached,
                 Ok(place) => {
@@ -581,6 +642,36 @@ impl Flock {
                 Err(_) => SystemPeer::Unknown,
             },
         };
+        // t4782, warn-only: a unit caller the owner's unit list does not account for is still
+        // accepted, and logged and counted as "would refuse".
+        if let Some((unit, exe, pid, start)) = &found {
+            let listed = self
+                .with_roles(|roles, _| Ok(roles.system_token_units(label)))
+                .unwrap_or(None);
+            let findings = system_unit_findings(
+                unit,
+                exe.as_deref(),
+                listed.as_deref(),
+                &transient_unit_dir(),
+                releases_root().as_deref(),
+            );
+            if !findings.is_empty() {
+                eprintln!(
+                    "system token '{label}' would be refused (warn-only, accepted): unit={unit:?} exe={:?} pid={pid}:{start}: {}",
+                    exe.as_deref().map(|p| p.display().to_string()).unwrap_or_else(|| "?".into()),
+                    findings.join("; ")
+                );
+                if let Some(metrics) = self.stores().metrics {
+                    metrics.record(&crate::metrics::Event {
+                        at: crate::clock::now_s(),
+                        kind: "system.token_would_refuse".into(),
+                        source: Some(format!("{label}:{unit}")),
+                        reason: Some(findings.join("; ").chars().take(200).collect()),
+                        ..crate::metrics::Event::default()
+                    });
+                }
+            }
+        }
         let allowed = self
             .with_roles(|roles, _| Ok(roles.system_token_panes(label)))
             .unwrap_or_default();

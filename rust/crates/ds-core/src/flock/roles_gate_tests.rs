@@ -1273,3 +1273,135 @@ fn a_system_token_over_the_socket_is_checked_against_where_the_caller_runs() {
     flock.set_service_token(Some(&token));
     assert_eq!(flock.caller_role(None, &NoPanes).unwrap(), "system");
 }
+
+// ---- t4782: owner-listed units for system tokens, warn-only ----
+
+#[test]
+fn system_unit_findings_cover_listing_transient_units_and_release_executables() {
+    use super::roles_gate::{releases_root_of, system_unit_findings};
+    use std::path::Path;
+    let home = crate::testsupport::dir("t4782-units");
+    let transient = home.path().join("run/systemd/transient");
+    let unit_files = home.path().join("config/systemd/user");
+    std::fs::create_dir_all(&transient).unwrap();
+    std::fs::create_dir_all(&unit_files).unwrap();
+    // A real unit file in the user's unit directory: not transient.
+    std::fs::write(
+        unit_files.join("dunkingsheep-watchdog.service"),
+        "[Service]\n",
+    )
+    .unwrap();
+    // A unit made by `systemd-run --unit dunkingsheep-evil.service`.
+    std::fs::write(transient.join("dunkingsheep-evil.service"), "[Service]\n").unwrap();
+    let root = home.path().join("share/dunkingsheep/releases");
+    let daemon = root.join("rust-aaaa-daemon/dunkingsheep");
+    let telegram = root.join("rust-bbbb-telegram/dunkingsheep-telegram");
+    let listed = vec![
+        "dunkingsheep-watchdog.service".to_string(),
+        "dunkingsheep-telegram.service".to_string(),
+    ];
+    let check = |unit: &str, exe: Option<&Path>, listed: Option<&[String]>| {
+        system_unit_findings(unit, exe, listed, &transient, Some(&root))
+    };
+    // No unit list: today's behaviour, nothing found whatever the caller is.
+    assert!(check("dunkingsheep-evil.service", None, None).is_empty());
+    // Listed units on two different release revisions: clean.
+    assert!(check(
+        "dunkingsheep-watchdog.service",
+        Some(&daemon),
+        Some(&listed)
+    )
+    .is_empty());
+    assert!(check(
+        "dunkingsheep-telegram.service",
+        Some(&telegram),
+        Some(&listed)
+    )
+    .is_empty());
+    // Not listed, transient, and running a binary outside the releases root.
+    let evil = check(
+        "dunkingsheep-evil.service",
+        Some(Path::new("/home/x/bin/fake")),
+        Some(&listed),
+    );
+    assert_eq!(evil.len(), 3, "{evil:?}");
+    assert!(evil[0].contains("not listed"));
+    assert!(evil[1].contains("transient"));
+    assert!(evil[2].contains("outside"));
+    // An executable that cannot be read is a finding.
+    assert_eq!(
+        check("dunkingsheep-watchdog.service", None, Some(&listed)),
+        vec!["its executable could not be read".to_string()]
+    );
+    // Not running from a release: the executable check is skipped.
+    assert!(system_unit_findings(
+        "dunkingsheep-watchdog.service",
+        Some(Path::new("/anywhere/dunkingsheep")),
+        Some(&listed),
+        &transient,
+        None
+    )
+    .is_empty());
+    assert_eq!(releases_root_of(&daemon), Some(root.clone()));
+    assert_eq!(
+        releases_root_of(Path::new(
+            "/home/x/workspace/rust/target/debug/dunkingsheep"
+        )),
+        None
+    );
+}
+
+#[test]
+fn the_unit_list_is_read_from_the_trusted_pane_file_and_absent_means_no_check() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_flock, dir) = bare("t4782-unit-list");
+    let roles = Roles::new(
+        &Env::default(),
+        Some(dir.join("roles.json")),
+        Some(dir.join("tokens.json")),
+        None,
+    )
+    .unwrap();
+    assert_eq!(roles.system_token_units("watchdog"), None, "no file");
+    let path = dir.join(crate::roles::SYSTEM_TOKEN_PANES_FILE);
+    let write = |text: &str, mode: u32| {
+        std::fs::write(&path, text).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    write(r#"{"cos-heartbeat": ["%7"]}"#, 0o600);
+    assert_eq!(
+        roles.system_token_units("watchdog"),
+        None,
+        "no units section"
+    );
+    assert_eq!(
+        roles.system_token_panes("cos-heartbeat"),
+        vec!["%7".to_string()]
+    );
+    write(
+        r#"{"cos-heartbeat": ["%7"], "units": {"watchdog": ["dunkingsheep-watchdog.service", " "]}}"#,
+        0o600,
+    );
+    assert_eq!(
+        roles.system_token_units("watchdog"),
+        Some(vec!["dunkingsheep-watchdog.service".to_string()])
+    );
+    assert_eq!(
+        roles.system_token_units("health"),
+        Some(vec![]),
+        "label not named"
+    );
+    assert_eq!(
+        roles.system_token_panes("cos-heartbeat"),
+        vec!["%7".to_string()]
+    );
+    write(
+        r#"{"units": {"watchdog": ["dunkingsheep-watchdog.service"]}}"#,
+        0o620,
+    );
+    assert_eq!(
+        roles.system_token_units("watchdog"),
+        None,
+        "group-writable is ignored"
+    );
+}
