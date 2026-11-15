@@ -132,6 +132,34 @@ fn handoff(prompt: &str) -> Option<&str> {
     }
     None
 }
+fn notice_output(result: &Value, edge: &str) -> Option<Value> {
+    let notice = result.get("mail_notice")?;
+    if notice["action"] != "offer" {
+        return None;
+    }
+    let text = notice
+        .get("text")?
+        .as_str()
+        .filter(|s| !s.is_empty() && s.len() <= 512)?;
+    Some(if edge == "start" {
+        json!({"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":text}})
+    } else {
+        json!({"decision":"block","reason":text})
+    })
+}
+fn save_state(dir: &Path, session: &str, path: &Path, value: &Value) -> Option<()> {
+    let temp = dir.join(format!(".{session}.{}.tmp", std::process::id()));
+    let mut f = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp)
+        .ok()?;
+    f.write_all(serde_json::to_string(value).ok()?.as_bytes())
+        .ok()?;
+    fs::rename(temp, path).ok()?;
+    Some(())
+}
 fn run() -> Option<()> {
     let action = std::env::args().nth(1)?;
     if action != "start" && action != "end" {
@@ -146,6 +174,16 @@ fn run() -> Option<()> {
     if (action == "start" && event_name != "UserPromptSubmit")
         || (action == "end" && (event_name != "Stop" || event.get("stop_hook_active").is_none()))
     {
+        return None;
+    }
+    let mail_hook = std::env::var("DUNKINGSHEEP_CLAUDE_MAIL_HOOK")
+        .ok()
+        .as_deref()
+        == Some("1");
+    if mail_hook && (event.get("agent_id").is_some() || event.get("agent_type").is_some()) {
+        return None;
+    }
+    if mail_hook && action == "end" && event["stop_hook_active"].as_bool().is_none() {
         return None;
     }
     if !safe_id(session) || cwd.is_empty() {
@@ -194,6 +232,7 @@ fn run() -> Option<()> {
             s["session_id"] == session
                 && s["root_pid"] == pid
                 && s["root_start"] == start
+                && s["mail_continuing"] != true
                 && s["expires_at"].as_f64().unwrap_or(0.0) > now()
         }) {
             return Some(());
@@ -204,7 +243,11 @@ fn run() -> Option<()> {
             "turn",
             "start",
             "--source",
-            "claude-hook",
+            if mail_hook {
+                "claude-hook-mail-v1"
+            } else {
+                "claude-hook"
+            },
             "--ttl-s",
             &ttl_s,
         ];
@@ -218,19 +261,19 @@ fn run() -> Option<()> {
         let result = cli(&args, cwd)?;
         let token = result.get("turn_id")?.as_str().filter(|v| !v.is_empty())?;
         let pane = result.get("pane_id")?.as_str()?;
-        let value = json!({"daemon_turn_id":token,"session_id":session,"cwd":cwd,"pane_id":pane,"root_pid":pid,"root_start":start,"started_at":now(),"expires_at":now()+ttl});
-        let temp = dir.join(format!(".{session}.{}.tmp", std::process::id()));
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temp)
-            .ok()?;
-        f.write_all(serde_json::to_string(&value).ok()?.as_bytes())
-            .ok()?;
-        fs::rename(temp, path).ok()?;
+        let mut value = json!({"daemon_turn_id":token,"session_id":session,"cwd":cwd,"pane_id":pane,"root_pid":pid,"root_start":start,"started_at":now(),"expires_at":now()+ttl});
+        if mail_hook {
+            value["mail_hook"] = json!(true);
+            value["mail_continuing"] = json!(false);
+        }
+        save_state(&dir, session, &path, &value)?;
+        if mail_hook {
+            if let Some(output) = notice_output(&result, "start") {
+                println!("{output}");
+            }
+        }
     } else {
-        let s = state?;
+        let mut s = state?;
         if s["session_id"] != session || s["root_pid"] != pid || s["root_start"] != start {
             return None;
         }
@@ -240,20 +283,63 @@ fn run() -> Option<()> {
         }
         let token = s["daemon_turn_id"].as_str().filter(|s| !s.is_empty())?;
         let stored_cwd = s["cwd"].as_str()?;
-        fs::remove_file(path).ok()?;
-        drop(lock);
-        let _ = cli(
-            &[
-                "--json",
-                "turn",
-                "end",
-                "--turn-id",
-                token,
-                "--reason",
-                "stop",
-            ],
-            stored_cwd,
-        );
+        if s["mail_hook"] == true {
+            // Serialize Stop retries through persistence and stdout. A Stop feedback
+            // continuation has no new UserPromptSubmit and must keep its daemon token.
+            let active = event["stop_hook_active"].as_bool()?;
+            if event.get("agent_id").is_some() || event.get("agent_type").is_some() {
+                return None;
+            }
+            if s["mail_continuing"] == true && !active {
+                return Some(());
+            }
+            let reason = if active || !mail_hook {
+                "stop-continuation"
+            } else {
+                "stop"
+            };
+            let result = cli(
+                &[
+                    "--json",
+                    "turn",
+                    "end",
+                    "--turn-id",
+                    token,
+                    "--reason",
+                    reason,
+                ],
+                stored_cwd,
+            )?;
+            if result["ended"] == false && result["reason"] == "mail_notice" && !active && mail_hook
+            {
+                if let Some(output) = notice_output(&result, "end") {
+                    s["mail_continuing"] = json!(true);
+                    save_state(&dir, session, &path, &s)?;
+                    println!("{output}");
+                    return Some(());
+                }
+            }
+            // Refusal / malformed result cannot cause model feedback. Keep state
+            // for retry unless the daemon positively confirms this generation ended.
+            if result["ended"] == true {
+                fs::remove_file(path).ok()?;
+            }
+        } else {
+            fs::remove_file(path).ok()?;
+            drop(lock);
+            let _ = cli(
+                &[
+                    "--json",
+                    "turn",
+                    "end",
+                    "--turn-id",
+                    token,
+                    "--reason",
+                    "stop",
+                ],
+                stored_cwd,
+            );
+        }
     }
     Some(())
 }

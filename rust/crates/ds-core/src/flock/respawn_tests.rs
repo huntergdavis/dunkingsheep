@@ -497,6 +497,7 @@ fn active_and_falsey_ended_turns_refuse_without_mutation() {
                 source: None,
                 caller: None,
                 handoff_id: None,
+                mail_continuing: false,
             },
         );
         let (p, s) = f.original();

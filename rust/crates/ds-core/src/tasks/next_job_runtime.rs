@@ -2304,6 +2304,7 @@ mod tests {
             source: Some("producer".into()),
             caller: Some(json!("worker")),
             handoff_id: Some(message_id.into()),
+            mail_continuing: false,
         };
         tokio::time::timeout(
             std::time::Duration::from_millis(500),

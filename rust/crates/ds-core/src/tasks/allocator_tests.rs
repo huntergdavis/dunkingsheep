@@ -1128,6 +1128,7 @@ async fn guarded_allocation_rechecks_turn_and_queue_before_real_commit() {
         source: None,
         caller: Some(json!({})),
         handoff_id: None,
+        mail_continuing: false,
     };
     flock
         .turn_states
@@ -1425,6 +1426,7 @@ async fn guarded_allocation_holds_turn_and_outbox_through_commit() {
             source: None,
             caller: Some(json!({})),
             handoff_id: None,
+            mail_continuing: false,
         },
     );
     let candidates = BTreeMap::from([(

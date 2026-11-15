@@ -338,7 +338,7 @@ recovery line, but does not establish whether its candidate was registered or
 superseded; the source regression covers terminal failure through the real
 observer without claiming that historical cause.
 
-## Inbox notices through turn hooks (t4702, first slice)
+## Inbox notices through turn hooks (t4702)
 
 Mail is stored before any notice. A model-context offer is neither a read nor
 handling, and never sets the typed-notice delivery receipt. The native Codex
@@ -351,7 +351,7 @@ Codex session.
 | Harness | Turn edges already wired | Model-context route | Evidence / activation |
 |---|---|---|---|
 | Codex | UserPromptSubmit / Stop | Start: hookSpecificOutput.additionalContext; Stop: decision=block with bounded reason starts a continuation | Official contract; native producer/queue private fixtures. Installed host/model consumption NOT verified; native sibling installation is separate. |
-| Claude Code | UserPromptSubmit / Stop; SubagentStop ignored | Prompt context and Stop feedback are documented | Existing Rust producer currently discards turn result. Adapter is next slice t5171; not activated by this PR. |
+| Claude Code | UserPromptSubmit / Stop; SubagentStop ignored | Start: additionalContext; Stop: one bounded decision=block per unread batch | Native private fixtures; requires explicit DUNKINGSHEEP_CLAUDE_MAIL_HOOK=1. Default legacy behavior retained; installation and model consumption NOT verified. |
 | pi | before_agent_start / agent_settled | Installed extension returns a message at start and uses sendMessage(followUp) for owner mail | Local extension source inspected; general inbox adapter and live acceptance remain follow-up. |
 | OpenCode | chat.message / session.idle | Model injection NOT verified | Existing plugin reports token-bound edges; events alone do not prove a context consumer. Keep guarded fallback. |
 
@@ -383,6 +383,30 @@ submit verification as ordinary delivery. Duplicate hooks do not add wakes;
 once the queued notice is delivered, the existing decided receipt prevents a
 second send. Missing/failed hooks retain that queue; a missing end still has the
 normal declared-turn TTL backstop. No timer sleeps under a queue or fleet lock.
+
+Claude Stop feedback continues inside the same turn; a new UserPromptSubmit
+is not assumed. An authenticated `claude-hook-mail-v1` Stop offer keeps its
+existing daemon generation active and skips idle dispatch. The native adapter
+persists its continuation marker before emitting feedback. A duplicate false
+Stop cannot end it; the following `stop_hook_active=true` Stop ends the same
+generation with no further feedback, starting the ordinary 120 s idle clock.
+That final Stop retires an already-read notice while preserving recovery bodies;
+otherwise it persists the idle observation without spending an offer, so restart
+also preserves the full idle grace.
+The persisted notice batch permits at most one Claude Stop continuation, even
+if its first offer arrived only at Stop or the daemon restarts. New batch IDs
+reset this cap. Other hooks already continuing the turn also suppress mail
+feedback. No transcript, mail body, or terminal screen is read by this adapter.
+
+A hook killed after the marker but before stdout has offered no proven model
+context. Its duplicate false Stop stays silent. A genuine continuation Stop can
+still finish the token; if none arrives, the declared turn TTL remains the
+backstop and guarded fallback waits 120 s after expiry. The private fixture
+actually kills a hook whose stdout pipe is full after marker persistence; this
+is process/format evidence, not evidence from a live Claude model. Failed or
+refused RPCs emit no feedback and retain private state for retry/expiry. Rollout
+requires a separate coordinator GO and agent lanes only; this PR edits neither
+installed hooks nor trust configuration.
 
 The motivating journal window (2026-11-14 23:20–23:50) contained four `%308`
 turn-end decisions skipped for unread_mail. The specific m38500 identifier was

@@ -65,6 +65,7 @@ impl Fixture {
                 source: Some("codex-hook-mail-v1".into()),
                 caller: None,
                 handoff_id: None,
+                mail_continuing: false,
             },
         );
     }
@@ -263,4 +264,188 @@ fn proactive_read_before_the_first_offer_also_retires_the_stale_wake() {
         2,
         "retiring a wake must preserve lost-response recovery bodies"
     );
+}
+
+#[test]
+fn claude_stop_keeps_generation_busy_until_continuation_finishes() {
+    use crate::error::DunkError;
+    use crate::flock::commands_turns::{NoHooks, TurnHooks};
+    use std::cell::Cell;
+    struct Hooks<'a> {
+        f: &'a Fixture,
+        dispatches: Cell<usize>,
+    }
+    impl TurnHooks for Hooks<'_> {
+        fn record(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &str,
+            _: f64,
+            _: Option<i64>,
+        ) {
+        }
+        fn observe_turn(&self, _: &str, _: &TurnState) -> Result<(), DunkError> {
+            Ok(())
+        }
+        fn dispatch_on_turn_end(&self, _: &str) -> Result<serde_json::Value, DunkError> {
+            self.dispatches.set(self.dispatches.get() + 1);
+            Ok(json!({"action":"mail"}))
+        }
+        fn mail_notice(
+            &self,
+            _: &str,
+            turn: &str,
+            edge: &str,
+            now: f64,
+        ) -> Result<Option<serde_json::Value>, DunkError> {
+            self.f.flock.offer_mail_notice(P, P, turn, edge, now)
+        }
+    }
+    let f = Fixture::new();
+    let h = Hooks {
+        f: &f,
+        dispatches: Cell::new(0),
+    };
+    f.flock.set_caller(Some(json!({"pid":41,"start":"100"})));
+    let start = f
+        .flock
+        .turn_start(
+            None,
+            Some(1800.0),
+            Some("claude-hook-mail-v1"),
+            Some(P),
+            None,
+            &NoHooks,
+        )
+        .unwrap();
+    let token = start["turn_id"].as_str().unwrap();
+    // Mail arrived after prompt start: first offer happens on Stop.
+    let stop = f
+        .flock
+        .turn_end(None, "stop", Some(P), Some(token), true, &h)
+        .unwrap();
+    assert_eq!(stop["ended"], false);
+    assert_eq!(stop["mail_notice"]["offers"], 1);
+    assert!(f.flock.turn_active(P));
+    assert_eq!(h.dispatches.get(), 0);
+    let mut terminal = Pane::default();
+    let now = crate::clock::now_s();
+    assert_eq!(
+        outbox_step(
+            &f.flock,
+            &mut terminal,
+            P,
+            now + 121.0,
+            &AtomicBool::new(false),
+            &|_| false,
+            &mut || None
+        ),
+        OutboxStep::HookWaiting
+    );
+    assert!(terminal.reads.borrow().is_empty() && terminal.typed.is_empty());
+    // Replayed false Stop cannot supply idle evidence or another offer.
+    let replay = f
+        .flock
+        .turn_end(None, "stop", Some(P), Some(token), true, &h)
+        .unwrap();
+    assert_eq!(replay["reason"], "mail_continuation_active");
+    assert!(replay.get("mail_notice").is_none());
+    // Wrong token/foreign caller cannot end the continued generation.
+    assert_eq!(
+        f.flock
+            .turn_end(None, "stop-continuation", Some(P), Some("stale"), true, &h)
+            .unwrap()["reason"],
+        "turn_mismatch"
+    );
+    f.flock.set_caller(Some(json!({"pid":42,"start":"100"})));
+    assert_eq!(
+        f.flock
+            .turn_end(None, "stop-continuation", Some(P), Some(token), true, &h)
+            .unwrap()["reason"],
+        "foreign_turn"
+    );
+    f.flock.set_caller(Some(json!({"pid":41,"start":"100"})));
+    let end = f
+        .flock
+        .turn_end(None, "stop-continuation", Some(P), Some(token), true, &h)
+        .unwrap();
+    assert_eq!(end["ended"], true);
+    assert_eq!(end["mail_notice"]["action"], "fallback");
+    assert!(!f.flock.turn_active(P));
+    assert_eq!(h.dispatches.get(), 1);
+    let ended = f.flock.turn_ended_at(P).unwrap();
+    let row = f.flock.outbox_snapshot()[P][0].clone();
+    assert!(f.flock.notice_waits_for_hook(&row, ended + 119.0));
+    assert!(!f.flock.notice_waits_for_hook(&row, ended + 120.0));
+    // Persisted batch cap survives a restart even when only one offer was used.
+    let restored = message_from_snapshot(&message_snapshot(&row)).unwrap();
+    f.flock.turn_states.lock().unwrap().clear();
+    assert!(f.flock.notice_waits_for_hook(&restored, ended + 119.0));
+    assert!(!f.flock.notice_waits_for_hook(&restored, ended + 120.0));
+    f.flock
+        .outbox
+        .lock()
+        .unwrap()
+        .insert(P.into(), vec![restored]);
+    assert_eq!(
+        f.offer("new-turn", "claude-stop", ended + 121.0).unwrap()["reason"],
+        "claude_continuation_used"
+    );
+    for id in &f.ids {
+        assert_eq!(f.inbox.get_message(id).unwrap().summary.state, "queued");
+    }
+    // A read during continuation retires the stale wake on the final Stop,
+    // without another offer or losing the read-response recovery receipt.
+    let start = f
+        .flock
+        .turn_start(
+            None,
+            Some(1800.0),
+            Some("claude-hook-mail-v1"),
+            Some(P),
+            None,
+            &NoHooks,
+        )
+        .unwrap();
+    f.inbox
+        .read_with_receipt(P, &f.ids, true, Some(ended + 122.0))
+        .unwrap();
+    let end = f
+        .flock
+        .turn_end(
+            None,
+            "stop-continuation",
+            Some(P),
+            start["turn_id"].as_str(),
+            true,
+            &h,
+        )
+        .unwrap();
+    assert_eq!(end["ended"], true);
+    assert!(end.get("mail_notice").is_none());
+    assert!(f.flock.outbox_snapshot()[P].is_empty());
+    assert_eq!(f.inbox.recover_delivery(P).unwrap().len(), 2);
+}
+
+#[test]
+fn lost_claude_feedback_uses_ttl_then_full_idle_grace() {
+    use crate::flock::commands_turns::NoHooks;
+    let f = Fixture::new();
+    {
+        let mut states = f.flock.turn_states.lock().unwrap();
+        let state = states.get_mut(P).unwrap();
+        state.source = Some("claude-hook-mail-v1".into());
+        state.mail_continuing = true;
+    }
+    f.offer("turn1", "claude-stop", 105.0);
+    // Marker persisted, stdout lost, no follow-up hook. TTL is 1000.
+    let row = f.flock.outbox_snapshot()[P][0].clone();
+    assert!(f.flock.notice_waits_for_hook(&row, 999.0));
+    assert!(f.flock.turn_expire(Some(1000.0), &NoHooks).is_empty());
+    assert!(f.flock.notice_waits_for_hook(&row, 1119.0));
+    assert_eq!(f.flock.turn_expire(Some(1120.0), &NoHooks).len(), 1);
+    assert!(!f.flock.notice_waits_for_hook(&row, 1120.0));
 }
