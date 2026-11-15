@@ -13,6 +13,7 @@
 
 use std::collections::BTreeMap;
 
+pub mod agent_child;
 pub mod composer;
 pub mod control;
 pub mod fakes;
