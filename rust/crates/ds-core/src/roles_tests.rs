@@ -86,12 +86,13 @@ fn the_tables_have_the_pythons_sizes() {
     // Sizes of the sets in dunk_roles.py when these tables were generated (t1170). A
     // The retired Python tables are unchanged; the Rust-only desk handoff adds one entry, and the
     // Rust-only read-only backlog query (t4648) adds one to READ_ONLY. t4695 adds
-    // recovery/ack grants to roles already permitted to read inbox mail.
+    // recovery/ack grants to roles already permitted to read inbox mail. t5341 adds
+    // planner attachment fetch under the existing own-mailbox authorization.
     assert_eq!(48, READ_ONLY.len());
     assert_eq!(29, WORKER_EXTRA.len());
     assert_eq!(35, SYSTEM_EXTRA.len());
     assert_eq!(18, DESK_EXTRA.len());
-    assert_eq!(11, PLANNER_EXTRA.len());
+    assert_eq!(12, PLANNER_EXTRA.len());
     assert_eq!(30, WEB_DENIED.len());
 }
 
@@ -496,16 +497,16 @@ mod registry {
 }
 
 #[test]
-fn inbox_read_roles_have_recovery_and_explicit_ack_without_anonymous_grants() {
+fn inbox_read_roles_have_recovery_ack_and_fetch_without_anonymous_grants() {
     for role in [
         "owner", "web", "desk", "system", "planner", "worker", "reviewer",
     ] {
-        for command in ["inbox_read", "inbox_recover", "inbox_ack"] {
+        for command in ["inbox_read", "inbox_recover", "inbox_ack", "inbox_fetch"] {
             assert!(allowed(role, command), "{role}:{command}");
         }
     }
     for role in ["anonymous", "unknown"] {
-        for command in ["inbox_read", "inbox_recover", "inbox_ack"] {
+        for command in ["inbox_read", "inbox_recover", "inbox_ack", "inbox_fetch"] {
             assert!(!allowed(role, command), "{role}:{command}");
         }
     }

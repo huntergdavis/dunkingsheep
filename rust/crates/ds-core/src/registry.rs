@@ -349,7 +349,7 @@ pub static COMMANDS: &[Command] = &[
         required: &["attachment_id"],
         mcp: true,
         owner_only: false,
-        roles: &["owner", "system", "web", "desk", "worker", "reviewer"],
+        roles: &["owner", "system", "web", "desk", "planner", "worker", "reviewer"],
     },
     Command {
         name: "inbox_get",

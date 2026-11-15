@@ -161,8 +161,9 @@ pub const DESK_EXTRA: [&str; 18] = [
 ];
 
 /// `ALLOW["planner"]` minus `READ_ONLY`.
-pub const PLANNER_EXTRA: [&str; 11] = [
+pub const PLANNER_EXTRA: [&str; 12] = [
     "inbox_ack",
+    "inbox_fetch",
     "inbox_read",
     "inbox_recover",
     "inbox_send",

@@ -1079,16 +1079,19 @@ fn read_recovery_receipt_failure_leaves_mail_queued_and_prior_batch_recoverable(
 
 #[test]
 fn attachment_fetch_requires_an_attributable_mailbox_for_ordinary_callers() {
-    let (mut e, d) = (env("worker"), tempfile::tempdir().unwrap());
-    e.paneless = Some("worker");
-    let f = flock(&d);
-    let id = put(&e, "Mine", "fixture");
-    let error = f
-        .authorize_inbox_fetch(&e, &rusqlite::types::Value::Text(id), "'fixture'", None)
-        .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("no mailbox given and no caller pane"));
+    for role in ["worker", "planner"] {
+        let (mut e, d) = (env(role), tempfile::tempdir().unwrap());
+        e.paneless = Some(role);
+        let f = flock(&d);
+        let dest = d.path().join("unbound-fetch");
+        let error = f
+            .inbox_fetch(&e, "i999999-1", Some(&dest), None)
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("no mailbox given and no caller pane"));
+        assert!(!dest.exists(), "{role} cannot infer an owner mailbox");
+    }
 }
 
 #[test]

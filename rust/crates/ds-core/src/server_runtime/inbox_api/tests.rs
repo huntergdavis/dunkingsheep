@@ -2065,6 +2065,9 @@ fn inbox_fetch_checks_parent_mailbox_before_destination_writes() {
     let own = send("w1:p1");
     let foreign = send("w2:p2");
     let human = send("owner");
+    // The fake backend does not list w4:p4. Give the planner an attributable
+    // mailbox so its foreign fetch reaches the parent-mailbox authorization.
+    send("w4:p4");
     let attachment = |id: &str| store.get_message(id).unwrap().attachments[0].id.clone();
     let own_attachment = attachment(&own);
     let foreign_attachment = attachment(&foreign);
@@ -2194,23 +2197,88 @@ fn inbox_fetch_checks_parent_mailbox_before_destination_writes() {
         "ordinary fetch cannot infer an own mailbox without a caller pane"
     );
     let planner_dest = dir.path().join("planner-copy");
-    assert!(dispatcher
+    let error = dispatcher
         .dispatch(
             "inbox_fetch",
             &json!({"attachment_id":own_attachment,"dest":planner_dest}),
-            &request("w4:p4")
+            &request("w4:p4"),
         )
-        .is_err());
-    assert!(
-        !planner_dest.exists(),
-        "planner fetch grant stays unchanged"
-    );
+        .unwrap_err();
+    assert!(error.to_string().contains("no attachment with id"));
+    assert!(!planner_dest.exists(), "planner cannot fetch worker mail");
     let status = dispatcher
         .dispatch("inbox_status", &json!({"message_id":own}), &worker)
         .unwrap();
     assert!(status.get("body").is_none());
     assert!(status["attachments"].is_number());
     assert!(!status.to_string().contains("known private fixture bytes"));
+    dispatcher.close();
+}
+
+#[test]
+fn planner_fetch_is_scoped_to_its_own_parent_mailbox() {
+    let (dir, services) = make_services("planner-fetch", factory(None), None);
+    services
+        .flock()
+        .with_roles(|roles, _| {
+            roles.register("w4:p4", "planner", None, None, None, None, None, None)
+        })
+        .unwrap();
+    let store = services.flock().stores().inbox.unwrap();
+    let file = dir.path().join("payload.txt");
+    std::fs::write(&file, b"private attachment bytes").unwrap();
+    let attachment = |mailbox| {
+        let id = store
+            .send(&crate::inbox_store::Outgoing {
+                mailbox,
+                attachments: std::slice::from_ref(&file),
+                ..Default::default()
+            })
+            .unwrap();
+        store.get_message(&id).unwrap().attachments[0].id.clone()
+    };
+    // Shared blob bytes do not grant access to another message's attachment ID.
+    let own = attachment("w4:p4");
+    let foreign = attachment("w1:p1");
+    let dispatcher = services.dispatcher(handlers());
+    let planner = request("w4:p4");
+    let dest = dir.path().join("own-copy");
+    dispatcher
+        .dispatch(
+            "inbox_fetch",
+            &json!({"attachment_id":own,"dest":dest}),
+            &planner,
+        )
+        .unwrap();
+    assert_eq!(
+        std::fs::read(dest.join("payload.txt")).unwrap(),
+        b"private attachment bytes"
+    );
+    for id in [foreign.as_str(), "i999999-1"] {
+        let refused_dest = dir.path().join("refused-copy");
+        let error = dispatcher
+            .dispatch(
+                "inbox_fetch",
+                &json!({"attachment_id":id,"dest":refused_dest}),
+                &planner,
+            )
+            .unwrap_err();
+        assert!(matches!(error, crate::DunkError::Refused(_)));
+        assert_eq!(error.to_string(), format!("no attachment with id '{id}'"));
+        assert!(!refused_dest.exists());
+        let error = dispatcher
+            .dispatch(
+                "inbox_fetch",
+                &json!({"attachment_id":id,"dest":dest}),
+                &planner,
+            )
+            .unwrap_err();
+        assert_eq!(error.to_string(), format!("no attachment with id '{id}'"));
+        assert_eq!(
+            std::fs::read(dest.join("payload.txt")).unwrap(),
+            b"private attachment bytes"
+        );
+    }
     dispatcher.close();
 }
 
