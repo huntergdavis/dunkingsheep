@@ -1036,6 +1036,18 @@ impl Store {
         message_ids: &[String],
         now: Option<f64>,
     ) -> Result<usize, DunkError> {
+        self.read_with_receipt(mailbox, message_ids, false, now)
+    }
+
+    /// Commit an already prepared read batch and its bounded recovery receipt together.
+    /// Implicit consumption retains the receipt; only explicit ack retires receipt IDs.
+    pub fn read_with_receipt(
+        &self,
+        mailbox: &str,
+        message_ids: &[String],
+        ack: bool,
+        now: Option<f64>,
+    ) -> Result<usize, DunkError> {
         let ids = message_ids.to_vec();
         if ids.is_empty() {
             return Ok(0);
@@ -1055,10 +1067,17 @@ impl Store {
                 if !belongs {
                     return Err(refuse("delivery contains unavailable or foreign mail"));
                 }
-                changed += tx.execute(
-                    "UPDATE messages SET state = 'read', read_at = ? WHERE id = ? AND state = 'queued'",
-                    rusqlite::params![now, id],
-                ).map_err(map_sqlite)?;
+                changed += if ack {
+                    tx.execute(
+                        "UPDATE messages SET state='acked', read_at=COALESCE(read_at,?), acked_at=? WHERE id=? AND state IN ('queued','read')",
+                        rusqlite::params![now, now, id],
+                    )
+                } else {
+                    tx.execute(
+                        "UPDATE messages SET state='read', read_at=? WHERE id=? AND state='queued'",
+                        rusqlite::params![now, id],
+                    )
+                }.map_err(map_sqlite)?;
             }
             tx.execute(
                 "INSERT INTO deliveries (mailbox, message_ids, delivered_at) VALUES (?,?,?) \
@@ -1203,6 +1222,52 @@ impl Store {
                     )
                     .map_err(map_sqlite)?;
             }
+            Ok(remaining)
+        })
+    }
+
+    /// Explicit acknowledgment clears only named IDs, preserving implicitly consumed
+    /// receipt entries for replay. Missing or foreign legacy entries are pruned too.
+    pub fn note_acked_ids(&self, mailbox: &str, ids: &[String]) -> Result<Vec<String>, DunkError> {
+        let mailbox = mailbox.to_owned();
+        let acked: std::collections::HashSet<String> = clean_ids(ids)?.into_iter().collect();
+        self.writer.call(move |connection| {
+            let tx = connection.transaction().map_err(map_sqlite)?;
+            let Some(receipt) = receipt_of(&tx, &mailbox)? else {
+                return Ok(Vec::new());
+            };
+            let (scope, boxes) = mailbox_where(&mailbox, "mailbox");
+            let marks = vec!["?"; receipt.message_ids.len()].join(",");
+            let have: std::collections::HashSet<String> = {
+                let mut statement = tx
+                    .prepare(&format!(
+                        "SELECT id FROM messages WHERE id IN ({marks}) AND {scope}"
+                    ))
+                    .map_err(map_sqlite)?;
+                let rows = statement
+                    .query_map(
+                        rusqlite::params_from_iter(receipt.message_ids.iter().chain(boxes.iter())),
+                        |row| row.get(0),
+                    )
+                    .map_err(map_sqlite)?;
+                rows.collect::<Result<_, _>>().map_err(map_sqlite)?
+            };
+            let remaining: Vec<String> = receipt
+                .message_ids
+                .into_iter()
+                .filter(|id| !acked.contains(id) && have.contains(id))
+                .collect();
+            if remaining.is_empty() {
+                tx.execute("DELETE FROM deliveries WHERE mailbox=?", [&mailbox])
+                    .map_err(map_sqlite)?;
+            } else {
+                tx.execute(
+                    "UPDATE deliveries SET message_ids=? WHERE mailbox=?",
+                    rusqlite::params![json_list(&remaining), mailbox],
+                )
+                .map_err(map_sqlite)?;
+            }
+            tx.commit().map_err(map_sqlite)?;
             Ok(remaining)
         })
     }

@@ -2653,6 +2653,7 @@
    "limit": 10,
    "mailbox": null,
    "messages_only": false,
+   "no_ack": false,
    "no_start_daemon": false,
    "peek": false,
    "self_pane": null,
@@ -2673,6 +2674,7 @@
    "limit": 10,
    "mailbox": null,
    "messages_only": false,
+   "no_ack": false,
    "no_start_daemon": false,
    "peek": false,
    "self_pane": null,
@@ -2693,6 +2695,7 @@
    "limit": 10,
    "mailbox": null,
    "messages_only": false,
+   "no_ack": false,
    "no_start_daemon": false,
    "peek": false,
    "self_pane": null,
@@ -2714,6 +2717,7 @@
    "limit": 1,
    "mailbox": null,
    "messages_only": false,
+   "no_ack": false,
    "no_start_daemon": false,
    "peek": false,
    "self_pane": null,
@@ -2734,6 +2738,7 @@
    "limit": 10,
    "mailbox": null,
    "messages_only": false,
+   "no_ack": false,
    "no_start_daemon": false,
    "peek": true,
    "self_pane": null,
@@ -2754,6 +2759,7 @@
    "limit": 10,
    "mailbox": null,
    "messages_only": true,
+   "no_ack": false,
    "no_start_daemon": false,
    "peek": false,
    "self_pane": null,
@@ -2774,11 +2780,33 @@
    "limit": 10,
    "mailbox": null,
    "messages_only": false,
+   "no_ack": false,
    "no_start_daemon": false,
    "peek": false,
    "self_pane": null,
    "socket": null,
    "with_tasks": true
+  }
+ },
+ {
+  "argv": [
+   "inbox",
+   "read",
+   "--no-ack"
+  ],
+  "namespace": {
+   "command": "inbox",
+   "inbox_command": "read",
+   "json": false,
+   "limit": 10,
+   "mailbox": null,
+   "messages_only": false,
+   "no_ack": true,
+   "no_start_daemon": false,
+   "peek": false,
+   "self_pane": null,
+   "socket": null,
+   "with_tasks": false
   }
  },
  {

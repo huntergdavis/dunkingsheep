@@ -504,7 +504,7 @@ impl Flock {
         // t128: shrink the delivery receipt to what is still unacked, so a recovered batch
         // stops replaying once it has been displayed+acked.
         let still_pending = match &key {
-            Some(key) => Some(env.store().note_acked(key)?),
+            Some(key) => Some(env.store().note_acked_ids(key, message_ids)?),
             None => None,
         };
         for id in &transition.changed {
@@ -950,7 +950,7 @@ impl Flock {
         })
     }
 
-    /// `inbox_read`: read a batch WITHOUT consuming it, build the whole result, then commit.
+    /// `inbox_read`: prepare the full result, then atomically consume and retain recovery.
     ///
     /// The order is the point (VP, t93): marking read first meant a reader whose rendering
     /// or task lookup failed had already consumed the batch, and pi-review-1 issued a verdict
@@ -985,11 +985,13 @@ impl Flock {
             limit as i64,
             peek,
             include_tasks,
+            true,
             self_pane_id,
         )
     }
 
     /// Read with Python's signed SQLite LIMIT while preserving commit/receipt order.
+    #[allow(clippy::too_many_arguments)]
     pub fn inbox_read_signed(
         &self,
         env: &dyn InboxEnv,
@@ -997,6 +999,7 @@ impl Flock {
         limit: i64,
         peek: bool,
         include_tasks: bool,
+        ack: bool,
         self_pane_id: Option<&str>,
     ) -> Result<ReadResult, DunkError> {
         let key = self.mailbox_or_self(env, mailbox, self_pane_id, false, true)?;
@@ -1025,10 +1028,10 @@ impl Flock {
             .collect();
         // t128/t4695: commit the mark and its bounded recovery receipt together.
         // A receipt failure must not leave read mail with no recoverable body.
-        let marked = env.store().mark_read_with_receipt(&key, &ids, None)?;
         let now = env.now();
+        let marked = env.store().read_with_receipt(&key, &ids, ack, Some(now))?;
         for message in &mut messages {
-            message.summary.state = "read".to_string();
+            message.summary.state = if ack { "acked" } else { "read" }.to_string();
             message.read_at = Some(now);
             env.record_metric(
                 "inbox.read",
@@ -1038,6 +1041,16 @@ impl Flock {
                 Some(((now - message.summary.created_at) * 1000.0) as i64),
                 Some(message.summary.body_bytes),
             );
+            if ack {
+                env.record_metric(
+                    "inbox.acked",
+                    message.pane_id.as_deref(),
+                    &key,
+                    message.summary.sender.as_deref(),
+                    Some(0),
+                    None,
+                );
+            }
         }
         Ok(ReadResult {
             mailbox: key,
@@ -1055,8 +1068,10 @@ impl Flock {
         env: &dyn InboxEnv,
         mailbox: &str,
         ids: &[String],
+        ack: bool,
+        now: f64,
     ) -> Result<usize, DunkError> {
-        env.store().mark_read_with_receipt(mailbox, ids, None)
+        env.store().read_with_receipt(mailbox, ids, ack, Some(now))
     }
 }
 

@@ -1490,8 +1490,9 @@ os.rename(out_path + ".tmp", out_path)
                 .set_write_timeout(Some(Duration::from_secs(10)))
                 .unwrap();
             let mut client = BufReader::new(stream);
-            let mut call = |sequence: u64, command: &str| {
-                let request = json!({"id":sequence,"cmd":command,"args":{},"self_pane_id":"w1:p1"});
+            let mut call = |sequence: u64, command: &str, args: Value| {
+                let request =
+                    json!({"id":sequence,"cmd":command,"args":args,"self_pane_id":"w1:p1"});
                 serde_json::to_writer(client.get_mut(), &request).unwrap();
                 client.get_mut().write_all(b"\n").unwrap();
                 let mut line = String::new();
@@ -1501,21 +1502,37 @@ os.rename(out_path + ".tmp", out_path)
                 assert_eq!(response["ok"], true, "{command}: {response}");
                 response["result"].take()
             };
-            let identity = call(1, "whoami");
+            let identity = call(1, "whoami", json!({}));
             assert_eq!(identity["pane_id"], "w1:p1");
             assert_eq!(identity["role"], "worker");
             assert_eq!(identity["bound"], true);
             assert_eq!(identity["caller"]["pid"], pane_pid);
-            let read = call(2, "inbox_read");
+            let read = call(2, "inbox_read", json!({}));
             assert_eq!(read["mailbox"], "w1:p1");
             assert_eq!(read["messages"].as_array().unwrap().len(), 1);
             assert_eq!(read["messages"][0]["message_id"], id);
             assert_eq!(read["messages"][0]["body"], "canonical socket message");
-            assert_eq!(read["messages"][0]["state"], "read");
+            assert_eq!(read["messages"][0]["state"], "acked");
             assert_eq!(read["marked_read"], 1);
             assert_eq!(store.unread_for_pane("w1:p1").unwrap(), 0);
-            let empty = call(3, "inbox_read");
+            let empty = call(3, "inbox_read", json!({}));
             assert!(empty["messages"].as_array().unwrap().is_empty());
+            assert!(crate::inbox::status(store.read_pool(), &id, 0.)
+                .unwrap()
+                .acked_at
+                .is_some());
+            // Discard the read bodies at the client boundary, then replay over the real socket.
+            drop(read);
+            for sequence in [4, 5] {
+                let recovered = call(sequence, "inbox_recover", json!({}));
+                assert_eq!(recovered["messages"][0]["body"], "canonical socket message");
+                assert_eq!(recovered["messages"][0]["state"], "acked");
+            }
+            let ack = call(6, "inbox_ack", json!({"message_ids":[id]}));
+            assert_eq!(ack["changed"], json!([]));
+            assert_eq!(ack["still_pending"], json!([]));
+            let cleared = call(7, "inbox_recover", json!({}));
+            assert!(cleared["messages"].as_array().unwrap().is_empty());
         }));
         stop.store(true, Ordering::SeqCst);
         thread.join().unwrap();

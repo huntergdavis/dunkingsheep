@@ -1,5 +1,5 @@
 usage: dunkingsheep inbox read [-h] [--limit LIMIT] [--peek] [--messages-only]
-                               [--with-tasks]
+                               [--with-tasks] [--no-ack]
                                [mailbox]
 
 positional arguments:
@@ -11,3 +11,5 @@ options:
   --peek             do not mark them read
   --messages-only    omit task queues (the default; overrides --with-tasks)
   --with-tasks       include task queues in the response
+  --no-ack           mark read without implicit consumption; acknowledge
+                     explicitly after display

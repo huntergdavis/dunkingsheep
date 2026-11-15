@@ -435,10 +435,13 @@ code. A plain `dunkingsheep inbox read` is the supported shape, and an
 allow rule for `Bash(dunkingsheep *)` in ~/.claude/settings.json lets auto
 mode run it without prompting.
 
-A read prepares the complete response before atomically committing its read
-marks and recovery receipt. A preparation or receipt-write failure leaves
-the batch unread. A repeated batch after an error is safe redelivery, not
-a new message. `--peek` still changes neither mail nor the recovery receipt.
+A read prepares the complete response before atomically recording its read
+marks, implicit acknowledgment and recovery receipt. Normal reads consume
+the returned batch: no separate ack call is needed. Use `--no-ack` or
+`inbox_read(ack=false)` for the previous explicit-ack workflow. A preparation
+or write failure leaves the batch unread and the prior receipt intact. A
+repeated batch after an error is safe redelivery, not a new message.
+`--peek` still changes neither mail nor the recovery receipt.
 
 If a read answer never arrives (the mark committed, then the response was
 lost), the batch is marked read but was displayed nowhere:     dunkingsheep inbox recover
@@ -451,12 +454,14 @@ Recover and ack use the same mailbox authorization as read. Every role
 that can read inbox mail, including planners, can recover and acknowledge
 its own messages. Ordinary lanes cannot recover another lane's or the
 human owner's mailbox. Existing privileged read access is unchanged.
-Only acknowledge IDs whose bodies you actually received and displayed; if
-a read response is missing its bodies, recover first instead of acknowledging.
-Empty reads preserve the last non-empty receipt. Recovery may be repeated
-after another lost response; explicit acknowledgment clears only the
-acknowledged mail from the receipt. Normal reads still mark read without
-acknowledging, and the messages-only default remains unchanged.
+After a lost read response, recover replays the latest batch even when the
+normal read already acknowledged it. Empty reads preserve that receipt;
+repeated recovery is safe, and a newer non-empty read replaces the one-batch
+buffer. Existing retention and deletion bounds still apply. Explicit ack
+is optional after normal reads and remains idempotent; it clears only the
+named IDs from the receipt. In manual mode (`--no-ack` / `ack=false`), ack
+only bodies you received and displayed; recover missing bodies first.
+The messages-only default remains unchanged.
 
 An agent whose MCP connection predates the inbox has a stale tool list and
 will not see inbox_read until it reconnects. The CLI works meanwhile, which

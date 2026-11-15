@@ -225,7 +225,7 @@ fn exercise(command: &str) {
         "inbox_ack" => {
             call(
                 "inbox_read",
-                json!({"mailbox":"w1:p1","include_tasks":false}),
+                json!({"mailbox":"w1:p1","include_tasks":false,"ack":false}),
             );
             let r = call(command, json!({"message_ids":first,"mailbox":"w1:p1"}));
             assert_eq!(r["changed"], json!([first]));
@@ -809,7 +809,7 @@ fn a_desk_inbox_read_never_marks_a_message_its_response_leaves_out() {
                 .flatten()
             {
                 assert_eq!(
-                    json!("read"),
+                    json!("acked"),
                     row["state"],
                     "carried rows show the read state"
                 );
@@ -824,6 +824,14 @@ fn a_desk_inbox_read_never_marks_a_message_its_response_leaves_out() {
             );
             for id in &sent {
                 let row = inbox.get_message(id).unwrap();
+                let status =
+                    crate::inbox::status(inbox.read_pool(), id, crate::clock::now_s()).unwrap();
+                assert_eq!(
+                    status.acked_at.is_some(),
+                    carried.contains(id),
+                    "only carried IDs are implicitly consumed"
+                );
+
                 if carried.contains(id) {
                     assert!(row.read_at.is_some(), "carried {id} must be read");
                 } else {
@@ -1807,13 +1815,13 @@ fn inbox_read_recovery_planner_keeps_lost_bodies_and_explicit_ack_scoped() {
     assert_eq!(read["marked_read"], 2);
     for id in [&a, &b] {
         let message = store.get_message(id).unwrap();
-        assert_eq!(message.summary.state, "read");
+        assert_eq!(message.summary.state, "acked");
         assert!(
             crate::inbox::status(store.read_pool(), id, 0.0)
                 .unwrap()
                 .acked_at
-                .is_none(),
-            "a read still requires explicit acknowledgment"
+                .is_some(),
+            "normal reads consume without a second acknowledgment call"
         );
     }
     // The caller loses this result after commit; neither an empty read nor another
@@ -2146,5 +2154,58 @@ fn inbox_status_is_visible_only_to_sender_recipient_or_privileged_roles() {
     assert!(dispatcher
         .dispatch("inbox_status", &json!({"message_id":foreign}), &planner)
         .is_err());
+    dispatcher.close();
+}
+
+#[test]
+fn inbox_read_manual_opt_out_and_peek_keep_the_explicit_ack_workflow() {
+    let (_dir, services) = make_services("manual-ack", factory(None), None);
+    let store = services.flock().stores().inbox.unwrap();
+    let dispatcher = services.dispatcher(handlers());
+    for pane in ["w1:p1", "w3:p3"] {
+        let send = || {
+            store
+                .send(&crate::inbox_store::Outgoing {
+                    mailbox: pane,
+                    body: Some("manual fixture body"),
+                    ..Default::default()
+                })
+                .unwrap()
+        };
+        let id = send();
+        let caller = request(pane);
+        let peek = dispatcher
+            .dispatch("inbox_read", &json!({"peek":true}), &caller)
+            .unwrap();
+        assert_eq!(peek["messages"][0]["state"], "queued");
+        assert!(crate::inbox::pending_delivery(store.read_pool(), pane)
+            .unwrap()
+            .is_none());
+        let manual = dispatcher
+            .dispatch("inbox_read", &json!({"ack":false}), &caller)
+            .unwrap();
+        assert_eq!(manual["messages"][0]["state"], "read");
+        assert_eq!(manual["messages"][0]["body"], "manual fixture body");
+        assert!(crate::inbox::status(store.read_pool(), &id, 0.)
+            .unwrap()
+            .acked_at
+            .is_none());
+        let ack = dispatcher
+            .dispatch("inbox_ack", &json!({"message_ids":id}), &caller)
+            .unwrap();
+        assert_eq!(ack["changed"], json!([id]));
+        assert_eq!(ack["still_pending"], json!([]));
+        let next = send();
+        let automatic = dispatcher
+            .dispatch("inbox_read", &json!({}), &caller)
+            .unwrap();
+        assert_eq!(automatic["messages"][0]["state"], "acked");
+        assert_eq!(automatic["messages"][0]["message_id"], next);
+        let ack = dispatcher
+            .dispatch("inbox_ack", &json!({"message_ids":next}), &caller)
+            .unwrap();
+        assert_eq!(ack["changed"], json!([]));
+        assert_eq!(ack["still_pending"], json!([]));
+    }
     dispatcher.close();
 }

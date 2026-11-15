@@ -5433,6 +5433,10 @@ fn cli_route_58_commands_map() {
             .as_str()
             .unwrap()
             .contains("Task queues are omitted by default"));
+        assert_eq!(
+            inbox_read["input_schema"]["properties"]["ack"]["type"],
+            "boolean"
+        );
         assert!(
             inbox_read["input_schema"]["properties"]["include_tasks"]["description"]
                 .as_str()
@@ -6475,4 +6479,18 @@ fn task_audit_cli_assign_and_unblock_send_optional_reasons_without_an_actor() {
         json!({"id":"t7","title":"work","scope":"global","status":"open","priority":"medium"}),
     );
     assert_eq!(Some(0), unblocked.status.code());
+}
+
+#[test]
+fn cli_inbox_read_no_ack_forwards_manual_consumption_without_changing_body_shape() {
+    let output = run_daemon_cli(
+        &["inbox", "read", "reviewer", "--no-ack", "--json"],
+        "inbox_read",
+        json!({"mailbox":"reviewer","limit":10,"peek":false,"include_tasks":false,"ack":false}),
+        json!({"mailbox":"reviewer","messages":[{"message_id":"i1","state":"read","body":"private fixture body"}],"marked_read":1}),
+    );
+    assert!(output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["messages"][0]["body"], "private fixture body");
+    assert_eq!(result["messages"][0]["message_id"], "i1");
 }

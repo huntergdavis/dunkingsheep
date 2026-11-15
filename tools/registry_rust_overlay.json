@@ -97,7 +97,7 @@
    ]
   },
   "inbox_read": {
-   "description": "Read waiting messages in order, with their full bodies, and mark them read. Task queues are omitted by default; set include_tasks=true to include them. This is the one an agent calls when it has mail. Use peek=true to look without marking them read. If the answer never arrives, inbox_recover replays the batch instead of losing it.",
+   "description": "Read full waiting bodies and consume them by default, retaining the latest batch for response-loss recovery. Set ack=false for manual acknowledgment after display; peek=true changes nothing. Task queues are omitted by default; set include_tasks=true to include them. Empty reads preserve recovery; a newer nonempty read replaces it.",
    "params": [
     [
      "mailbox",
@@ -127,6 +127,12 @@
      {
       "type": "boolean",
       "description": "Include the caller's task queues in the result (default false)."
+     }
+    ],
+    [
+     "ack",
+     {
+      "type": "boolean"
      }
     ]
    ]

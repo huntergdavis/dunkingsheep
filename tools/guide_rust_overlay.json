@@ -18,7 +18,7 @@
   },
   {
    "old": "Since 2.70.32 a batch is marked read only after the result is built, so a\nread that fails no longer consumes the mail. A REPEATED batch after an error\nis the fix working, not a bug: the same messages are offered again until a\nread completes. `--peek` still marks nothing at all.\n",
-   "new": "A read prepares the complete response before atomically committing its read\nmarks and recovery receipt. A preparation or receipt-write failure leaves\nthe batch unread. A repeated batch after an error is safe redelivery, not\na new message. `--peek` still changes neither mail nor the recovery receipt.\n"
+   "new": "A read prepares the complete response before atomically recording its read\nmarks, implicit acknowledgment and recovery receipt. Normal reads consume\nthe returned batch: no separate ack call is needed. Use `--no-ack` or\n`inbox_read(ack=false)` for the previous explicit-ack workflow. A preparation\nor write failure leaves the batch unread and the prior receipt intact. A\nrepeated batch after an error is safe redelivery, not a new message.\n`--peek` still changes neither mail nor the recovery receipt.\n"
   },
   {
    "old": "dunkingsheep inbox ack",
@@ -26,7 +26,7 @@
   },
   {
    "old": "Recover follows the read rule, not the ack rule: like inbox read it is\npermissive (inspecting a stranded mailbox is how the backlog gets drained),\nwhile ack stays scoped to the caller's own mailbox.\n",
-   "new": "Recover and ack use the same mailbox authorization as read. Every role\nthat can read inbox mail, including planners, can recover and acknowledge\nits own messages. Ordinary lanes cannot recover another lane's or the\nhuman owner's mailbox. Existing privileged read access is unchanged.\nOnly acknowledge IDs whose bodies you actually received and displayed; if\na read response is missing its bodies, recover first instead of acknowledging.\nEmpty reads preserve the last non-empty receipt. Recovery may be repeated\nafter another lost response; explicit acknowledgment clears only the\nacknowledged mail from the receipt. Normal reads still mark read without\nacknowledging, and the messages-only default remains unchanged.\n"
+   "new": "Recover and ack use the same mailbox authorization as read. Every role\nthat can read inbox mail, including planners, can recover and acknowledge\nits own messages. Ordinary lanes cannot recover another lane's or the\nhuman owner's mailbox. Existing privileged read access is unchanged.\nAfter a lost read response, recover replays the latest batch even when the\nnormal read already acknowledged it. Empty reads preserve that receipt;\nrepeated recovery is safe, and a newer non-empty read replaces the one-batch\nbuffer. Existing retention and deletion bounds still apply. Explicit ack\nis optional after normal reads and remains idempotent; it clears only the\nnamed IDs from the receipt. In manual mode (`--no-ack` / `ack=false`), ack\nonly bodies you received and displayed; recover missing bodies first.\nThe messages-only default remains unchanged.\n"
   }
  ]
 }

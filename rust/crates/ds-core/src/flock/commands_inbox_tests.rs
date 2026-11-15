@@ -695,7 +695,7 @@ fn reading_marks_the_batch_read_and_carries_the_task_queue() {
     assert!(read
         .messages
         .iter()
-        .all(|m| m.summary.state == "read" && m.read_at.is_some()));
+        .all(|m| m.summary.state == "acked" && m.read_at.is_some()));
     assert_eq!(0, f.inbox_count(&e, None, Some("w1:p1")).unwrap().unread);
     let again = f.inbox_read(&e, None, 10, false, Some("w1:p1")).unwrap();
     assert!(again.messages.is_empty());
@@ -749,7 +749,7 @@ fn messages_only_read_skips_task_lookup_and_preserves_peek_mark_and_receipt() {
     assert!(read.tasks.is_none());
     assert_eq!(0, e.task_calls.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(Some(1), read.marked_read);
-    assert_eq!("read", read.messages[0].summary.state);
+    assert_eq!("acked", read.messages[0].summary.state);
     assert!(read.messages[0].read_at.is_some());
     assert_eq!(0, f.inbox_count(&e, None, Some("w1:p1")).unwrap().unread);
     let (_, recovered) = f.inbox_recover(&e, None, Some("w1:p1")).unwrap();
