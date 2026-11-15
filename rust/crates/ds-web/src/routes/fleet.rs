@@ -834,6 +834,7 @@ mod tests {
         summary_error: Mutex<Option<String>>,
         local_failure: Mutex<bool>,
         channels: Mutex<HashMap<String, Value>>,
+        task_paging_refusal: Mutex<bool>,
     }
     impl Fake {
         fn reply(&self, key: &str, value: Value) {
@@ -859,7 +860,17 @@ mod tests {
             method: &'a str,
             args: Value,
         ) -> PanesWebFuture<'a, Result<Value, PanesWebError>> {
+            let paging_refused = method == "task_list"
+                && args["paged"] == true
+                && *self.task_paging_refusal.lock().unwrap();
             self.calls.lock().unwrap().push((method.into(), args));
+            if paging_refused {
+                return Box::pin(async {
+                    Err(PanesWebError::Failure(
+                        "task_list: unknown argument(s): page_group, page_size, paged".into(),
+                    ))
+                });
+            }
             let value = self.replies.lock().unwrap().get(method).cloned();
             Box::pin(async move { value.ok_or(PanesWebError::Failure("offline".into())) })
         }
@@ -1962,5 +1973,40 @@ mod tests {
             .all(|(method, args)| method == "task_metrics"
                 && args["scope"] == "global"
                 && args["window_s"] == 86400));
+    }
+    #[test]
+    fn task_routes_fall_back_after_strict_older_daemon_argument_refusal() {
+        let f = Fake::setup();
+        *f.task_paging_refusal.lock().unwrap() = true;
+        f.reply(
+            "task_list",
+            json!({"scope":"global","tasks":[task_summary_fixture()]}),
+        );
+        let (status, page) = http(
+            owner_app(f.clone()),
+            "/api/tasks?view=active&assignee=%254",
+            None,
+        );
+        assert_eq!(status, 200);
+        assert_eq!(page["legacy_limited"], true);
+        assert_eq!(page["tasks"].as_array().unwrap().len(), 1);
+        let calls = f.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].1["paged"], true);
+        assert!(calls[1].1.get("paged").is_none());
+        assert_eq!(calls[1].1["assignee"], "%4");
+        assert_eq!(calls[1].1["include_done"], false);
+        drop(calls);
+        f.calls.lock().unwrap().clear();
+        f.reply("task_list", json!({"scope":"global","tasks":[]}));
+        assert_eq!(
+            http(owner_app(f.clone()), "/api/tasks?view=closed", None).0,
+            200
+        );
+        assert_eq!(
+            f.calls().len(),
+            3,
+            "one refused feature request plus two closed status reads"
+        );
     }
 }

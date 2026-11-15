@@ -39,6 +39,22 @@ fn unavailable() -> Response {
     detail(StatusCode::BAD_GATEWAY, "Tasks unavailable; try refreshing")
 }
 
+// Strict older dispatchers reject the newly introduced names rather than ignoring
+// them. Only that exact capability refusal permits legacy reads, never auth/I/O errors.
+fn unsupported_paging(error: &PanesWebError) -> bool {
+    let PanesWebError::Failure(text) = error else {
+        return false;
+    };
+    let Some(names) = text.strip_prefix("task_list: unknown argument(s): ") else {
+        return false;
+    };
+    let fields: Vec<_> = names.split(',').map(str::trim).collect();
+    fields.contains(&"paged")
+        && fields
+            .iter()
+            .all(|field| ["paged", "page_size", "cursor", "priority", "page_group"].contains(field))
+}
+
 pub(super) async fn task_page(
     Extension(state): Extension<Arc<FleetState>>,
     Extension(auth): Extension<Arc<dyn AuthBackend>>,
@@ -94,13 +110,19 @@ pub(super) async fn task_page(
         args["cursor"] = json!(cursor);
     }
     let raw = match state.rpc.rpc("task_list", args).await {
-        Ok(raw) => raw,
+        Ok(raw) => Some(raw),
+        Err(error) if unsupported_paging(&error) => None,
         Err(_) => return unavailable(),
     };
-    if raw["scope"] != "global" || !raw["tasks"].is_array() {
+    if raw
+        .as_ref()
+        .is_some_and(|raw| raw["scope"] != "global" || !raw["tasks"].is_array())
+    {
         return unavailable();
     }
-    let legacy = raw.get("paging_version").is_none();
+    let legacy = raw
+        .as_ref()
+        .is_none_or(|raw| raw.get("paging_version").is_none());
     let (candidates, total, next_cursor, checked_at) = if legacy {
         if query.cursor.is_some() {
             return detail(
@@ -108,8 +130,8 @@ pub(super) async fn task_page(
                 "Paging is unavailable; refresh to the first page",
             );
         }
-        // Older daemons ignore paged/group/priority arguments. Closed needs two bounded
-        // legacy reads; active and explicit-status queries can use the first response.
+        // Closed needs two bounded legacy reads. Active/explicit-status queries reuse
+        // an ignored-arguments response or make one clean legacy call after refusal.
         let mut rows = if view == "closed" && query.status.is_none() {
             let mut rows = Vec::new();
             for status in statuses {
@@ -138,7 +160,27 @@ pub(super) async fn task_page(
             }
             rows
         } else {
-            let Some(rows) = raw["tasks"]
+            let old = match raw {
+                Some(raw) => raw,
+                None => {
+                    let mut args =
+                        json!({"scope":"global","include_done":view=="closed","limit":PAGE_SIZE});
+                    if let Some(status) = &query.status {
+                        args["status"] = json!(status);
+                    }
+                    if let Some(assignee) = &query.assignee {
+                        args["assignee"] = json!(assignee);
+                    }
+                    match state.rpc.rpc("task_list", args).await {
+                        Ok(value) => value,
+                        Err(_) => return unavailable(),
+                    }
+                }
+            };
+            if old["scope"] != "global" {
+                return unavailable();
+            }
+            let Some(rows) = old["tasks"]
                 .as_array()
                 .filter(|rows| rows.len() <= PAGE_SIZE)
             else {
@@ -154,6 +196,7 @@ pub(super) async fn task_page(
             json!(state.rpc.now_seconds()),
         )
     } else {
+        let raw = raw.as_ref().expect("paged response exists");
         if raw["paging_version"] != 1
             || raw["order"] != "id_asc"
             || raw["page_size"] != PAGE_SIZE
@@ -249,5 +292,24 @@ pub(super) async fn task_metrics(
             )
         }
         _ => unavailable(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn only_explicit_old_argument_refusals_allow_fallback() {
+        assert!(unsupported_paging(&PanesWebError::Failure(
+            "task_list: unknown argument(s): page_group, page_size, paged".into()
+        )));
+        for text in [
+            "task_list is not permitted for role web",
+            "daemon unavailable",
+            "task_list: unknown argument(s): attacker, paged",
+            "task_list: unknown argument(s): cursor",
+        ] {
+            assert!(!unsupported_paging(&PanesWebError::Failure(text.into())));
+        }
     }
 }
