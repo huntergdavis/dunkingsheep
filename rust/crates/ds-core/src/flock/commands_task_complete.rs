@@ -42,6 +42,11 @@ pub struct ReviewCaller<'a> {
     pub worked: Result<&'a BTreeSet<String>, &'a str>,
 }
 
+struct CompletedTask {
+    wire: Value,
+    verdict_notice: Option<(Value, String)>,
+}
+
 impl Flock {
     /// Complete a task through the request's shared next-job manager. The request context is
     /// captured synchronously by the dispatcher; the identity-bound caller is copied before
@@ -76,7 +81,10 @@ impl Flock {
         let task_id = task_id.to_owned();
         let by = by.map(str::to_owned);
         let verdict = verdict.map(str::to_owned);
-        context.block_on(self.task_complete_async(
+        let CompletedTask {
+            mut wire,
+            verdict_notice,
+        } = context.block_on(self.task_complete_async(
             context,
             &task_id,
             by.as_deref(),
@@ -86,7 +94,17 @@ impl Flock {
             next,
             caller,
             self_pane_id,
-        ))?
+        ))??;
+        // The inbox store owns a synchronous runtime. Send only after leaving the async
+        // completion, on this same request thread with its caller identity still installed.
+        if let Some((task, verdict)) = verdict_notice {
+            match crate::api::review_author::notify_verdict(context, &task, &verdict) {
+                Ok(Some(notice)) => wire["author_notice"] = notice,
+                Ok(None) => {}
+                Err(error) => eprintln!("review verdict author notice: {error}"),
+            }
+        }
+        Ok(wire)
     }
 
     #[allow(clippy::too_many_arguments)] // Mirrors the completion request's distinct, ordered inputs.
@@ -101,7 +119,7 @@ impl Flock {
         next: bool,
         caller: Option<Caller>,
         self_pane_id: Option<String>,
-    ) -> Result<Value, DunkError> {
+    ) -> Result<CompletedTask, DunkError> {
         let tasks = self.task_store()?;
         let visible = tasks
             .get_full_wire(task_id, self_pane_id.as_deref())
@@ -365,17 +383,11 @@ impl Flock {
                 })
                 .await;
             result.insert("github".into(), github);
-            match crate::api::review_author::notify_verdict(context, &original_task, verdict) {
-                Ok(Some(notice)) => {
-                    result.insert("author_notice".into(), notice);
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    eprintln!("review verdict author notice: {error}");
-                }
-            }
         }
-        Ok(Value::Object(result))
+        Ok(CompletedTask {
+            wire: Value::Object(result),
+            verdict_notice: validated_verdict.map(|verdict| (original_task, verdict)),
+        })
     }
 
     /// Error boundary retained from the partial PR629 adapter. The actual

@@ -561,6 +561,76 @@ fn review_sync_dry_run_through_the_production_adapter_reads_github_and_writes_no
 }
 
 #[test]
+fn attributed_review_completion_sends_author_notice_after_async_dispatch() {
+    for (verdict, inline_note) in [("accept", false), ("needs-fix", true)] {
+        // Unlike an unknown destination, a real fake pane reaches the synchronous inbox
+        // writer. Before t5268 this panicked inside task_complete_async after committing.
+        let fixture = Fixture::with(&["author"], lanes());
+        let tasks = fixture.tasks();
+        let head = "a".repeat(40);
+        let review = fixture
+            .block_on(tasks.add_with(
+                "global",
+                "attributed review",
+                "",
+                AddOptions {
+                    kind: Some("review".into()),
+                    assignees: vec!["%reviewer".into()],
+                    author: Some("w1:p1".into()),
+                    repo: Some("o/r".into()),
+                    pr: Some("7".into()),
+                    head: Some(head.clone()),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        fixture
+            .block_on(tasks.claim_next("global", "%reviewer", Default::default()))
+            .unwrap();
+        let mut args = json!({"id":review.id,"verdict":verdict,"landed":true});
+        if inline_note {
+            args["note"] = json!("review evidence in the completion transaction");
+        } else {
+            fixture
+                .block_on(tasks.note(&review.id, "note", "%reviewer", Some("reviewed")))
+                .unwrap();
+        }
+        let result = fixture
+            .dispatch("task_complete", args, "%reviewer")
+            .unwrap();
+        assert_eq!(result["status"], "done");
+        assert_eq!(result["verdict"], verdict);
+        assert_eq!(result["completed_by"], "%reviewer");
+        let id = result["author_notice"]["message_id"]
+            .as_str()
+            .expect("completion succeeds with the committed author's inbox receipt");
+        let inbox = fixture.services.flock().stores().inbox.unwrap();
+        let message = inbox.get_message(id).unwrap();
+        assert_eq!(message.pane_id.as_deref(), Some("w1:p1"));
+        assert_eq!(message.summary.sender.as_deref(), Some("%reviewer"));
+        let subject = format!("Review {verdict}: o/r#7");
+        assert_eq!(message.summary.subject.as_deref(), Some(subject.as_str()));
+        assert!(message.body.contains(&review.id) && message.body.contains(&head));
+        assert_eq!(
+            fixture.block_on(tasks.get(&review.id)).unwrap().status,
+            "done"
+        );
+        let count: i64 = inbox
+            .read_pool()
+            .with(|db| {
+                db.query_row(
+                    "SELECT count(*) FROM messages WHERE pane_id='w1:p1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(crate::db::map_sqlite)
+            })
+            .unwrap();
+        assert_eq!(count, 1, "one recorded verdict produces one author notice");
+    }
+}
+
+#[test]
 fn task_complete_verdict_error_is_reported_through_the_production_adapter() {
     // No reviewer App is registered, so the verdict's GitHub side cannot authenticate.
     let fixture = Fixture::with(&["author"], lanes());
