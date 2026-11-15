@@ -4,6 +4,7 @@ use super::response_error::WebResponseError;
 mod inbox_summaries;
 mod mailboxes;
 mod message_view;
+mod tasks;
 
 use super::{
     auth::{AuthBackend, AuthError, Identity, RequestScheme},
@@ -100,6 +101,8 @@ pub fn router(state: Arc<FleetState>, auth: Arc<dyn AuthBackend>, scheme: Reques
         .route("/api/pane-inbox", post(api_pane_inbox))
         .route("/api/fleet", get(api_fleet))
         .route("/api/projects", get(api_projects))
+        .route("/api/tasks", get(tasks::task_page))
+        .route("/api/tasks/metrics", get(tasks::task_metrics))
         .route("/api/mailboxes", get(mailboxes::api_mailboxes))
         .route(
             "/api/mailbox-message",
@@ -831,6 +834,7 @@ mod tests {
         summary_error: Mutex<Option<String>>,
         local_failure: Mutex<bool>,
         channels: Mutex<HashMap<String, Value>>,
+        task_paging_refusal: Mutex<bool>,
     }
     impl Fake {
         fn reply(&self, key: &str, value: Value) {
@@ -856,7 +860,17 @@ mod tests {
             method: &'a str,
             args: Value,
         ) -> PanesWebFuture<'a, Result<Value, PanesWebError>> {
+            let paging_refused = method == "task_list"
+                && args["paged"] == true
+                && *self.task_paging_refusal.lock().unwrap();
             self.calls.lock().unwrap().push((method.into(), args));
+            if paging_refused {
+                return Box::pin(async {
+                    Err(PanesWebError::Failure(
+                        "task_list: unknown argument(s): page_group, page_size, paged".into(),
+                    ))
+                });
+            }
             let value = self.replies.lock().unwrap().get(method).cloned();
             Box::pin(async move { value.ok_or(PanesWebError::Failure("offline".into())) })
         }
@@ -1843,5 +1857,156 @@ mod tests {
         let req = Request::builder().uri(path).body(Body::empty()).unwrap();
         assert_eq!(run(service.oneshot(req)).unwrap().status(), StatusCode::OK);
         assert!(f.calls().iter().all(|command| command == "inbox_get"));
+    }
+    fn task_summary_fixture() -> Value {
+        json!({"id":"t1","scope":"global","title":"fixture work","status":"blocked","priority":"high",
+            "assignees":["%4"],"created_at":10,"block_reason":"fixture dependency","body":"private body omitted"})
+    }
+    fn task_page_fixture() -> Value {
+        json!({"scope":"global","paging_version":1,"order":"id_asc","page_size":50,"total":101,
+            "next_cursor":"fixture-next","checked_at":100,"tasks":[task_summary_fixture()]})
+    }
+    #[test]
+    fn task_routes_require_owner_and_origin_before_read_only_rpc() {
+        let f = Fake::setup();
+        for path in ["/api/tasks", "/api/tasks/metrics"] {
+            assert_eq!(http(app(f.clone(), false), path, None).0, 401);
+            assert_eq!(http(app(f.clone(), true), path, None).0, 403);
+            let request = Request::builder()
+                .uri(path)
+                .header("host", "desk.test")
+                .header("origin", "http://other.test")
+                .body(Body::empty())
+                .unwrap();
+            assert_eq!(
+                run(owner_app(f.clone()).oneshot(request)).unwrap().status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+        for query in [
+            "?view=unknown",
+            "?view=active&status=done",
+            "?priority=invalid",
+            "?command=task_delete",
+        ] {
+            assert_eq!(
+                http(owner_app(f.clone()), &format!("/api/tasks{query}"), None).0,
+                400
+            );
+        }
+        assert!(f.calls().is_empty());
+        assert_eq!(http(owner_app(f.clone()), "/api/tasks", Some("{}")).0, 405);
+        assert!(f.calls().is_empty());
+    }
+    #[test]
+    fn task_pages_forward_filters_and_strip_bodies_and_unknown_fields() {
+        let f = Fake::setup();
+        f.reply("task_list", task_page_fixture());
+        let (status,page)=http(owner_app(f.clone()),"/api/tasks?view=active&status=blocked&priority=high&assignee=%254&cursor=fixture-prior",None);
+        assert_eq!(status, 200);
+        assert_eq!(page["total"], 101);
+        assert_eq!(page["next_cursor"], "fixture-next");
+        assert_eq!(page["legacy_limited"], false);
+        assert!(page["tasks"][0].get("body").is_none());
+        assert!(!page.to_string().contains("private body"));
+        let calls = f.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let (method, args) = &calls[0];
+        assert_eq!(method, "task_list");
+        assert_eq!(args["scope"], "global");
+        assert_eq!(args["assignee"], "%4");
+        assert_eq!(args["cursor"], "fixture-prior");
+        assert_eq!(args["paged"], true);
+        drop(calls);
+        let mut malformed = task_page_fixture();
+        malformed["order"] = json!("priority");
+        f.reply("task_list", malformed);
+        assert_eq!(http(owner_app(f.clone()), "/api/tasks", None).0, 502);
+        assert_eq!(f.calls().len(), 2, "malformed new pages do not fall back");
+    }
+    #[test]
+    fn task_routes_fall_back_to_a_bounded_first_page_on_old_daemon() {
+        let f = Fake::setup();
+        f.reply(
+            "task_list",
+            json!({"scope":"global","tasks":[task_summary_fixture()]}),
+        );
+        let (status, page) = http(owner_app(f.clone()), "/api/tasks?view=active", None);
+        assert_eq!(status, 200);
+        assert_eq!(page["legacy_limited"], true);
+        assert!(page["next_cursor"].is_null());
+        assert!(page["total"].is_null());
+        assert_eq!(page["tasks"].as_array().unwrap().len(), 1);
+        assert_eq!(f.calls().len(), 1);
+        assert_eq!(
+            http(owner_app(f.clone()), "/api/tasks?cursor=old-cursor", None).0,
+            502
+        );
+        f.reply("task_list", json!({"scope":"global","tasks":[]}));
+        let (status, page) = http(owner_app(f.clone()), "/api/tasks?view=closed", None);
+        assert_eq!(status, 200);
+        assert_eq!(page["legacy_limited"], true);
+        let calls = f.calls.lock().unwrap();
+        let last = &calls[calls.len() - 2..];
+        assert_eq!(last[0].1["status"], "done");
+        assert_eq!(last[1].1["status"], "cancelled");
+        assert!(calls
+            .iter()
+            .all(|(method, args)| method == "task_list" && args["limit"] == 50));
+    }
+    #[test]
+    fn task_metrics_use_daemon_global_window_and_fail_independently() {
+        let f = Fake::setup();
+        assert_eq!(
+            http(owner_app(f.clone()), "/api/tasks/metrics", None).0,
+            502
+        );
+        f.reply("task_metrics",json!({"scope":"global","current":{"by_status":{"open":7}},"throughput":{"completed":4},"window":{"since":0,"until":86400},"generated_at":86400}));
+        let (status, metrics) = http(owner_app(f.clone()), "/api/tasks/metrics", None);
+        assert_eq!(status, 200);
+        assert_eq!(metrics["current"]["by_status"]["open"], 7);
+        assert!(f
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(method, args)| method == "task_metrics"
+                && args["scope"] == "global"
+                && args["window_s"] == 86400));
+    }
+    #[test]
+    fn task_routes_fall_back_after_strict_older_daemon_argument_refusal() {
+        let f = Fake::setup();
+        *f.task_paging_refusal.lock().unwrap() = true;
+        f.reply(
+            "task_list",
+            json!({"scope":"global","tasks":[task_summary_fixture()]}),
+        );
+        let (status, page) = http(
+            owner_app(f.clone()),
+            "/api/tasks?view=active&assignee=%254",
+            None,
+        );
+        assert_eq!(status, 200);
+        assert_eq!(page["legacy_limited"], true);
+        assert_eq!(page["tasks"].as_array().unwrap().len(), 1);
+        let calls = f.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].1["paged"], true);
+        assert!(calls[1].1.get("paged").is_none());
+        assert_eq!(calls[1].1["assignee"], "%4");
+        assert_eq!(calls[1].1["include_done"], false);
+        drop(calls);
+        f.calls.lock().unwrap().clear();
+        f.reply("task_list", json!({"scope":"global","tasks":[]}));
+        assert_eq!(
+            http(owner_app(f.clone()), "/api/tasks?view=closed", None).0,
+            200
+        );
+        assert_eq!(
+            f.calls().len(),
+            3,
+            "one refused feature request plus two closed status reads"
+        );
     }
 }

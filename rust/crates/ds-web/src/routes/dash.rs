@@ -18,7 +18,7 @@ use axum::{
 
 use super::auth::{AuthBackend, AuthError, RequestScheme};
 
-const DASH_VIEWS: [&str; 5] = ["poolrad", "operations", "play", "cos", "fleet"];
+const DASH_VIEWS: [&str; 6] = ["poolrad", "operations", "play", "cos", "fleet", "tasks"];
 
 /// Supplies the private built bundle. Missing index content corresponds to `DIST/index.html`
 /// not existing; the runtime owns its actual path and file access.
