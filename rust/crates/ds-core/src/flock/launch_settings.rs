@@ -164,6 +164,24 @@ pub fn lane_settings(pane: &str, record: Option<&Value>) -> Value {
         });
     };
     fields.insert("harness".into(), cell(json!(program), FROM_ARGV));
+    // t5249 slice 2: a widening setting the owner's template added, or one nothing set.
+    if let Some(sources) = record.get("settings_sources").and_then(Value::as_object) {
+        for (field, source) in sources {
+            let Some(source) = source.as_str() else {
+                continue;
+            };
+            let label = match source {
+                "explicit" => continue,
+                "unset" => {
+                    "unset: no explicit flag and no owner template (would be refused)".to_string()
+                }
+                scope => format!("owner launch template ({scope})"),
+            };
+            if let Some(cell) = fields.get_mut(field) {
+                cell["source"] = json!(label);
+            }
+        }
+    }
     let tmpdir = match (
         record.get("tmpdir").and_then(Value::as_str),
         record.get("tmpdir_source").and_then(Value::as_str),
@@ -311,6 +329,32 @@ mod tests {
         assert_eq!(pi["model"]["value"], "M");
         assert!(profile_from_argv(&v(&["bash", "-lc", "codex"])).is_none());
         assert!(profile_from_argv(&v(&["env", "A=b"])).is_none());
+    }
+
+    #[test]
+    fn a_template_or_unset_source_is_shown_for_the_widening_fields() {
+        let record = json!({
+            "argv": ["codex", "-m", "M", "-s", "danger-full-access", "-a", "never"],
+            "source": "start_agent",
+            "settings_sources": {"sandbox": "project:LookingGlassNX", "approval": "explicit"},
+        });
+        let out = lane_settings("%9", Some(&record));
+        assert_eq!(out["settings"]["sandbox"]["value"], "danger-full-access");
+        assert_eq!(
+            out["settings"]["sandbox"]["source"],
+            "owner launch template (project:LookingGlassNX)"
+        );
+        assert_eq!(out["settings"]["approval"]["source"], FROM_ARGV);
+        let unset = lane_settings(
+            "%8",
+            Some(
+                &json!({"argv": ["codex"], "settings_sources": {"sandbox": "unset", "approval": "unset"}}),
+            ),
+        );
+        assert!(unset["settings"]["sandbox"]["source"]
+            .as_str()
+            .unwrap()
+            .starts_with("unset"));
     }
 
     #[test]

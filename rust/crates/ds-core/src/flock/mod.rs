@@ -1023,6 +1023,7 @@ pub mod lane_project;
 pub mod lane_registry_rows;
 pub mod lanes;
 pub mod launch_settings;
+pub mod launch_templates;
 pub mod loop_env;
 pub mod loops;
 pub mod loops_push;

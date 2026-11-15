@@ -288,6 +288,35 @@ pub fn h_start_agent(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         let cwd=arg(&args,"cwd");
         // t3912 slice 2: a new lane's temporary files go to its own directory on the workspace
         // disk, not to the small shared /tmp.
+        // t5249 slice 2: a worker or reviewer gets the owner's launch template for its scope
+        // (widening settings only; explicit flags win; warn-only when nothing sets them).
+        let lane_role = role_arg.as_str().filter(|_| truthy(role_arg)).map(|role| role.trim().to_ascii_lowercase());
+        let (argv, settings_sources) = if matches!(lane_role.as_deref(), Some("worker" | "reviewer")) {
+            let (scope_key, scope_label) = match &membership {
+                ProjectScope::Project(name) => (name.clone(), format!("project:{name}")),
+                ProjectScope::Global => ("global".to_string(), "global".to_string()),
+            };
+            let template = crate::config::config_dir(env)
+                .ok()
+                .and_then(|dir| match crate::flock::launch_templates::load(&dir, nix::unistd::geteuid().as_raw()) {
+                    Ok(templates) => Some(templates),
+                    Err(why) => {
+                        if why != "absent" {
+                            eprintln!("start-agent: {why}");
+                        }
+                        None
+                    }
+                })
+                .map(|templates| crate::flock::launch_templates::template_for(&templates, &scope_key))
+                .unwrap_or_default();
+            let applied = crate::flock::launch_templates::apply(&argv, &template, &scope_label);
+            if let Some(line) = &applied.would_refuse {
+                eprintln!("start-agent {name}: {line}");
+            }
+            (applied.argv, Some((applied.sources, applied.would_refuse)))
+        } else {
+            (argv.clone(), None)
+        };
         let (argv, tmpdir, tmpdir_source) = match lane_scratch(&argv, role_arg.as_str().filter(|_| truthy(role_arg))) {
             LaneScratch::Explicit(dir) => (argv.clone(), Some(dir), Some("explicit")),
             LaneScratch::Skip => (argv.clone(), None, None),
@@ -316,6 +345,10 @@ pub fn h_start_agent(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
             // t4473: what was launched and which process it is.
             fields.extend(crate::flock::launch_identity(&argv,child_pid));
             fields.push(("tmpdir",tmpdir.clone().map_or(Value::Null,Value::String)));
+            if let Some((sources, would_refuse)) = &settings_sources {
+                fields.push(("settings_sources", Value::Object(sources.clone())));
+                fields.push(("settings_would_refuse", would_refuse.clone().map_or(Value::Null, Value::String)));
+            }
             fields.push(("tmpdir_source",tmpdir_source.map_or(Value::Null,|source| json!(source))));
             context.flock.record_launch(id,&fields);
         }
