@@ -1649,3 +1649,130 @@ fn projects_route_uses_authenticated_daemon_roster_through_the_composed_desk() {
     assert_eq!(found.json()["lanes"][2]["membership"]["scope"], "stale");
     assert_eq!(server.shutdown(), Ok(()));
 }
+
+#[test]
+fn tasks_and_information_pass_the_production_path_gate() {
+    let (root, mut config) = fixture();
+    let daemon = FakeDaemon::start(root.path(), |command, _| match command {
+        "task_list" => Ok(json!({"scope":"global","paging_version":1,"order":"id_asc",
+            "page_size":50,"total":0,"next_cursor":null,"checked_at":100,"tasks":[]})),
+        "task_metrics" => Ok(json!({"scope":"global","current":{},"throughput":{},"window":{}})),
+        _ => Err("not provided by this fixture".into()),
+    });
+    config.daemon_socket = daemon.socket.clone();
+    let server = Server::start(config);
+    let cookie = format!("vp_session={}", login(server.addr));
+    for path in [
+        "/api/tasks?view=active",
+        "/api/tasks?view=closed",
+        "/api/tasks/metrics",
+        "/api/project-context",
+        "/api/project-context/global",
+        "/api/project-context/project/private-alpha",
+        "/%61pi/tasks?view=closed",
+        "/api/tasks/%6detrics",
+        "/api/project-%63ontext",
+        "/api/project-context/%67lobal",
+        "/api/project-context/project/private%2Dalpha",
+    ] {
+        let anonymous = request(server.addr, "GET", path, &[], None);
+        assert_eq!(anonymous.status, 401, "{path}: {}", anonymous.text());
+        let owner = request(server.addr, "GET", path, &[("Cookie", &cookie)], None);
+        assert_eq!(owner.status, 200, "{path}: {}", owner.text());
+        let cross = request(
+            server.addr,
+            "GET",
+            path,
+            &[("Cookie", &cookie), ("Origin", "https://evil.example")],
+            None,
+        );
+        assert_eq!(cross.status, 403, "{path}: {}", cross.text());
+        for method in ["POST", "DELETE"] {
+            let wrong = request(server.addr, method, path, &[("Cookie", &cookie)], None);
+            assert_eq!(wrong.status, 405, "{method} {path}: {}", wrong.text());
+        }
+        // HEAD retains the existing static-fallback behavior, rather than reaching GET handlers.
+        assert_eq!(
+            request(server.addr, "HEAD", path, &[("Cookie", &cookie)], None).status,
+            404
+        );
+    }
+    for path in [
+        "/api/tasks/unknown",
+        "/api/project-context/unknown",
+        "/api/project-context/project/",
+        "/api/project-context/project/a/b",
+        "/api/project-context/project/a%2Fb",
+    ] {
+        assert_eq!(
+            request(server.addr, "GET", path, &[("Cookie", &cookie)], None).status,
+            404,
+            "{path}"
+        );
+    }
+    assert!(daemon
+        .sent()
+        .iter()
+        .filter(|s| s.command.starts_with("task_"))
+        .all(|s| s.token.as_deref() == Some("web-desk-test-token")));
+    assert_eq!(server.shutdown(), Ok(()));
+}
+
+/// Discover literal route registrations independently of the admission list, then ask the real
+/// router which methods are mounted. A registered API must never reach the static fallback at
+/// the production HTTP boundary. This catches a new handler even if its isolated tests pass.
+#[test]
+fn registered_api_handlers_are_admitted_by_the_production_path_gate() {
+    let mut paths = std::collections::BTreeSet::new();
+    let mut directories = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")];
+    while let Some(dir) = directories.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                directories.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let source = std::fs::read_to_string(path).unwrap();
+                for registration in source.split(".route(").skip(1) {
+                    if let Some(literal) = registration.trim_start().strip_prefix('"') {
+                        let pattern = literal.split('"').next().unwrap();
+                        if pattern.starts_with("/api/") {
+                            paths.insert(concrete_path(pattern));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(paths.contains("/api/tasks") && paths.contains("/api/project-context/project/probe"));
+    let (_root, config) = fixture();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mounted = runtime.block_on(async {
+        let desk = web_server::Desk::open(config.clone()).unwrap();
+        let router = desk.router();
+        let unmatched = probe(&router, "PROBE", "/api/__not_a_route__").await;
+        let mut mounted = Vec::new();
+        for path in paths {
+            let answer = probe(&router, "PROBE", &path).await;
+            for method in mounted_methods(&unmatched, &answer) {
+                if method != "HEAD" {
+                    mounted.push((method, path.clone()));
+                }
+            }
+        }
+        mounted
+    });
+    assert!(mounted.iter().any(|(_, path)| path == "/api/tasks"));
+    let server = Server::start(config);
+    for (method, path) in mounted {
+        let response = request(server.addr, &method, &path, &[], None);
+        assert_ne!(
+            response.text(),
+            "<h1>missing page</h1>",
+            "registered {method} {path} was sent to the static fallback"
+        );
+    }
+    assert_eq!(server.shutdown(), Ok(()));
+}
