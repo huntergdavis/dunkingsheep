@@ -221,6 +221,7 @@ esac
                 confirm_idle: confirm,
                 reason: None,
                 self_pane_id: Some(OWNER),
+                keep_leases: false,
             },
         )
     }
@@ -652,6 +653,7 @@ fn codex_request(
             confirm_idle: true,
             reason: None,
             self_pane_id: Some(OWNER),
+            keep_leases: false,
         },
     )
 }
@@ -789,6 +791,7 @@ fn native_rollout_changed_at_final_recheck_refuses_mutation() {
                 confirm_idle: true,
                 reason: None,
                 self_pane_id: Some(OWNER),
+                keep_leases: false,
             },
         )
         .unwrap_err();

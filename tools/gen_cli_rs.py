@@ -62,6 +62,11 @@ def load_parser():
     lane_model.add_argument("--model", required=True, help="the model the lane now runs")
     lane_model.add_argument("--effort", help="the reasoning effort, when the lane has one")
     lane_model.add_argument("--provider", choices=["claude", "pi", "codex", "opencode"], help="the agent kind")
+    # t4473 slice D: restart a lane with another model, resuming its session. Rust-only.
+    switch = actions.add_parser("switch-model", help="restart a lane with another model, resuming its session (owner role)")
+    switch.add_argument("pane", help="live pane id")
+    switch.add_argument("--model", required=True, help="the model to restart the lane with")
+    switch.add_argument("--effort", help="the reasoning effort")
     planner = actions.add_parser("planner", help="owner-controlled planner grants and task project scope")
     planner.add_argument("operation", choices=["grant", "revoke", "task-project", "repo-project", "repo-revoke"])
     planner.add_argument("--repo")

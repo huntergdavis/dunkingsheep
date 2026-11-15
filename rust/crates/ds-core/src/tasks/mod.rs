@@ -42,6 +42,7 @@ pub mod block_kind;
 mod claim;
 mod claim_batch;
 pub mod history;
+mod lease_handover;
 pub mod next_job;
 pub mod next_job_runtime;
 pub(crate) mod owner_handoff;
