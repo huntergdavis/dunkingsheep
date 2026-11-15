@@ -30,6 +30,13 @@ fn put(path: &Path, body: &[u8], mode: u32) {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_triggers(json!([
+            "message_threads_delete",
+            "message_thread_routes_delete",
+            "message_thread_refs_delete"
+        ]))
+    }
+    fn with_triggers(triggers: Value) -> Self {
         let dir = crate::testsupport::dir("release-packet");
         let root = dir.path().join("packet");
         fs::create_dir_all(root.join("state")).unwrap();
@@ -88,7 +95,7 @@ impl Fixture {
             b"reviewed trigger-list metadata",
             0o444,
         );
-        let manifest = json!({"source_commit":"1111111111111111111111111111111111111111","operator":"operator","units":units,"rows":rows,"launcher":{"path":cli,"old_sha256":hash(&cli).unwrap(),"new_sha256":hash(&root.join("launcher.pending")).unwrap()},"poll_unchanged":{poll.to_str().unwrap():hash(&poll).unwrap()},"token_file":token,"lan_authority":"192.0.2.15:8787","rollback_triggers":["message_threads_delete","message_thread_routes_delete","message_thread_refs_delete"]});
+        let manifest = json!({"source_commit":"1111111111111111111111111111111111111111","operator":"operator","units":units,"rows":rows,"launcher":{"path":cli,"old_sha256":hash(&cli).unwrap(),"new_sha256":hash(&root.join("launcher.pending")).unwrap()},"poll_unchanged":{poll.to_str().unwrap():hash(&poll).unwrap()},"token_file":token,"lan_authority":"192.0.2.15:8787","rollback_triggers":triggers});
         put(
             &root.join("STAGING-MANIFEST.json"),
             &serde_json::to_vec_pretty(&manifest).unwrap(),
@@ -539,4 +546,88 @@ fn terminal_guard_distinguishes_control_clients_from_usage_children() {
         &["usage-provider".into(), "opencode".into()],
         Path::new("/private/dunk-usage-native")
     ));
+}
+
+fn seed_retirement_audit(path: &Path) {
+    let db = Connection::open(path).unwrap();
+    db.execute_batch("CREATE TABLE mailbox_retire_audit(id INTEGER PRIMARY KEY,outcome TEXT); INSERT INTO mailbox_retire_audit VALUES(1,'private fixture row'); CREATE TRIGGER mailbox_retire_audit_no_update BEFORE UPDATE ON mailbox_retire_audit BEGIN SELECT RAISE(ABORT,'append-only'); END; CREATE TRIGGER mailbox_retire_audit_no_delete BEFORE DELETE ON mailbox_retire_audit BEGIN SELECT RAISE(ABORT,'append-only'); END;").unwrap();
+}
+
+#[test]
+fn snapshot_only_packets_keep_all_schema_through_switch_failure_and_recovery() {
+    for bad_web in [false, true] {
+        let mut f = Fixture::with_triggers(json!([]));
+        let database = f.host.token.parent().unwrap().join("inbox.db");
+        seed_retirement_audit(&database);
+        let before = schema(&Connection::open(&database).unwrap()).unwrap();
+        for action in ["plan", "activate", "verify", "rollback"] {
+            assert!(f.run(action, false).unwrap().contains("dry_run"));
+        }
+        assert!(f.host.calls.is_empty());
+        assert!(!f.root.join("state/operation.lock").exists());
+        assert_eq!(
+            schema(&Connection::open(&database).unwrap()).unwrap(),
+            before
+        );
+        f.host.bad_web_once = bad_web;
+        if bad_web {
+            assert!(f
+                .run("activate", true)
+                .unwrap_err()
+                .contains("automatic rollback: PASS"));
+        } else {
+            f.run("activate", true).unwrap();
+            f.run("verify", true).unwrap();
+            f.run("rollback", true).unwrap();
+        }
+        f.old_active();
+        let snapshot = f.root.join("state/backup/inbox-before-trigger-drop.db");
+        let saved = (
+            hash(&snapshot).unwrap(),
+            fs::metadata(&snapshot).unwrap().ino(),
+        );
+        Connection::open(&database)
+            .unwrap()
+            .execute("INSERT INTO messages VALUES(2)", [])
+            .unwrap();
+        f.host.now += 7_200_000;
+        f.run("rollback", true).unwrap();
+        f.old_active();
+        assert_eq!(
+            saved,
+            (
+                hash(&snapshot).unwrap(),
+                fs::metadata(&snapshot).unwrap().ino()
+            )
+        );
+        let current = Connection::open(&database).unwrap();
+        let backup = Connection::open(&snapshot).unwrap();
+        assert_eq!(schema(&current).unwrap(), before);
+        assert_eq!(schema(&backup).unwrap(), before);
+        assert_eq!(
+            current
+                .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            backup
+                .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        for db in [&current, &backup] {
+            assert_eq!(
+                db.query_row("SELECT outcome FROM mailbox_retire_audit", [], |r| r
+                    .get::<_, String>(0))
+                    .unwrap(),
+                "private fixture row"
+            );
+            assert_eq!(
+                db.query_row("SELECT COUNT(*) FROM sidecar", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+        }
+    }
 }

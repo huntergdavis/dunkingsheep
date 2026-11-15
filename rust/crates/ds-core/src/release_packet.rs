@@ -821,9 +821,12 @@ impl Packet {
     }
 }
 
-/// Quiesced SQLite snapshot and trigger downgrade; publication never overwrites
-/// the first complete snapshot and repeated calls accept already-dropped triggers.
+/// Modern packets retain every schema object. Historical t5007 packets may name
+/// only the original three downgrade triggers; no other DDL is authorized here.
 fn validate_triggers(triggers: &[String]) -> Result<()> {
+    if triggers.is_empty() {
+        return Ok(());
+    }
     let expected = BTreeSet::from([
         "message_threads_delete",
         "message_thread_routes_delete",
@@ -868,14 +871,16 @@ fn rollback_database(database: &Path, snapshot: &Path, triggers: &[String]) -> R
         "invalid first rollback snapshot",
     )?;
     let before = schema(&connection)?;
-    let sql = format!(
-        "BEGIN IMMEDIATE;{}COMMIT;",
-        triggers
-            .iter()
-            .map(|s| format!("DROP TRIGGER IF EXISTS {s};"))
-            .collect::<String>()
-    );
-    connection.execute_batch(&sql).map_err(|e| e.to_string())?;
+    if !triggers.is_empty() {
+        let sql = format!(
+            "BEGIN IMMEDIATE;{}COMMIT;",
+            triggers
+                .iter()
+                .map(|s| format!("DROP TRIGGER IF EXISTS {s};"))
+                .collect::<String>()
+        );
+        connection.execute_batch(&sql).map_err(|e| e.to_string())?;
+    }
     let after = schema(&connection)?;
     fail(
         after
