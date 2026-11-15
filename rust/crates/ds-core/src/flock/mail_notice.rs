@@ -66,7 +66,7 @@ impl Flock {
         if ids.is_empty() {
             // Real inbox consumption obsoletes this offered wake, not the mail itself.
             // Recheck the exact batch under the queue lock so a folded arrival is retained.
-            if all_consumed && candidate.notice_offer.is_some() {
+            if all_consumed {
                 let removed = {
                     let mut outbox = outbox_lock(&self.outbox);
                     outbox.get_mut(pane).and_then(|queue| {
@@ -77,9 +77,8 @@ impl Flock {
                         })?;
                         let mut row = queue.remove(index);
                         row.cancel_at(now);
-                        row.detail = Some(
-                            "mail consumed after hook offer; typed wake no longer needed".into(),
-                        );
+                        row.detail =
+                            Some("mail no longer unread; typed wake no longer needed".into());
                         Some(row)
                     })
                 };

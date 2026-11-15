@@ -248,3 +248,19 @@ fn fallback_idle_bound_is_measured_from_end_not_the_previous_offer() {
     let restored = message_from_snapshot(&message_snapshot(&row)).unwrap();
     assert!(f.flock.notice_waits_for_hook(&restored, 519.0));
 }
+
+#[test]
+fn proactive_read_before_the_first_offer_also_retires_the_stale_wake() {
+    let f = Fixture::new();
+    f.inbox
+        .read_with_receipt(P, &f.ids, true, Some(105.0))
+        .unwrap();
+    assert!(f.offer("turn1", "end", 110.0).is_none());
+    assert!(f.flock.outbox_snapshot()[P].is_empty());
+    let recovered = f.inbox.recover_delivery(P).unwrap();
+    assert_eq!(
+        recovered.len(),
+        2,
+        "retiring a wake must preserve lost-response recovery bodies"
+    );
+}
