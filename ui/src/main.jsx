@@ -27,6 +27,7 @@ import CharacterEditor from './CharacterEditor';
 import ProjectTerminal from './ProjectTerminal';
 import LaneUsage from './LaneUsage';
 import ProjectInformation from './ProjectInformation';
+import { informationHref } from './project-info.js';
 import { nextTerminalList, OWNER_TERMINAL_NAME, terminalActionForLane, terminalListReason } from './project-terminal-targets.js';
 import { agoText, laneMailText, unroutedSection } from './project-fleet.js';
 import { canonicalDashLocation, DASH_HOME, DASH_ROUTES, requestedPane, resolveDashRoute, viewForPath } from './dash-route.js';
@@ -1304,7 +1305,7 @@ function Projects({ standalone = false }) {
     const name = membership.scope === 'project' && typeof membership.project === 'string' ? membership.project : null;
     const key = name !== null ? `project:${name}` : `scope:${membership.scope || 'unknown'}`;
     const title = name !== null ? `Project: ${name}` : ({global: 'Global scope', stale: 'Stale membership', unavailable: 'Membership unavailable', unknown: 'Unknown / unregistered'}[membership.scope] || 'Unknown / unregistered');
-    if (!groups.has(key)) groups.set(key, { key, title, lanes: [] });
+    if (!groups.has(key)) groups.set(key, { key, title, lanes: [], ...(name !== null ? { project: name } : {}) });
     groups.get(key).lanes.push(lane);
   }
   const ordered = [...groups.values()].sort((a, b) => a.title.localeCompare(b.title));
@@ -1318,11 +1319,10 @@ function Projects({ standalone = false }) {
     {ownerAction && <section className="project-group"><h2>VP of Agentry</h2><button type="button" onClick={() => setTerminalTarget(ownerAction.target)}>Open VP terminal</button></section>}
     {roster && <><label>Show <select aria-label="Filter projects" value={effectiveSelected} onChange={e => setSelected(e.target.value)}><option value="all">All groups</option>{ordered.map(group => <option key={group.key} value={group.key}>{group.title}</option>)}</select></label>
       {!ordered.length && <p>No live agent lanes are reported.</p>}
-      {ordered.filter(group => effectiveSelected === 'all' || group.key === effectiveSelected).map(group => <section className="project-group" key={group.key}><h2>{group.title} <small>({group.lanes.length})</small></h2><div className="ops-table-wrap"><table><thead><tr><th>Lane</th><th>Activity</th><th>Mail</th><th>Task</th><th>Model</th></tr></thead><tbody>{group.lanes.map(lane => <tr key={lane.pane_id}><td className={lane.pane_id === deepLinkPane ? 'lane-deep-link' : undefined}><a aria-current={lane.pane_id === deepLinkPane ? 'true' : undefined} href={`/dash/projects?pane=${encodeURIComponent(lane.pane_id)}`}>{laneDisplayName(lane, lane.pane_id)}</a><small> {lane.pane_id}</small><LaneUsage lane={lane} budget={budget} />{(action => action.target
+      {ordered.filter(group => effectiveSelected === 'all' || group.key === effectiveSelected).map(group => <section className="project-group" key={group.key}><h2>{group.title} <small>({group.lanes.length})</small>{group.project !== undefined && <a className="project-information-link" href={informationHref(group.project)}>Information</a>}</h2><div className="ops-table-wrap"><table><thead><tr><th>Lane</th><th>Activity</th><th>Mail</th><th>Task</th><th>Model</th></tr></thead><tbody>{group.lanes.map(lane => <tr key={lane.pane_id}><td className={lane.pane_id === deepLinkPane ? 'lane-deep-link' : undefined}><a aria-current={lane.pane_id === deepLinkPane ? 'true' : undefined} href={`/dash/projects?pane=${encodeURIComponent(lane.pane_id)}`}>{laneDisplayName(lane, lane.pane_id)}</a><small> {lane.pane_id}</small><LaneUsage lane={lane} budget={budget} />{(action => action.target
         ? <button type="button" onClick={() => setTerminalTarget(action.target)}>{action.label}</button>
         : <small className="lane-terminal-reason"> {action.reason}</small>)(terminalActionForLane(terminalList, lane.pane_id))}</td><td>{lane.state || 'Unknown'}</td><td>{(mail => <span title={mail.reason || undefined}>{mail.text}</span>)(laneMailText(fleet, lane.pane_id))}</td><td>{lane.task ? [lane.task.id, lane.task.title].filter(Boolean).join(' · ') : 'Unknown'}</td><td data-lane-model={lane.pane_id}>{(model => <>{model.text}<small> {model.detail}</small></>)(laneModel(lane.model))}</td></tr>)}</tbody></table></div></section>)}
     </>}
-    <ProjectInformation api={api} />
     <details className="project-unrouted">
       <summary>{unrouted.title}</summary>
       {!unrouted.known ? <p className="dash-muted">{unrouted.reason}</p> : <>
@@ -1351,6 +1351,10 @@ function StandaloneDesk({ view, known }) {
   if (view === 'cos' && new URLSearchParams(window.location.search).get('panel') !== 'conversation') return <DashShell standalone view="cos"><OwnerInbox api={api} /></DashShell>;
   if (view === 'tasks') return <DashShell standalone view="tasks"><TasksView api={api} /></DashShell>;
   if (view === 'projects') return <Projects standalone />;
+  if (view === 'databases') return <DashShell standalone view="databases"><div className="dash-body">
+    <div className="ops-heading"><div><div className="eyebrow">{DASH_ROUTES.databases.eyebrow}</div><h1>{DASH_ROUTES.databases.title}</h1><p>{DASH_ROUTES.databases.subtitle}</p></div></div>
+    <ProjectInformation api={api} />
+  </div></DashShell>;
   if (view === 'operations') return <OpsBoard standalone />;
   if (view === 'play') return <PlayWorkspace standalone />;
   return <ChannelStandalone key={view} channel={view} />;

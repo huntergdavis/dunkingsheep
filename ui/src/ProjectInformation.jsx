@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { CLASS_LABELS, provenance, splitEntries, standing, viewStateText } from './project-info.js';
+import { CLASS_LABELS, provenance, requestedStore, splitEntries, standing, storeSearch, viewStateText } from './project-info.js';
 
 // t3250: read-only browser of each project's information store and the global store. Every
 // value is rendered as text by React; nothing here writes to a store.
@@ -13,10 +13,17 @@ function Entry({ entry }) {
   </article>;
 }
 
+// t5241: the Databases tab. The chosen store is in the address (?project=<name> or
+// ?project=global), so a project's Information link opens it and a reload keeps it.
 export default function ProjectInformation({ api }) {
   const [list, setList] = useState(null);
   const [listError, setListError] = useState('');
-  const [selected, setSelected] = useState('');
+  const [selected, setSelectedState] = useState(() => requestedStore(window.location.search));
+  const setSelected = value => {
+    setSelectedState(value);
+    const url = `${window.location.pathname}${storeSearch(value)}${window.location.hash}`;
+    window.history.replaceState(window.history.state, '', url);
+  };
   const [query, setQuery] = useState('');
   const [view, setView] = useState(null);
   useEffect(() => {

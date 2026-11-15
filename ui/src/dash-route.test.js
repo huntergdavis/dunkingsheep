@@ -15,7 +15,7 @@ test('the bare desk, /dash and /dash/ open Projects', () => {
 });
 
 test('every dashboard keeps its own route, Inbox included, and Projects is first in the nav', () => {
-  assert.deepEqual(Object.keys(DASH_ROUTES), ['projects', 'cos', 'tasks', 'operations', 'play']);
+  assert.deepEqual(Object.keys(DASH_ROUTES), ['projects', 'databases', 'cos', 'tasks', 'operations', 'play']);
   for (const key of Object.keys(DASH_ROUTES)) {
     assert.deepEqual(viewForPath(`/dash/${key}`), { view: key, known: true });
     assert.deepEqual(resolveDashRoute(`/dash/${key}/`), { standalone: true, view: key, known: true });
