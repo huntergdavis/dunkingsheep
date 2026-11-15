@@ -21,8 +21,11 @@ const localExports = {
   'project-terminal-targets.js': ['nextTerminalList', 'terminalActionForLane', 'terminalListReason', 'terminalTargetForPane'],
 };
 
-const mainBundle = () => {
-  const src = readFileSync(path.join(here, 'main.jsx'), 'utf8');
+const entrypoints = ['main.jsx', 'DeskShared.jsx', 'ProjectsView.jsx', 'OperationsView.jsx',
+  'PlayView.jsx', 'PoolradProgress.jsx', 'ConversationView.jsx', 'ConversationWidgets.jsx'];
+
+const mainBundle = (file) => {
+  const src = readFileSync(path.join(here, file), 'utf8');
   const imports = new Map(); // module -> Set of imported names
   for (const m of src.matchAll(/import\s*\{([^}]+)\}\s*from\s*'([^']+)'/g)) {
     const names = m[1].split(',').map(part => part.replace(/ as .*$/, '').trim());
@@ -33,8 +36,8 @@ const mainBundle = () => {
   return { src, imports };
 };
 
-test('main.jsx binds every local export it calls to an import of that module', () => {
-  const { src, imports } = mainBundle();
+for (const file of entrypoints) test(`${file} binds every local export it calls to an import of that module`, () => {
+  const { src, imports } = mainBundle(file);
   const unbound = [];
   for (const [module, exports] of Object.entries(localExports)) {
     const imported = imports.get('./' + module) ?? new Set();
@@ -46,8 +49,8 @@ test('main.jsx binds every local export it calls to an import of that module', (
   assert.deepEqual(unbound, [], 'referenced local exports not imported: ' + unbound.join(', '));
 });
 
-test('main.jsx does not import local names it never calls', () => {
-  const { src, imports } = mainBundle();
+for (const file of entrypoints) test(`${file} does not import local names it never calls`, () => {
+  const { src, imports } = mainBundle(file);
   for (const [module, exports] of Object.entries(localExports)) {
     const imported = imports.get('./' + module) ?? new Set();
     for (const name of exports) {
