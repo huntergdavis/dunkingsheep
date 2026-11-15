@@ -67,7 +67,9 @@ impl Fixture {
                 0o444,
             );
             units.insert((*key).into(), json!({"unit":service,"binary":binary,"release":new.parent().unwrap(),"drop":drop,"snippet":format!("{key}.conf.pending"),"baseline":{"MainPID":(11+index).to_string(),"NRestarts":"0","executable":old,"binary_sha256":hash(&old).unwrap(),"DropInPaths":config.to_str().unwrap(),"unit_file_hashes":{config.to_str().unwrap():hash(&config).unwrap()}}}));
-            rows.push(json!({"unit":key,"source":new,"stage":staged.strip_prefix(&root).unwrap(),"release":new,"sha256":hash(&new).unwrap()}));
+            let source = base.join(format!("build-{key}/{binary}"));
+            put(&source, format!("new-{key}").as_bytes(), 0o555);
+            rows.push(json!({"unit":key,"source":source,"stage":staged.strip_prefix(&root).unwrap(),"release":new,"sha256":hash(&new).unwrap()}));
             if *key == "web" {
                 put(
                     &old.parent().unwrap().join("ui/dist/index.html"),
@@ -86,7 +88,7 @@ impl Fixture {
             b"reviewed trigger-list metadata",
             0o444,
         );
-        let manifest = json!({"source_commit":"1111111111111111111111111111111111111111","operator":"operator","units":units,"rows":rows,"launcher":{"path":cli,"old_sha256":hash(&cli).unwrap(),"new_sha256":hash(&root.join("launcher.pending")).unwrap()},"poll_unchanged":{poll.to_str().unwrap():hash(&poll).unwrap()},"token_file":token,"rollback_triggers":["message_threads_delete","message_thread_routes_delete","message_thread_refs_delete"]});
+        let manifest = json!({"source_commit":"1111111111111111111111111111111111111111","operator":"operator","units":units,"rows":rows,"launcher":{"path":cli,"old_sha256":hash(&cli).unwrap(),"new_sha256":hash(&root.join("launcher.pending")).unwrap()},"poll_unchanged":{poll.to_str().unwrap():hash(&poll).unwrap()},"token_file":token,"lan_authority":"192.0.2.15:8787","rollback_triggers":["message_threads_delete","message_thread_routes_delete","message_thread_refs_delete"]});
         put(
             &root.join("STAGING-MANIFEST.json"),
             &serde_json::to_vec_pretty(&manifest).unwrap(),
@@ -121,7 +123,7 @@ impl Fixture {
         let digest = hash(&root.join("SHA256SUMS")).unwrap();
         put(&root.join("state/ACTIVATION-GO.json"), &serde_json::to_vec(&json!({"authority_message":"fixture owner GO","packet_sha256":digest,"valid_from":"2026-11-14T18:00:00Z","valid_until":"2026-11-14T20:00:00Z","no_terminal_confirmed":true,"rollback_on_apply_failure":true,"rollback_triggers":["apply failure"],"observations_only":["owner workflow"]})).unwrap(),0o600);
         put(&root.join("state/REVIEW-ACCEPTANCE.json"), &serde_json::to_vec(&json!({"packet_sha256":digest,"accepted":true,"reviewer":"independent","evidence_message":"fixture review"})).unwrap(),0o600);
-        let packet = Packet::open(&root, &digest).unwrap();
+        let packet = Packet::open(&root, &digest, false).unwrap();
         let states = packet
             .m
             .units
@@ -405,6 +407,23 @@ fn failed_postcheck_automatically_rolls_back_and_does_not_allow_second_apply() {
             .count(),
         restarts
     );
+}
+
+#[test]
+fn rollback_does_not_depend_on_disposable_build_or_staged_candidates() {
+    let mut f = Fixture::new();
+    f.run("activate", true).unwrap();
+    let manifest: Manifest = load(&f.root.join("STAGING-MANIFEST.json")).unwrap();
+    for row in &manifest.rows {
+        fs::remove_file(&row.source).unwrap();
+        fs::remove_file(f.root.join(&row.stage)).unwrap();
+    }
+    fs::remove_file(f.root.join("launcher.pending")).unwrap();
+    assert!(f.run("verify", true).is_err());
+    f.run("rollback", true).unwrap();
+    f.old_active();
+    f.run("rollback", true).unwrap();
+    f.old_active();
 }
 #[test]
 fn rollback_resumes_old_bridge_after_overlay_unlink_and_failed_start() {

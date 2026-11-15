@@ -163,7 +163,9 @@ unit-file hashes and `DropInPaths`, candidate drop-in/snippet paths, before/afte
 CLI hashes, unchanged poll hashes, dedicated Telegram token path and the three
 reviewed downgrade trigger names. `SHA256SUMS` covers the manifest, artifacts,
 snippets, `launcher.before`, `launcher.pending` and `rollback-triggers.sql`.
-The digest supplied on the command line is the SHA256 of `SHA256SUMS` itself.
+The required `lan_authority` is the reviewed LAN Host header for terminal probes;
+the TCP connection remains loopback. The digest supplied on the command line is
+the SHA256 of `SHA256SUMS` itself.
 The SQL file is review evidence; the native executor permits only the three
 specific t5007 message sidecar trigger removals and retains all tables and rows.
 
@@ -190,7 +192,11 @@ An apply failure attempts rollback in reverse order. An incomplete rollback
 returns failure with instructions to wait/detach as needed and rerun the same
 `rollback --packet ... --packet-sha ... --apply` command. Recovery uses the GO
 captured in `ACTIVATION-START.json`, including after its activation window expires;
-it never opens a second activation attempt. A completed first SQLite snapshot is
+it never opens a second activation attempt. Recovery validates its manifest,
+snippets, saved old launcher, old executables, baseline configuration, poll and
+snapshot rather than disposable build outputs or staged candidate artifacts.
+Activation and verification retain full source/stage/release validation.
+A completed first SQLite snapshot is
 published without replacement and retained across retries. Recovery accepts
 already-dropped triggers and restarts an old unit left inactive after overlay
 removal. Drift causes refusal before removing that overlay. Inspect the private

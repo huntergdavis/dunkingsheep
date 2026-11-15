@@ -137,14 +137,10 @@ struct Manifest {
     rollback_triggers: Vec<String>,
     #[serde(default = "default_http")]
     http_authority: String,
-    #[serde(default = "default_lan")]
     lan_authority: String,
 }
 fn default_http() -> String {
     "127.0.0.1:8787".into()
-}
-fn default_lan() -> String {
-    "192.168.0.209:8787".into()
 }
 
 #[derive(Clone, Debug)]
@@ -188,7 +184,7 @@ struct Packet {
     m: Manifest,
 }
 impl Packet {
-    fn open(root: &Path, digest: &str) -> Result<Self> {
+    fn open(root: &Path, digest: &str, recovery: bool) -> Result<Self> {
         plain(root)?;
         fail(
             io(fs::symlink_metadata(root))?.is_dir(),
@@ -244,12 +240,15 @@ impl Packet {
             digest: digest.into(),
             m,
         };
-        packet.files()?;
+        packet.files(recovery)?;
         validate_triggers(&packet.m.rollback_triggers)?;
         for (name, expected) in [
             ("launcher.before", &packet.m.launcher.old_sha256),
             ("launcher.pending", &packet.m.launcher.new_sha256),
         ] {
+            if recovery && name == "launcher.pending" {
+                continue;
+            }
             fail(
                 hash(&packet.relative(Path::new(name))?)? == *expected,
                 "saved CLI differs from manifest",
@@ -277,12 +276,26 @@ impl Packet {
         )?;
         Ok(p)
     }
-    fn files(&self) -> Result<()> {
+    fn files(&self, recovery: bool) -> Result<()> {
         let sums = io(fs::read_to_string(self.root.join("SHA256SUMS")))?;
+        let mut required = BTreeSet::from([
+            "STAGING-MANIFEST.json",
+            "launcher.before",
+            "rollback-triggers.sql",
+        ]);
+        if !recovery {
+            required.insert("launcher.pending");
+        }
+        for unit in self.m.units.values() {
+            required.insert(unit.snippet.to_str().ok_or("snippet path must be UTF-8")?);
+        }
         let mut names = BTreeSet::new();
         for line in sums.lines() {
             let (expected, name) = line.split_once("  ").ok_or("invalid checksum record")?;
             fail(names.insert(name), "duplicate checksum record")?;
+            if recovery && !required.contains(name) {
+                continue;
+            }
             fail(
                 hash(&self.relative(Path::new(name))?)? == expected,
                 format!("packet file drift: {name}"),
@@ -292,11 +305,7 @@ impl Packet {
             names.contains("STAGING-MANIFEST.json"),
             "manifest is not covered by checksums",
         )?;
-        for name in [
-            "launcher.before",
-            "launcher.pending",
-            "rollback-triggers.sql",
-        ] {
+        for name in required {
             fail(
                 names.contains(name),
                 format!("operational file is not covered: {name}"),
@@ -308,15 +317,17 @@ impl Packet {
                 "unit snippet is not covered",
             )?;
         }
-        for row in &self.m.rows {
-            let stage = self.relative(&row.stage)?;
-            for p in [&row.source, &stage, &row.release] {
-                plain(p)?;
-                regular(p)?;
-                fail(
-                    hash(p)? == row.sha256,
-                    format!("artifact drift: {}", p.display()),
-                )?;
+        if !recovery {
+            for row in &self.m.rows {
+                let stage = self.relative(&row.stage)?;
+                for p in [&row.source, &stage, &row.release] {
+                    plain(p)?;
+                    regular(p)?;
+                    fail(
+                        hash(p)? == row.sha256,
+                        format!("artifact drift: {}", p.display()),
+                    )?;
+                }
             }
         }
         for (p, expected) in &self.m.poll_unchanged {
@@ -718,7 +729,7 @@ impl Packet {
         Ok(())
     }
     fn rollback(&self, host: &mut impl Host) -> Result<()> {
-        self.files()?;
+        self.files(true)?;
         self.go(host, true)?;
         let cli = hash(&self.m.launcher.path)?;
         fail(
@@ -1033,7 +1044,7 @@ fn execute_with_host(
         matches!(action, "plan" | "activate" | "verify" | "rollback"),
         "unknown packet operation",
     )?;
-    let packet = Packet::open(root, digest)?;
+    let packet = Packet::open(root, digest, action == "rollback")?;
     if !apply || action == "plan" {
         return Ok(json!({"dry_run":true,"action":action,"source_commit":packet.m.source_commit,"order":ORDER,"packet_sha256":digest,"note":"No services, files, locks, timers or host commands changed. Operator only after exact tooling/packet review and GO."}).to_string());
     }
