@@ -237,5 +237,77 @@ fn the_composed_desk_serves_an_upload_with_its_real_stat_metadata() {
             let want = want_headers[name].as_str().map(str::to_owned);
             assert_eq!(got, want, "{name} differs from the Python desk");
         }
+
+        // Change the file after upload but leave the stored attachment row untouched. This
+        // distinguishes a real stat length from the stale size recorded during upload.
+        let database = Connection::open(data_dir.join("messages.sqlite3")).expect("messages db");
+        let recorded_size: i64 = database
+            .query_row("SELECT size FROM attachments WHERE id = ?1", [&id], |row| {
+                row.get(0)
+            })
+            .expect("attachment row");
+        assert_eq!(recorded_size, CONTENT.len() as i64);
+        let changed = b"changed scratch file content";
+        std::fs::write(&stored, changed).expect("change stored bytes without touching the row");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&stored)
+            .expect("open changed upload")
+            .set_modified(UNIX_EPOCH + Duration::from_secs(MTIME))
+            .expect("pin the changed file's mtime");
+        let stat_size = std::fs::metadata(&stored).expect("stat changed file").len();
+        assert_eq!(stat_size, changed.len() as u64);
+        assert_ne!(stat_size, recorded_size as u64);
+        let persisted_size: i64 = database
+            .query_row("SELECT size FROM attachments WHERE id = ?1", [&id], |row| {
+                row.get(0)
+            })
+            .expect("unchanged attachment row");
+        assert_eq!(persisted_size, recorded_size);
+
+        for (range, expected_status, expected_bytes) in [
+            (None, StatusCode::OK, changed.as_slice()),
+            (
+                Some("bytes=2-5"),
+                StatusCode::PARTIAL_CONTENT,
+                &changed[2..6],
+            ),
+        ] {
+            let mut request = Request::builder()
+                .method(Method::GET)
+                .uri(format!("/api/uploads/{id}"))
+                .header(header::COOKIE, cookie.as_str());
+            if let Some(range) = range {
+                request = request.header(header::RANGE, range);
+            }
+            let response = router
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected_status);
+            let headers = response.headers().clone();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(body.as_ref(), expected_bytes);
+            assert_eq!(
+                headers[header::CONTENT_LENGTH],
+                expected_bytes.len().to_string()
+            );
+            // Python's FileResponse uses md5("1700000000.0-28") for this stat.
+            assert_eq!(
+                headers[header::ETAG],
+                "\"0b9a3fcf797a6e680b251da6a378280d\""
+            );
+            assert_eq!(
+                headers[header::LAST_MODIFIED],
+                "Tue, 14 Nov 2023 22:13:20 GMT"
+            );
+            if range.is_some() {
+                assert_eq!(
+                    headers[header::CONTENT_RANGE],
+                    format!("bytes 2-5/{stat_size}")
+                );
+            }
+        }
     });
 }
