@@ -5017,8 +5017,36 @@ async fn review_author_declaration_resolves_exact_head_and_does_not_carry_to_new
         FakeReviewTokens(Ok("test-token".into())),
         FakeReviewPolicy { required: 2 },
         "https://api.example.test",
-        FakeReviewTransport::with_responses([]),
+        FakeReviewTransport::with_responses([
+            github_response(200, open_pull(7, &head, "arbitrary/not-a-task")),
+            github_response(200, json!({"mergeable":true,"mergeable_state":"clean"})),
+            github_response(200, json!({"body":"details"})),
+            github_response(201, json!({"state":"pending"})),
+        ]),
     );
+    let report = sync.run(false).await.unwrap();
+    assert_eq!(report["filed"][0]["author"], "%260");
+    let row = sync
+        .flock
+        .list_review_rows_visible()
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        sync.flock
+            .review_facts(&row.id)
+            .await
+            .unwrap()
+            .author
+            .as_deref(),
+        Some("%260")
+    );
+    let filed = sync.flock.get(&row.id).await.unwrap();
+    assert!(filed.body.contains("author lane: %260"));
+    assert!(filed.body.contains(&format!(
+        "guarded author-task declaration; task {}",
+        work.id
+    )));
     let v = open_pull(7, &head, "arbitrary/not-a-task");
     let mut flat = v[0].clone();
     flat["head"] = flat["head"]["sha"].clone();
