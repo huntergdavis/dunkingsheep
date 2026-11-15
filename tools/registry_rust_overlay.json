@@ -162,6 +162,7 @@
        "project",
        "model",
        "switch_model",
+       "settings",
        "planner"
       ]
      }
@@ -195,7 +196,7 @@
      "pane",
      {
       "type": "string",
-      "description": "set: the pane id; project, model: the pane id, or 'self' (model only)"
+      "description": "set: the pane id; project, model, settings: the pane id, or 'self' (model only)"
      }
     ],
     [

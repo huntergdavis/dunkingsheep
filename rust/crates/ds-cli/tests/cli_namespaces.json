@@ -12927,6 +12927,56 @@
  {
   "argv": [
    "lane",
+   "settings",
+   "x"
+  ],
+  "namespace": {
+   "command": "lane",
+   "json": false,
+   "lane_command": "settings",
+   "no_start_daemon": false,
+   "pane": "x",
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "lane",
+   "settings",
+   "x",
+   "--json"
+  ],
+  "namespace": {
+   "command": "lane",
+   "json": true,
+   "lane_command": "settings",
+   "no_start_daemon": false,
+   "pane": "x",
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "--json",
+   "lane",
+   "settings",
+   "x"
+  ],
+  "namespace": {
+   "command": "lane",
+   "json": true,
+   "lane_command": "settings",
+   "no_start_daemon": false,
+   "pane": "x",
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "lane",
    "planner",
    "grant"
   ],

@@ -1,0 +1,7 @@
+usage: dunkingsheep lane settings [-h] pane
+
+positional arguments:
+  pane        live pane id
+
+options:
+  -h, --help  show this help message and exit

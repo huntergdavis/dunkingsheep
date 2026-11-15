@@ -68,6 +68,9 @@ def load_parser():
     switch.add_argument("pane", help="live pane id")
     switch.add_argument("--model", required=True, help="the model to restart the lane with")
     switch.add_argument("--effort", help="the reasoning effort")
+    # t5249 slice 1: a lane's effective launch settings with their sources. Rust-only, read-only.
+    settings = actions.add_parser("settings", help="read-only: a lane's launch settings (model, effort, sandbox, approval, ...) and where each came from")
+    settings.add_argument("pane", help="live pane id")
     planner = actions.add_parser("planner", help="owner-controlled planner grants and task project scope")
     planner.add_argument("operation", choices=["grant", "revoke", "task-project", "repo-project", "repo-revoke"])
     planner.add_argument("--repo")

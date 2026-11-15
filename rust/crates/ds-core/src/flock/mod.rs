@@ -1035,6 +1035,7 @@ pub mod resolve;
 pub mod retire;
 mod retired;
 pub mod roles_gate;
+pub mod launch_settings;
 pub mod roster;
 pub mod send_keys;
 pub mod sends;
