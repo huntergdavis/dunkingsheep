@@ -15,12 +15,16 @@ export PROJ_CARGO_TIMEOUT_SECONDS=${DS_CARGO_TIMEOUT_SECONDS:-3600}
 # disk, not the small shared /tmp: ~/workspace/.dunk-scratch/c/<8 hex of the checkout path>.
 # Short, because tests make Unix sockets under it and a socket path may have only 107 bytes;
 # a directory longer than DS_CARGO_TMP_MAX (56) is refused with an error instead of used.
-# A TMPDIR the caller set to anything but /tmp is kept. Outside a git checkout nothing changes.
-if [[ -z ${TMPDIR:-} || ${TMPDIR%/} == /tmp ]] && top=$(git rev-parse --show-toplevel 2>/dev/null); then
+# The lane's own TMPDIR is NOT kept: a new lane's TMPDIR is ~/workspace/.dunk-scratch/<name>-<hex>
+# (up to 60 bytes), which would leave 2 bytes of socket margin. DS_CARGO_TMPDIR=<dir> is the one
+# explicit override. Outside a git checkout nothing changes.
+if [[ -n ${DS_CARGO_TMPDIR:-} ]]; then
+    export TMPDIR=$DS_CARGO_TMPDIR
+elif top=$(git rev-parse --show-toplevel 2>/dev/null); then
     key=$(printf '%s' "$top" | sha256sum | cut -c1-8)
     scratch=${HOME:?HOME is not set}/workspace/.dunk-scratch/c/$key
     if (( ${#scratch} > ${DS_CARGO_TMP_MAX:-56} )); then
-        echo "ds-cargo: scratch directory $scratch is ${#scratch} bytes, over ${DS_CARGO_TMP_MAX:-56}; Unix socket paths under it would not fit. Set TMPDIR to a shorter directory." >&2
+        echo "ds-cargo: scratch directory $scratch is ${#scratch} bytes, over ${DS_CARGO_TMP_MAX:-56}; Unix socket paths under it would not fit. Set DS_CARGO_TMPDIR to a shorter directory." >&2
         exit 2
     fi
     mkdir -p -m 700 -- "$HOME/workspace/.dunk-scratch" "$HOME/workspace/.dunk-scratch/c"

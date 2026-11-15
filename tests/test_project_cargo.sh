@@ -126,8 +126,12 @@ got=$(ds "$fixture/dscargo/repo/rust" TMPDIR=/tmp)
 [[ $(stat -c %a "$short_home/workspace/.dunk-scratch") == 700 ]] || { echo "scratch parent is not 0700" >&2; exit 1; }
 # The same checkout always gets the same directory, from any subdirectory.
 [[ $(ds "$fixture/dscargo/repo" TMPDIR=/tmp) == "$got" ]] || { echo "not stable per checkout" >&2; exit 1; }
-got=$(ds "$fixture/dscargo/repo/rust" TMPDIR="$fixture/dscargo/mine")
-[[ $got == "TMPDIR=$fixture/dscargo/mine" ]] || { echo "an explicit TMPDIR was replaced: $got" >&2; exit 1; }
+# A lane's own (long) TMPDIR is replaced by the short per-checkout one...
+got=$(ds "$fixture/dscargo/repo/rust" TMPDIR="$fixture/dscargo/lane-scratch-with-a-long-name")
+[[ $got == "TMPDIR=$short_home/workspace/.dunk-scratch/c/$key" ]] || { echo "a lane TMPDIR was kept: $got" >&2; exit 1; }
+# ...and DS_CARGO_TMPDIR is the one explicit override.
+got=$(ds "$fixture/dscargo/repo/rust" TMPDIR=/tmp DS_CARGO_TMPDIR="$fixture/dscargo/mine")
+[[ $got == "TMPDIR=$fixture/dscargo/mine" ]] || { echo "DS_CARGO_TMPDIR was not used: $got" >&2; exit 1; }
 # The fixture may itself sit inside a checkout: stop git looking above it.
 got=$(ds "$fixture/dscargo" TMPDIR=/tmp GIT_CEILING_DIRECTORIES="$fixture")
 [[ $got == "TMPDIR=/tmp" ]] || { echo "outside a checkout: $got" >&2; exit 1; }
