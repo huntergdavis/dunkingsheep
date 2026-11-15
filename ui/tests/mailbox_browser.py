@@ -56,6 +56,8 @@ def mock(route):
     url = urlsplit(route.request.url)
     query = parse_qs(url.query)
     requests.append((route.request.method, url.path, query))
+    if url.path == '/api/session':
+        return fulfill(route, {'ok': True})
     if url.path == '/api/channels':
         return fulfill(route, {'channels': []})
     if url.path == '/api/owner-thread':
@@ -100,6 +102,7 @@ try:
             page.goto(base + '/dash/cos?panel=mailboxes', wait_until='domcontentloaded')
             reader = page.get_by_role('article', name='Selected mailbox message')
             reader.get_by_text('OWNER-BODY', exact=True).wait_for()
+            assert not any(path == '/api/channels' for _, path, _ in requests), 'mailbox startup must not load channels'
             page.get_by_role('button', name='Older', exact=True).click()
             reader.get_by_text('OLDER-BODY', exact=True).wait_for()
             page.get_by_role('button', name='Newer', exact=True).click()
@@ -165,7 +168,7 @@ try:
             assert page.get_by_role('checkbox').count() == 0
             page.close()
             assert all(method == 'GET' for method, path, _ in requests if path != '/api/viewport')
-            assert {path for _, path, _ in requests} <= {'/api/channels','/api/owner-thread','/api/mailboxes','/api/mailbox-messages','/api/mailbox-message','/api/version','/api/viewport'}
+            assert {path for _, path, _ in requests} <= {'/api/session','/api/channels','/api/owner-thread','/api/mailboxes','/api/mailbox-messages','/api/mailbox-message','/api/version','/api/viewport'}
             requests.clear()
         browser.close()
 finally:

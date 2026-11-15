@@ -1372,7 +1372,7 @@ function App() {
   }
   useLayoutEffect(() => { document.documentElement.dataset.theme = theme; }, [theme]);
   const [authorized, setAuthorized] = useState(null);
-  useEffect(() => { api('/channels').then(() => setAuthorized(true)).catch(() => setAuthorized(false)); }, []);
+  useEffect(() => { api('/session').then(() => setAuthorized(true)).catch(() => setAuthorized(false)); }, []);
   useEffect(() => { const expired = () => setAuthorized(false); window.addEventListener('vp-auth-expired', expired); return () => window.removeEventListener('vp-auth-expired', expired); }, []);
   const [updateAvailable, setUpdateAvailable] = useState(false);
   useEffect(() => {
