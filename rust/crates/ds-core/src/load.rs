@@ -192,7 +192,11 @@ pub fn registered_callers(tasks: &[Value]) -> Vec<Caller> {
 /// `sample`: per caller, CPU ticks now and the pid-reuse verdict. Returns
 /// `{"at", "callers": [...], "skipped": [...]}`.
 pub fn sample(callers: &[Caller], now: f64) -> Value {
-    let ppids = ppid_map();
+    sample_with_ppids(callers, now, &ppid_map())
+}
+
+/// Reuse a request's process-parent snapshot; roots are still checked live for pid reuse.
+pub(crate) fn sample_with_ppids(callers: &[Caller], now: f64, ppids: &BTreeMap<i64, i64>) -> Value {
     let (mut rows, mut skipped) = (Vec::new(), Vec::new());
     let gone =
         |name: &str, pid: i64, reason: &str| json!({"name": name, "pid": pid, "reason": reason});
@@ -205,7 +209,7 @@ pub fn sample(callers: &[Caller], now: f64) -> Value {
             skipped.push(gone(name, *pid, "pid reused (starttime differs)"));
             continue;
         }
-        let Some(cpu) = tree_cpu(*pid, &ppids) else {
+        let Some(cpu) = tree_cpu(*pid, ppids) else {
             skipped.push(gone(name, *pid, "process gone"));
             continue;
         };

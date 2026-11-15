@@ -94,6 +94,7 @@ pub(crate) struct RequestRuntimeAdapter<'a> {
     next_jobs: Option<&'a crate::tasks::next_job_runtime::NextJobs>,
     owner_push: Option<&'a owner_push::OwnerPushService>,
     dunk_runtime: Option<&'a RuntimeServices>,
+    roster_ppids: std::sync::OnceLock<std::collections::BTreeMap<i64, i64>>,
 }
 
 /// Terminal access shared by the request and loop adapters. A lock is held only while a
@@ -151,6 +152,7 @@ impl<'a> RequestRuntimeAdapter<'a> {
             next_jobs: None,
             owner_push: None,
             dunk_runtime: None,
+            roster_ppids: std::sync::OnceLock::new(),
         }
     }
 
