@@ -19,6 +19,13 @@ select-pane) if [ "$4" = '-T' ]; then printf '%s' "$5" > title; fi ;;
 esac
 "#.replace("__SEP__", crate::terminal::parse::pane_separator())).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Settle only ETXTBSY inherited write descriptors before backend calls (t5208).
+    // The no-op warm-up logs its argument; remove it to preserve call assertions.
+    crate::testsupport::exec_retrying_busy(|| {
+        std::process::Command::new(&script).arg("warm-up").status()
+    })
+    .expect("settle the fake tmux");
+    std::fs::remove_file(dir.path().join("calls")).unwrap();
     let backend = TmuxBackend::with_registry(script, dir.path().join("registry.json"));
     (dir, backend)
 }
