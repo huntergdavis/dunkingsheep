@@ -15,6 +15,7 @@ left it and construct a SECOND Flock from it - the real restart shape.
 import json
 import os
 import sys
+import shutil
 import tempfile
 import time
 import unittest
@@ -30,6 +31,7 @@ from fakes import FakeHerdr  # noqa: E402
 class OutboxRestartTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="outbox-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)  # t3912: never left in /tmp
         self.state = os.path.join(self.tmp, "dunks.json")
 
     def _flock(self):

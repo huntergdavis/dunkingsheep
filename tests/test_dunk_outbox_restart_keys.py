@@ -18,6 +18,7 @@ at the delivery, not at the restore.
 import json
 import os
 import sys
+import shutil
 import tempfile
 import unittest
 
@@ -32,6 +33,7 @@ from fakes import FakeHerdr  # noqa: E402
 class OutboxRestartKeysTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="outbox-keys-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)  # t3912: never left in /tmp
         self.state = os.path.join(self.tmp, "dunks.json")
 
     def _daemon(self, restore=True):
