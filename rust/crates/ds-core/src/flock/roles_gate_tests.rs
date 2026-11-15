@@ -890,15 +890,18 @@ fn the_unregistered_root_line_names_processes_never_tokens() {
     );
 }
 
-/// Through the gate with this test's real process chain, which is detached on a CI runner
-/// (under a tmux server it is not, and only the pure checks above apply).
+/// Through the gate with this test's real process chain, which is detached on a CI runner.
+/// Under a tmux server it is not detached: the test then says it was skipped, and on CI (where
+/// `CI` is set) that is a failure, so the gate cases cannot silently not run there.
 #[test]
 fn a_detached_owner_token_call_is_checked_against_the_registered_roots() {
     use std::os::unix::fs::PermissionsExt;
-    struct NoPanes;
-    impl PaneInfoEnv for NoPanes {
+    // The one listed pane is a live process that is not an ancestor of this test, so the caller
+    // is detached from every pane (peer_place refuses a pane whose root pid is 1 or gone).
+    struct OtherPane(i64);
+    impl PaneInfoEnv for OtherPane {
         fn list_panes_grouped(&self) -> Vec<Value> {
-            vec![json!({"pane_id":"%unrelated","pane_pid":1})]
+            vec![json!({"pane_id":"%unrelated","pane_pid":self.0})]
         }
         fn get_pane(&self, _: &str) -> Option<Value> {
             None
@@ -912,6 +915,11 @@ fn a_detached_owner_token_call_is_checked_against_the_registered_roots() {
     for _ in 0..crate::proc::MAX_DEPTH {
         let row = crate::proc::stat(cursor).unwrap();
         if row.comm == "tmux: server" {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "the detached-root gate test must run on CI, but this runner is under tmux"
+            );
+            eprintln!("SKIPPED a_detached_owner_token_call_is_checked_against_the_registered_roots: under a tmux server, the caller is not detached");
             return;
         }
         if row.ppid <= 1 {
@@ -919,6 +927,11 @@ fn a_detached_owner_token_call_is_checked_against_the_registered_roots() {
         }
         cursor = row.ppid;
     }
+    let mut unrelated = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let panes = OtherPane(i64::from(unrelated.id()));
     let root = (cursor, crate::proc::process_start(cursor).unwrap());
     let (flock, dir) = bare("owner-detached-roots-gate");
     let mut roles = Roles::new(
@@ -951,7 +964,7 @@ fn a_detached_owner_token_call_is_checked_against_the_registered_roots() {
         flock.set_service_token(Some(&token));
         flock.set_socket_peer(Some(true));
         flock.with_caller(|state| state.socket_peer_uid = Some(nix::unistd::geteuid().as_raw()));
-        flock.caller_role(None, &NoPanes)
+        flock.caller_role(None, &panes)
     };
     let path = dir.join(crate::roles::OWNER_DETACHED_ROOTS_FILE);
     let write = |text: String| {
@@ -981,6 +994,8 @@ fn a_detached_owner_token_call_is_checked_against_the_registered_roots() {
         "registered root accepted under enforcement"
     );
     flock.clear_caller();
+    let _ = unrelated.kill();
+    let _ = unrelated.wait();
 }
 
 // ---- t4782: the system token is accepted only from where the daemon's services run ----
