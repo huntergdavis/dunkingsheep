@@ -103,10 +103,11 @@ export default function ProjectTerminal({ target, onClose }) {
       url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
       url.searchParams.set('expected_pane', target.pane_id);
       socket = new WebSocket(url); socket.binaryType = 'arraybuffer';
-      socket.onopen = () => { attempt = 0; resizeReady = false; setStatus('Connected'); term.focus(); };
+      socket.onopen = () => { resizeReady = false; setStatus('Connected'); term.focus(); };
       socket.onmessage = event => {
         if (disposed) return;
-        if (typeof event.data !== 'string') { term.write(new Uint8Array(event.data)); return; }
+        // A socket handshake alone does not prove that the terminal recovered.
+        if (typeof event.data !== 'string') { attempt = 0; term.write(new Uint8Array(event.data)); return; }
         // Text frames are control messages, never screen text.
         const size = sizeMessage(event.data);
         if (!size) return;
@@ -120,7 +121,9 @@ export default function ProjectTerminal({ target, onClose }) {
         if (disposed) return;
         resizeReady = false; clearTimeout(readyTimer);
         setStatus('Reconnecting…');
-        timer = setTimeout(connect, Math.min(1000 * (2 ** Math.min(attempt++, 4)), 15000));
+        // Recover a working stream promptly; repeated failures still back off.
+        const retry = attempt++;
+        timer = setTimeout(connect, retry === 0 ? 0 : Math.min(1000 * (2 ** Math.min(retry - 1, 4)), 15000));
       };
       socket.onerror = () => socket.close();
     };
