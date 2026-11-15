@@ -1,0 +1,9 @@
+usage: dunkingsheep worktrees scratch [-h] [--root DIR] [--max-seconds S]
+                                      [--json]
+
+options:
+  -h, --help       show this help message and exit
+  --root DIR       the temp directory (default: /tmp)
+  --max-seconds S  stop after S seconds and mark the report partial (default:
+                   120)
+  --json

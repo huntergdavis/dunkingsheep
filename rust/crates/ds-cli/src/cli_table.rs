@@ -3254,6 +3254,23 @@ pub static ROOT: Cmd = Cmd {
                     ],
                 },
                 Cmd {
+                    name: "scratch", aliases: &[],
+                    help: Some("read-only: this project's test and tool leftovers in /tmp, by prefix, with age, size and whether held open"),
+                    raw: false,
+                    raw_text: false,
+                    about: None,
+                    epilog: None,
+                    args: &[
+                        Arg { id: "root", dest: "root", tri: false, default_int: false, flags: &["--root"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("the temp directory (default: /tmp)"), hidden: false, metavar: Some("DIR"), version: None },
+                        Arg { id: "max_seconds", dest: "max_seconds", tri: false, default_int: false, flags: &["--max-seconds"], positional: false, kind: Kind::Store, ty: Ty::Float, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("stop after S seconds and mark the report partial (default: 120)"), hidden: false, metavar: Some("S"), version: None },
+                        Arg { id: "json", dest: "json", tri: false, default_int: false, flags: &["--json"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: None, hidden: false, metavar: None, version: None },
+                    ],
+                    groups: &[],
+                    sub_dest: None, sub_metavar: None, sub_required: false,
+                    subs: &[
+                    ],
+                },
+                Cmd {
                     name: "clean", aliases: &[],
                     help: Some("delete merged worktrees' Cargo build caches; a dry run unless --apply"),
                     raw: false,

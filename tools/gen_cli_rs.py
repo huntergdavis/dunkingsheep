@@ -138,6 +138,11 @@ def load_parser():
     inventory.add_argument("--root", metavar="DIR", help="the worktree root (default: ~/workspace/.dunk-port-work)")
     inventory.add_argument("--max-seconds", dest="max_seconds", type=float, metavar="S", help="stop after S seconds and mark the report partial (default: 300)")
     inventory.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    # t3912: read-only report of this project's leftovers in /tmp.
+    scratch = worktree_actions.add_parser("scratch", help="read-only: this project's test and tool leftovers in /tmp, by prefix, with age, size and whether held open")
+    scratch.add_argument("--root", metavar="DIR", help="the temp directory (default: /tmp)")
+    scratch.add_argument("--max-seconds", dest="max_seconds", type=float, metavar="S", help="stop after S seconds and mark the report partial (default: 120)")
+    scratch.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     clean = worktree_actions.add_parser("clean", help="delete merged worktrees' Cargo build caches; a dry run unless --apply")
     clean.add_argument("--root", metavar="DIR", help="the worktree root (default: ~/workspace/.dunk-port-work)")
     clean.add_argument("--apply", action="store_true", help="delete; needs --from, and every cache is checked again right before it is deleted")

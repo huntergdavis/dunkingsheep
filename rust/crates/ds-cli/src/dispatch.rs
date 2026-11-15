@@ -3940,6 +3940,11 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                 ns.get("max_seconds").and_then(Value::as_f64),
                 json,
             ),
+            Some("scratch") => crate::worktrees_cmd::scratch_command(
+                text(ns, "root"),
+                ns.get("max_seconds").and_then(Value::as_f64),
+                json,
+            ),
             Some(other) => not_ported(&format!("worktrees {other}")),
             None => not_ported("worktrees"),
         },

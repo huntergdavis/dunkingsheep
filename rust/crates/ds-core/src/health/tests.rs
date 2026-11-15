@@ -535,3 +535,119 @@ fn the_used_fraction_of_a_real_filesystem_is_between_zero_and_one() {
     assert!((0.0..=1.0).contains(&used), "{used}");
     assert!(used_fraction(Path::new("/nonexistent/path")).is_err());
 }
+
+/// t3912: a health environment whose /tmp is as full as told (blocks, inodes).
+struct Tmp(Result<(f64, f64), String>);
+
+impl HealthEnv for Tmp {
+    fn memory_enabled(&self) -> bool {
+        false
+    }
+    fn memory_stats(&self) -> Result<Value, String> {
+        Err("no memory".into())
+    }
+    fn memory_status(&self) -> Result<Value, String> {
+        Err("no memory".into())
+    }
+    fn recover_leases(&self) -> Result<(), DunkError> {
+        Ok(())
+    }
+    fn requeue_partial(&self) -> Result<(), DunkError> {
+        Ok(())
+    }
+    fn checkpoint(&self) -> Result<(), DunkError> {
+        Ok(())
+    }
+    fn task_totals(&self) -> Result<Value, String> {
+        Ok(json!({}))
+    }
+    fn tmp_used_fractions(&self) -> Option<Result<(f64, f64), String>> {
+        Some(self.0.clone())
+    }
+}
+
+fn tmp_run(dir: &Path, sample: Result<(f64, f64), String>) -> Value {
+    let report = run_health(
+        &Tmp(sample),
+        false,
+        false,
+        dir,
+        now(),
+        &Thresholds::default(),
+    )
+    .unwrap();
+    fs::write(dir.join("health.json"), report.to_string()).unwrap();
+    report
+}
+
+fn tmp_problems(report: &Value) -> Vec<String> {
+    report["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|problem| problem.starts_with("/tmp"))
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn tmp_is_a_problem_from_85_percent_of_blocks_or_inodes_until_below_80() {
+    let dir = tempfile::tempdir().unwrap();
+    let fine = tmp_run(dir.path(), Ok((0.52, 0.20)));
+    assert_eq!(tmp_problems(&fine), Vec::<String>::new());
+    assert_eq!(
+        fine["checks"]["tmp"],
+        json!({"used_percent": 52, "inodes_percent": 20, "alerting": false, "reason": null})
+    );
+    // Blocks reach 85%.
+    let full = tmp_run(dir.path(), Ok((0.98, 0.20)));
+    assert_eq!(
+        tmp_problems(&full),
+        ["/tmp 98% used, 20% of inodes (a problem from 85%, until below 80%)"]
+    );
+    assert_eq!(full["ok"], false);
+    // Between 80% and 85%: still the same problem (no flapping).
+    assert_eq!(
+        tmp_problems(&tmp_run(dir.path(), Ok((0.82, 0.10)))).len(),
+        1
+    );
+    // Below 80%: resolved.
+    assert_eq!(
+        tmp_problems(&tmp_run(dir.path(), Ok((0.79, 0.10)))),
+        Vec::<String>::new()
+    );
+    // Inodes alone can make it a problem.
+    let inodes = tmp_run(dir.path(), Ok((0.10, 0.90)));
+    assert_eq!(tmp_problems(&inodes).len(), 1);
+    assert_eq!(inodes["checks"]["tmp"]["alerting"], true);
+}
+
+#[test]
+fn an_unreadable_tmp_is_a_problem_and_keeps_the_previous_state() {
+    let dir = tempfile::tempdir().unwrap();
+    tmp_run(dir.path(), Ok((0.90, 0.0)));
+    let failed = tmp_run(dir.path(), Err("statvfs failed".into()));
+    assert_eq!(
+        tmp_problems(&failed),
+        ["/tmp usage could not be read: statvfs failed"]
+    );
+    assert_eq!(failed["checks"]["tmp"]["alerting"], true);
+    assert_eq!(tmp_problems(&tmp_run(dir.path(), Ok((0.82, 0.0)))).len(), 1);
+}
+
+#[test]
+fn the_tmp_check_and_the_root_check_keep_separate_state() {
+    let dir = tempfile::tempdir().unwrap();
+    tmp_run(dir.path(), Ok((0.90, 0.0)));
+    // The root filesystem at 82% has not been alerting: the /tmp state does not leak into it.
+    let root = disk_run(dir.path(), Ok(0.82));
+    assert_eq!(root["checks"]["disk_root"]["alerting"], false);
+}
+
+#[test]
+fn used_fractions_reads_a_real_filesystem() {
+    let dir = tempfile::tempdir().unwrap();
+    let (blocks, inodes) = crate::health::used_fractions(dir.path()).unwrap();
+    assert!((0.0..=1.0).contains(&blocks) && (0.0..=1.0).contains(&inodes));
+}
