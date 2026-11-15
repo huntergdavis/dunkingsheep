@@ -437,6 +437,30 @@ fn verified_launch_records_previous_and_real_replacement() {
         .any(|e| e.kind == "pane.respawn" && e.outcome.as_deref() == Some("ok")));
 }
 #[test]
+fn missing_session_switch_retains_guard_and_explains_safe_recovery() {
+    let f = Fixture::new();
+    let services = RespawnServices {
+        terminal: &f.terminal,
+        delivery: &f,
+        inbox: &f,
+        runtime: f.runtime.handle(),
+        env: &f.env,
+        verify_seconds: 0.01,
+        before_native_recheck: None,
+    };
+    let before = f.flock.launch(P).unwrap();
+    let error = f
+        .flock
+        .switch_model(&services, P, Some("opus"), Some("medium"), Some(OWNER))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("is not recorded"), "{error}");
+    assert!(error.contains("in-session model selection"), "{error}");
+    assert!(error.contains("once idle"), "{error}");
+    assert!(!f.calls().contains("respawn-pane"));
+    assert_eq!(f.flock.launch(P).unwrap(), before);
+}
+#[test]
 fn failed_start_rolls_back_to_rollback_argv() {
     let f = Fixture::new();
     std::fs::write(f.dir.path().join("bad_start"), "").unwrap();
