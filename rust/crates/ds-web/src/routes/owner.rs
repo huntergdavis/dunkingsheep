@@ -861,9 +861,18 @@ fn owner_thread_item(row: &Value) -> Value {
     });
     if role == "owner" {
         let answered = row.get("answered").is_some_and(is_truthy);
-        item["delivery"] = json!(if answered { "acked" } else { "stored" });
+        let read = row.get("read_at").is_some_and(is_truthy);
+        item["delivery"] = json!(if answered {
+            "acked"
+        } else if read {
+            "read"
+        } else {
+            "stored"
+        });
         item["outcome"] = json!(if answered {
             "answered"
+        } else if read {
+            "Read by agent"
         } else {
             "stored in the owner mailbox · waiting for the desk"
         });
@@ -1259,6 +1268,36 @@ fn python_repr_string(value: &str) -> String {
     }
     output.push(quote);
     output
+}
+
+#[cfg(test)]
+mod handling_tests {
+    use super::*;
+
+    #[test]
+    fn real_owner_row_read_is_not_presented_as_answered() {
+        use ds_core::inbox_store::{Outgoing, Store};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("inbox.db"), dir.path().join("blobs")).unwrap();
+        let id = store
+            .send(&Outgoing {
+                mailbox: "owner",
+                body: Some("human question"),
+                transport: Some("web"),
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .read_with_receipt("owner", std::slice::from_ref(&id), true, Some(10.0))
+            .unwrap();
+        let item = owner_thread_item(&store.conversation("owner", None, None).unwrap()[0]);
+        assert_eq!(item["delivery"], "read");
+        assert_eq!(item["outcome"], "Read by agent");
+        store.ack(std::slice::from_ref(&id), Some("owner")).unwrap();
+        let item = owner_thread_item(&store.conversation("owner", None, None).unwrap()[0]);
+        assert_eq!(item["delivery"], "acked");
+        assert_eq!(item["outcome"], "answered");
+    }
 }
 
 #[cfg(test)]

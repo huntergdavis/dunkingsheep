@@ -2209,3 +2209,102 @@ fn inbox_read_manual_opt_out_and_peek_keep_the_explicit_ack_workflow() {
     }
     dispatcher.close();
 }
+
+#[test]
+fn privileged_owner_read_is_seen_not_answered_until_explicit_ack() {
+    let (_dir, services) = make_services("owner-implicit-handling", factory(None), None);
+    let store = services.flock().stores().inbox.unwrap();
+    let id = store
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: "owner",
+            body: Some("human web question"),
+            transport: Some("web"),
+            ..Default::default()
+        })
+        .unwrap();
+    let token = services
+        .flock()
+        .with_roles(|roles, _| roles.issue_token("web", Some("private-owner-read"), None))
+        .unwrap();
+    let web = RequestCtx {
+        service_token: Some(token),
+        socket_peer: Some(true),
+        socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
+        ..Default::default()
+    };
+    let dispatcher = services.dispatcher(handlers());
+    dispatcher
+        .dispatch("inbox_read", &json!({"mailbox":"owner"}), &web)
+        .unwrap();
+    let status = dispatcher
+        .dispatch("inbox_status", &json!({"message_id":id}), &web)
+        .unwrap();
+    assert_eq!(status["state"], "acked");
+    assert_eq!(status["implicit_ack"], true);
+    assert!(status["read_at"].is_number() && status["acked_at"].is_number());
+    assert_eq!(
+        store.conversation("owner", None, None).unwrap()[0]["answered"],
+        false
+    );
+    dispatcher
+        .dispatch(
+            "inbox_ack",
+            &json!({"mailbox":"owner", "message_ids":[id]}),
+            &web,
+        )
+        .unwrap();
+    let explicit = dispatcher
+        .dispatch("inbox_status", &json!({"message_id":id}), &web)
+        .unwrap();
+    assert!(
+        explicit.get("implicit_ack").is_none(),
+        "legacy explicit status shape remains unchanged"
+    );
+    assert_eq!(
+        store.conversation("owner", None, None).unwrap()[0]["answered"],
+        true
+    );
+}
+
+#[test]
+fn threaded_lane_read_then_reply_records_explicit_handling() {
+    let (_dir, services) = make_services("lane-linked-handling", factory(None), None);
+    let store = services.flock().stores().inbox.unwrap();
+    let token = services
+        .flock()
+        .with_roles(|roles, _| roles.issue_token("web", Some("private-human-send"), None))
+        .unwrap();
+    let web = RequestCtx {
+        service_token: Some(token),
+        socket_peer: Some(true),
+        socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
+        ..Default::default()
+    };
+    let dispatcher = services.dispatcher(handlers());
+    let sent = dispatcher.dispatch("inbox_send", &json!({"to":"w1:p1", "body":"human web question", "human_origin":true, "notify":false}), &web).unwrap();
+    let id = sent["message_id"].as_str().unwrap();
+    let worker = request("w1:p1");
+    dispatcher
+        .dispatch("inbox_read", &json!({}), &worker)
+        .unwrap();
+    assert_eq!(
+        dispatcher
+            .dispatch("inbox_status", &json!({"message_id":id}), &worker)
+            .unwrap()["implicit_ack"],
+        true
+    );
+    assert_eq!(
+        store.conversation("w1:p1", None, None).unwrap()[0]["answered"],
+        false
+    );
+    let reply = dispatcher.dispatch("inbox_send", &json!({"to":"owner-desk", "body":"linked lane answer", "parent_id":id, "notify":false}), &worker).unwrap();
+    assert_eq!(reply["reply_to"], id);
+    let status = dispatcher
+        .dispatch("inbox_status", &json!({"message_id":id}), &worker)
+        .unwrap();
+    assert!(status.get("implicit_ack").is_none());
+    assert_eq!(
+        store.conversation("w1:p1", None, None).unwrap()[0]["answered"],
+        true
+    );
+}

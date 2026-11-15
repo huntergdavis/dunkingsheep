@@ -801,9 +801,15 @@ fn message_line(name: &str, row: &Value) -> String {
     format!(
         "{name} message #{}: {}",
         row.get("id").map(display).unwrap_or_default(),
-        row.get("state")
-            .map(display)
-            .unwrap_or_else(|| "None".to_string())
+        if row.get("state").and_then(Value::as_str) == Some("acked")
+            && row.get("answered").and_then(Value::as_bool) == Some(false)
+        {
+            "read".to_owned()
+        } else {
+            row.get("state")
+                .map(display)
+                .unwrap_or_else(|| "None".to_string())
+        }
     )
 }
 
@@ -813,4 +819,28 @@ fn uncertain_line(name: &str) -> String {
     "Could not find a Telegram message for {name} in the {} most recent mailbox rows; check the web desk.",
     (STATUS_MAX_PAGES as i64) * STATUS_PAGE
 )
+}
+
+#[cfg(test)]
+mod handling_tests {
+    use super::*;
+
+    #[test]
+    fn implicit_consumption_status_says_read() {
+        assert_eq!(
+            message_line("Desk", &json!({"id":"i1","state":"acked","answered":false})),
+            "Desk message #i1: read"
+        );
+        assert_eq!(
+            message_line("Desk", &json!({"id":"i1","state":"acked","answered":true})),
+            "Desk message #i1: acked"
+        );
+        assert_eq!(
+            message_line(
+                "Desk",
+                &json!({"id":"i1","state":"queued","answered":false})
+            ),
+            "Desk message #i1: queued"
+        );
+    }
 }
