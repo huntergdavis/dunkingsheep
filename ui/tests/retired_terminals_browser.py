@@ -20,7 +20,7 @@ terminal_status = 200
 requests = []
 connections = []
 lanes = [
-    {'pane_id': '%1', 'name': 'Worker', 'membership': {'scope': 'project', 'project': 'alpha'}},
+    {'pane_id': '%21', 'name': 'Worker', 'membership': {'scope': 'project', 'project': 'alpha'}},
     {'pane_id': '%2', 'name': 'Unavailable lane', 'membership': {'scope': 'project', 'project': 'alpha'}},
 ]
 def mock(route):
@@ -29,9 +29,9 @@ def mock(route):
     if path == '/api/projects':
         data = {'lanes': lanes}
     elif path == '/api/terminals':
-        return route.fulfill(status=terminal_status, content_type='application/json', body=json.dumps([{'pane_id': '%1', 'name': 'worker', 'cols': 80, 'rows': 24}] if terminal_status == 200 else {}))
+        return route.fulfill(status=terminal_status, content_type='application/json', body=json.dumps([{'pane_id': '%21', 'name': 'worker', 'cols': 80, 'rows': 24}] if terminal_status == 200 else {}))
     elif path == '/api/channels':
-        data = {'channels': [{'id': 'cos', 'name': 'Owner', 'pane_id': '%1', 'can_message': True}]}
+        data = {'channels': [{'id': 'cos', 'name': 'Owner', 'pane_id': '%21', 'can_message': True}]}
     elif path == '/api/owner-thread':
         data = {'items': [{'id': 1, 'role': 'owner', 'body': 'Synthetic uncertain question', 'delivery': 'uncertain', 'created_at': '2026-11-13T00:00:00Z'}]}
     elif path == '/api/fleet':
@@ -43,7 +43,7 @@ def mock(route):
     route.fulfill(status=200, content_type='application/json', body=json.dumps(data))
 def websocket(ws):
     connections.append(ws.url)
-    assert parse_qs(urlsplit(ws.url).query).get('expected_pane') == ['%1']
+    assert parse_qs(urlsplit(ws.url).query).get('expected_pane') == ['%21']
     ws.send(b'SYNTHETIC-LIVE-TERMINAL\r\n')
 def no_old_links(page):
     assert page.locator('a[href^="/dash/fleet"]').count() == 0
@@ -62,10 +62,10 @@ try:
             page = browser.new_page(viewport={'width': width, 'height': 900})
             page.route('**/api/**', mock)
             page.route_web_socket('**/api/terminals/*/stream**', websocket)
-            page.goto(base + '/dash/fleet?pane=%251&keep=yes#output', wait_until='domcontentloaded')
+            page.goto(base + '/dash/fleet?pane=%2521&keep=yes#output', wait_until='domcontentloaded')
             connected(page)
             assert urlsplit(page.url).path == '/dash/projects'
-            assert parse_qs(urlsplit(page.url).query) == {'pane': ['%1'], 'keep': ['yes']}
+            assert parse_qs(urlsplit(page.url).query) == {'pane': ['%21'], 'keep': ['yes']}
             assert urlsplit(page.url).fragment == 'output'
             close_terminal(page)
             page.wait_for_timeout(250)
@@ -81,7 +81,7 @@ try:
             assert urlsplit(page.url).path == '/dash/projects'
             assert page.locator('.project-terminal').count() == 0
             no_old_links(page)
-            page.evaluate("history.pushState(null, '', '/dash/fleet?pane=%251'); dispatchEvent(new PopStateEvent('popstate'))")
+            page.evaluate("history.pushState(null, '', '/dash/fleet?pane=%2521'); dispatchEvent(new PopStateEvent('popstate'))")
             connected(page)
             assert urlsplit(page.url).path == '/dash/projects'
             page.goto(base + '/dash/fleet?pane=%252', wait_until='domcontentloaded')
@@ -107,7 +107,7 @@ try:
             page.goto(base + '/dash/cos?panel=conversation', wait_until='domcontentloaded')
             page.get_by_role('button', name='Live signal', exact=True).click()
             connected(page)
-            assert parse_qs(urlsplit(page.url).query).get('pane') == ['%1']
+            assert parse_qs(urlsplit(page.url).query).get('pane') == ['%21']
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
             if os.environ.get('S5_SCREENSHOT_DIR'):
                 page.screenshot(path=f"{os.environ['S5_SCREENSHOT_DIR']}/s5-{os.environ.get('S5_VARIANT', 'a')}-{width}.png")

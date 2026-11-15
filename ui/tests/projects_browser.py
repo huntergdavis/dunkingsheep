@@ -14,7 +14,7 @@ server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 base = f'http://127.0.0.1:{server.server_port}'
 lanes = [
-    {'pane_id':'%1','name':'Writer A','membership':{'scope':'project','project':'alpha'},'state':'working','task':{'id':'t1','title':'Build'},'model':{'value':'model-a','effort':'medium','source':'launch flag','observed':False,'age_s':10805,'reason':None}},
+    {'pane_id':'%21','name':'Writer A','membership':{'scope':'project','project':'alpha'},'state':'working','task':{'id':'t1','title':'Build'},'model':{'value':'model-a','effort':'medium','source':'launch flag','observed':False,'age_s':10805,'reason':None}},
     {'pane_id':'%2','name':'Reviewer B','membership':{'scope':'project','project':'beta'},'state':None,'task':None,'model':{'value':'model-old','effort':'high','source':'process environment','observed':False,'age_s':901,'reason':None}},
     {'pane_id':'%3','name':'Global lane','membership':{'scope':'global','project':None},'state':None,'task':None,'model':{'value':None,'age_s':None,'reason':'no agent-state sample for this lane in the last 24 hours'}},
     {'pane_id':'%4','name':'Stale lane','membership':{'scope':'stale','project':None},'state':None,'task':None,'model':{'value':'model-seen','effort':None,'source':'pane footer','observed':True,'age_s':185,'reason':None}},
@@ -37,7 +37,7 @@ try:
             page.get_by_role('heading',name='Project: alpha').wait_for()
             assert page.locator('.project-group:not(.project-information)').count()==6
             assert page.get_by_text('Writer A').count()==1
-            fresh=page.locator('[data-lane-model="%1"]').inner_text()
+            fresh=page.locator('[data-lane-model="%21"]').inner_text()
             assert 'launched as model-a medium' in fresh and 'launch flag, launched 3 h ago' in fresh and 'seen' not in fresh, fresh
             stale=page.locator('[data-lane-model="%2"]').inner_text()
             assert stale.startswith('unknown') and 'older than 15 minutes' in stale and 'model-old' not in stale, stale
