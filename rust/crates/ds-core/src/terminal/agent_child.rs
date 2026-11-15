@@ -29,34 +29,87 @@ fn stat(proc_root: &Path, pid: i64) -> Option<(String, i64, String)> {
     Some((comm, ppid, start))
 }
 
+/// The direct children of processes, for one pane listing. Each shell's own
+/// `/proc/<pid>/task/<pid>/children` file is read when the kernel provides it (a few bytes, no
+/// scan). Without it, ONE scan of `/proc` builds the parent map for the whole listing, however
+/// many panes ask (t5331 follow-up: list_panes is a hot path).
+pub struct Children<'a> {
+    proc_root: &'a Path,
+    scanned: std::cell::OnceCell<std::collections::BTreeMap<i64, Vec<i64>>>,
+    /// How many full `/proc` scans this listing made: 0 or 1.
+    pub scans: std::cell::Cell<u32>,
+}
+
+impl<'a> Children<'a> {
+    pub fn new(proc_root: &'a Path) -> Self {
+        Children {
+            proc_root,
+            scanned: std::cell::OnceCell::new(),
+            scans: std::cell::Cell::new(0),
+        }
+    }
+
+    fn of(&self, pid: i64) -> Vec<i64> {
+        let file = self
+            .proc_root
+            .join(pid.to_string())
+            .join("task")
+            .join(pid.to_string())
+            .join("children");
+        if let Ok(text) = std::fs::read_to_string(file) {
+            return text
+                .split_whitespace()
+                .filter_map(|t| t.parse().ok())
+                .collect();
+        }
+        self.scanned
+            .get_or_init(|| {
+                self.scans.set(self.scans.get() + 1);
+                let mut parents: std::collections::BTreeMap<i64, Vec<i64>> = Default::default();
+                for entry in std::fs::read_dir(self.proc_root)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                {
+                    let Some(child) = entry
+                        .file_name()
+                        .to_str()
+                        .and_then(|n| n.parse::<i64>().ok())
+                    else {
+                        continue;
+                    };
+                    if let Some((_, ppid, _)) = stat(self.proc_root, child) {
+                        parents.entry(ppid).or_default().push(child);
+                    }
+                }
+                parents
+            })
+            .get(&pid)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
 /// Whether a live direct child of `pane_pid` runs `kind` (by its kernel name), confirmed by a
 /// second read of the same pid with the same start time.
-pub fn has_live_child(proc_root: &Path, pane_pid: i64, kind: &str) -> bool {
-    let Ok(entries) = std::fs::read_dir(proc_root) else {
-        return false;
-    };
-    entries.flatten().any(|entry| {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.parse::<i64>().ok())
-        else {
-            return false;
-        };
-        match stat(proc_root, pid) {
-            Some((comm, ppid, start)) if ppid == pane_pid && comm == kind => stat(proc_root, pid)
-                .is_some_and(|(_, ppid_again, start_again)| {
+pub fn has_live_child(children: &Children, pane_pid: i64, kind: &str) -> bool {
+    children
+        .of(pane_pid)
+        .into_iter()
+        .any(|pid| match stat(children.proc_root, pid) {
+            Some((comm, ppid, start)) if ppid == pane_pid && comm == kind => {
+                stat(children.proc_root, pid).is_some_and(|(_, ppid_again, start_again)| {
                     ppid_again == pane_pid && start_again == start
-                }),
+                })
+            }
             _ => false,
-        }
-    })
+        })
 }
 
 /// The agent kind for a pane tmux reports as `command` (not already an agent): the registered
 /// kind, when the pane's foreground is a shell and a live child of that kind runs under it.
 pub fn registered_kind(
-    proc_root: &Path,
+    children: &Children,
     command: &str,
     pane_pid: Option<i64>,
     registered: Option<&str>,
@@ -66,7 +119,7 @@ pub fn registered_kind(
         return None;
     }
     let kind = registered.filter(|kind| crate::state::AGENT_EXES.contains(kind))?;
-    has_live_child(proc_root, pane_pid?, kind).then(|| kind.to_string())
+    has_live_child(children, pane_pid?, kind).then(|| kind.to_string())
 }
 
 #[cfg(test)]
@@ -90,26 +143,29 @@ mod tests {
         process(root.path(), 100, "sh", "S", 1, 10);
         process(root.path(), 101, "codex", "S", 100, 11);
         assert_eq!(
-            registered_kind(root.path(), "sh", Some(100), Some("codex")),
+            registered_kind(&Children::new(root.path()), "sh", Some(100), Some("codex")),
             Some("codex".into())
         );
         // Another kind registered than runs: not detected.
         assert_eq!(
-            registered_kind(root.path(), "sh", Some(100), Some("claude")),
+            registered_kind(&Children::new(root.path()), "sh", Some(100), Some("claude")),
             None
         );
         // Not a shell in front, no registered kind, unknown kind, or no pane pid: nothing.
         assert_eq!(
-            registered_kind(root.path(), "vim", Some(100), Some("codex")),
-            None
-        );
-        assert_eq!(registered_kind(root.path(), "sh", Some(100), None), None);
-        assert_eq!(
-            registered_kind(root.path(), "sh", Some(100), Some("gemini")),
+            registered_kind(&Children::new(root.path()), "vim", Some(100), Some("codex")),
             None
         );
         assert_eq!(
-            registered_kind(root.path(), "sh", None, Some("codex")),
+            registered_kind(&Children::new(root.path()), "sh", Some(100), None),
+            None
+        );
+        assert_eq!(
+            registered_kind(&Children::new(root.path()), "sh", Some(100), Some("gemini")),
+            None
+        );
+        assert_eq!(
+            registered_kind(&Children::new(root.path()), "sh", None, Some("codex")),
             None
         );
     }
@@ -156,18 +212,48 @@ mod tests {
         );
     }
 
+    /// t5331 follow-up: N shell-fronted panes cost at most ONE /proc scan per listing, and none
+    /// when the kernel's children files are there.
+    #[test]
+    fn many_panes_share_one_scan_and_children_files_need_none() {
+        let root = tempfile::tempdir().unwrap();
+        for shell in [100, 200, 300] {
+            process(root.path(), shell, "sh", "S", 1, 10);
+            process(root.path(), shell + 1, "codex", "S", shell, 11);
+        }
+        let children = Children::new(root.path());
+        for shell in [100, 200, 300] {
+            assert!(has_live_child(&children, shell, "codex"), "{shell}");
+        }
+        assert_eq!(children.scans.get(), 1, "one scan for three panes");
+        // With the kernel's children file, no scan at all.
+        for shell in [100, 200, 300] {
+            let task = root.path().join(format!("{shell}/task/{shell}"));
+            std::fs::create_dir_all(&task).unwrap();
+            std::fs::write(task.join("children"), format!("{} ", shell + 1)).unwrap();
+        }
+        let children = Children::new(root.path());
+        for shell in [100, 200, 300] {
+            assert!(has_live_child(&children, shell, "codex"), "{shell}");
+        }
+        assert_eq!(children.scans.get(), 0);
+        // A children file naming a pid that is now a zombie still does not count.
+        process(root.path(), 301, "codex", "Z", 300, 11);
+        assert!(!has_live_child(&Children::new(root.path()), 300, "codex"));
+    }
+
     #[test]
     fn an_exited_or_zombie_child_or_a_grandchild_does_not_count() {
         let root = tempfile::tempdir().unwrap();
         process(root.path(), 200, "sh", "S", 1, 10);
         // The agent exited and is a zombie: not a live child.
         process(root.path(), 201, "codex", "Z", 200, 11);
-        assert!(!has_live_child(root.path(), 200, "codex"));
+        assert!(!has_live_child(&Children::new(root.path()), 200, "codex"));
         // A codex under some other process of the pane: only direct children count.
         process(root.path(), 202, "node", "S", 200, 12);
         process(root.path(), 203, "codex", "S", 202, 13);
-        assert!(!has_live_child(root.path(), 200, "codex"));
+        assert!(!has_live_child(&Children::new(root.path()), 200, "codex"));
         // A child that is gone entirely: nothing to find.
-        assert!(!has_live_child(root.path(), 300, "codex"));
+        assert!(!has_live_child(&Children::new(root.path()), 300, "codex"));
     }
 }

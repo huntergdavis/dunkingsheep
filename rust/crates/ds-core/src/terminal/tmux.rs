@@ -70,6 +70,7 @@ pub(crate) fn apply_registered_kinds(
     panes: &mut [Pane],
     registry: &serde_json::Map<String, serde_json::Value>,
 ) {
+    let children = super::agent_child::Children::new(proc_root);
     for pane in panes {
         if crate::state::AGENT_EXES.contains(&pane.command.as_str()) {
             continue;
@@ -80,7 +81,7 @@ pub(crate) fn apply_registered_kinds(
             .and_then(|entry| entry.get("agent_kind"))
             .and_then(serde_json::Value::as_str);
         if let Some(kind) =
-            super::agent_child::registered_kind(proc_root, &pane.command, pane.pane_pid, registered)
+            super::agent_child::registered_kind(&children, &pane.command, pane.pane_pid, registered)
         {
             pane.command = kind;
         }
