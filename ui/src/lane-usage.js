@@ -46,10 +46,12 @@ export function laneUsage(lane, budget, nowMs = Date.now()) {
   const windows = Array.isArray(provider.windows) ? provider.windows : [];
   if (provider.meaning === 'local_session_estimate') {
     const cost = provider.local_estimate?.session_cost_usd;
+    // t5043: an estimate that is not current says so, with its age.
+    const stale = provider.state && provider.state !== 'ok' ? ', stale' : '';
     return {
       kind: 'estimate',
       account,
-      text: cost == null ? 'estimate: local session cost unknown' : `estimate: local session cost $${Number(cost).toFixed(2)}`,
+      text: cost == null ? `estimate${stale}: local session cost unknown` : `estimate${stale}: local session cost $${Number(cost).toFixed(2)}`,
       detail: `${measured}; a local estimate, not an account limit`,
       windows: [],
     };
@@ -80,4 +82,12 @@ export function laneUsage(lane, budget, nowMs = Date.now()) {
     windows,
     extra: provider.extra_usage || null,
   };
+}
+
+// t5043: where the lane's harness was learned, for the details: the pane registry, or the
+// program in the lane's launch record.
+export function harnessSourceText(lane) {
+  if (lane?.harness_source === 'registry') return 'harness from the pane registry';
+  if (lane?.harness_source === 'launch') return 'harness from the launch command';
+  return '';
 }

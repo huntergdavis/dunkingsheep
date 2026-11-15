@@ -125,6 +125,53 @@ fn declared_cell(
 ///
 /// Nothing today reads the model from the running agent itself, so no cell has `observed`
 /// true; a later source that does may say so. A stale sample's value is never carried.
+/// Whether a launch record describes what runs in the pane now. A record that names its process
+/// is matched exactly (`bound`: `Some(Some(live))`, or `Some(None)` when that process cannot be
+/// read); an older record has only its time, and the pane's root process must have started
+/// within `LAUNCH_BIND_S` of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaunchTie {
+    Process,
+    StartTime,
+    Earlier,
+    ProcessUnreadable,
+    NoTime,
+    StartUnreadable,
+}
+
+impl LaunchTie {
+    /// The record may be used for what runs in the pane now.
+    pub(crate) fn holds(self) -> bool {
+        matches!(self, LaunchTie::Process | LaunchTie::StartTime)
+    }
+}
+
+pub(crate) fn launch_tie(
+    record: &Value,
+    bound: Option<Option<bool>>,
+    started: Option<f64>,
+) -> LaunchTie {
+    match bound {
+        Some(Some(true)) => LaunchTie::Process,
+        Some(Some(false)) => LaunchTie::Earlier,
+        Some(None) => LaunchTie::ProcessUnreadable,
+        None => {
+            let launched = record
+                .get("recorded_at")
+                .and_then(Value::as_f64)
+                .filter(|at| *at != 0.0);
+            match (launched, started) {
+                (None, _) => LaunchTie::NoTime,
+                (_, None) => LaunchTie::StartUnreadable,
+                (Some(launched), Some(started)) if (launched - started).abs() > LAUNCH_BIND_S => {
+                    LaunchTie::Earlier
+                }
+                _ => LaunchTie::StartTime,
+            }
+        }
+    }
+}
+
 fn model_cell(
     launch: Option<&Value>,
     bound: Option<Option<bool>>,
@@ -205,42 +252,34 @@ fn model_cell(
                     None,
                 );
             }
-            // Tie the record to what runs in the pane now. A record that names its process is
-            // matched exactly; an older record has only its time, and the pane's root process
-            // must have started within `LAUNCH_BIND_S` of it.
-            let bound_by = match bound {
-                Some(Some(true)) => "process",
-                Some(Some(false)) => {
+            // Tie the record to what runs in the pane now (`launch_tie`, shared with the harness
+            // fallback, t5043).
+            let bound_by = match launch_tie(record, bound, started) {
+                LaunchTie::Process => "process",
+                LaunchTie::StartTime => "start time",
+                LaunchTie::Earlier => {
                     return stale(
                         "the launch record is for an earlier process in this pane".into(),
                     )
                 }
-                Some(None) => {
+                LaunchTie::ProcessUnreadable => {
                     return unknown(
                         "the lane's process could not be read, so the launch record cannot be tied to it".into(),
                         None,
                     )
                 }
-                None => {
-                    let Some(launched) = launched else {
-                        return unknown(
-                            "the launch record has no time, so it cannot be tied to the lane's process"
-                                .into(),
-                            None,
-                        );
-                    };
-                    let Some(started) = started else {
-                        return unknown(
-                            "the start of the lane's process could not be read, so the launch record cannot be tied to it".into(),
-                            None,
-                        );
-                    };
-                    if (launched - started).abs() > LAUNCH_BIND_S {
-                        return stale(
-                            "the launch record is for an earlier process in this pane".into(),
-                        );
-                    }
-                    "start time"
+                LaunchTie::NoTime => {
+                    return unknown(
+                        "the launch record has no time, so it cannot be tied to the lane's process"
+                            .into(),
+                        None,
+                    )
+                }
+                LaunchTie::StartUnreadable => {
+                    return unknown(
+                        "the start of the lane's process could not be read, so the launch record cannot be tied to it".into(),
+                        None,
+                    )
                 }
             };
             return json!({
@@ -391,6 +430,49 @@ fn roster_lane(lane: &Value) -> bool {
 /// Why a lane's `inbox.unread` is null.
 pub const INBOX_COUNT_FAILED: &str = "the inbox count could not be read";
 
+/// The harnesses a launch record's program can name.
+const KNOWN_HARNESSES: [&str; 4] = ["claude", "codex", "pi", "opencode"];
+
+/// t5043: the harness a launch argv starts, past `env` (its options and `VAR=value`
+/// assignments) and the plain wrappers `nice`, `nohup` and `setsid`. `None` when the program is
+/// not a known harness.
+pub fn launch_harness(argv: &[Value]) -> Option<&'static str> {
+    let mut tokens = argv.iter().filter_map(Value::as_str).peekable();
+    loop {
+        let token = tokens.next()?;
+        let program = token.rsplit('/').next().unwrap_or(token);
+        match program {
+            "env" => {
+                while let Some(next) = tokens.peek() {
+                    if next.starts_with('-') || (next.contains('=') && !next.starts_with('=')) {
+                        let option = tokens.next().unwrap_or_default();
+                        // `env -u NAME` and `env -C DIR` take a separate value.
+                        if matches!(option, "-u" | "--unset" | "-C" | "--chdir") {
+                            tokens.next();
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+            "nice" | "nohup" | "setsid" => {
+                while tokens.peek().is_some_and(|next| next.starts_with('-')) {
+                    // `nice -n 10` takes a separate value.
+                    if tokens.next() == Some("-n") {
+                        tokens.next();
+                    }
+                }
+            }
+            _ => {
+                return KNOWN_HARNESSES
+                    .iter()
+                    .find(|known| **known == program)
+                    .copied()
+            }
+        }
+    }
+}
+
 /// `roster`: detected agents plus live panes with explicit, valid membership.
 pub fn roster(env: &dyn RosterEnv, now: f64) -> Result<Value, String> {
     let mut rows = Vec::new();
@@ -430,7 +512,7 @@ pub fn roster(env: &dyn RosterEnv, now: f64) -> Result<Value, String> {
                 "oldest_unread_s": cell(Value::Null, None, Some(INBOX_COUNT_FAILED)),
             }),
         };
-        let harness = lane["agent"].as_str().filter(|name| !name.is_empty());
+        let registered = lane["agent"].as_str().filter(|name| !name.is_empty());
         // What the lane is DOING comes from its own tool; an absent signal is UNKNOWN.
         let doing = env.activity(lane, now).unwrap_or_else(|error| {
             json!({"state": "unknown", "since": null, "source": "activity", "reason": format!("activity probe failed: {error}")})
@@ -446,6 +528,28 @@ pub fn roster(env: &dyn RosterEnv, now: f64) -> Result<Value, String> {
             let start = record.get("process_start")?.as_str()?;
             Some(env.launch_process_live(lane, pid, start))
         });
+        // t5043: the pane registry names the harness only for lanes started through it. Without
+        // that, the launch record's program answers, unless the record describes a process that
+        // is no longer running here. A program that is not a known harness stays unknown; it is
+        // never guessed from a model name.
+        let (harness, harness_source) = match registered {
+            Some(name) => (Some(name.to_string()), Some("registry")),
+            None => match launch
+                .as_ref()
+                // The same tie the model cell uses: by process, or by start time within
+                // `LAUNCH_BIND_S`; any other record says nothing about what runs now.
+                .filter(|record| {
+                    launch_tie(record, launch_bound, env.pane_started_at(lane)).holds()
+                })
+                .and_then(|record| record.get("argv"))
+                .and_then(Value::as_array)
+                .and_then(|argv| launch_harness(argv))
+            {
+                Some(name) => (Some(name.to_string()), Some("launch")),
+                None => (None, None),
+            },
+        };
+        let harness = harness.as_deref();
         // A declared model (slice C) is newer than the launch; without one, the launch record
         // and the samples answer.
         let model = declared_cell(
@@ -472,6 +576,7 @@ pub fn roster(env: &dyn RosterEnv, now: f64) -> Result<Value, String> {
             "membership": lane.get("membership").cloned().unwrap_or_else(|| json!({"scope":"unknown","project":null})),
             "name": name.unwrap_or(pane_id),
             "harness": harness,
+            "harness_source": harness_source,
             "model": model,
             "state": doing.get("state").cloned().unwrap_or(Value::Null),
             "state_source": doing.get("source").cloned().unwrap_or(Value::Null),
@@ -594,6 +699,161 @@ mod tests {
         assert_eq!(rows[0]["state"], "unknown");
         assert!(rows[0]["model"]["value"].is_null());
         assert_eq!(rows[1]["membership"]["scope"], "global");
+    }
+
+    #[test]
+    fn the_launch_program_names_the_harness_past_env_and_wrappers() {
+        let argv = |tokens: &[&str]| tokens.iter().map(|t| json!(t)).collect::<Vec<_>>();
+        // The real shapes in launches.json: bare programs, absolute paths, and env starts.
+        assert_eq!(
+            launch_harness(&argv(&["codex", "--no-daemon"])),
+            Some("codex")
+        );
+        assert_eq!(
+            launch_harness(&argv(&["/usr/local/bin/claude", "--model", "x"])),
+            Some("claude")
+        );
+        assert_eq!(launch_harness(&argv(&["pi", "--model", "m"])), Some("pi"));
+        assert_eq!(launch_harness(&argv(&["opencode"])), Some("opencode"));
+        assert_eq!(
+            launch_harness(&argv(&[
+                "env",
+                "CODEX_HOME=/h/.codex-x",
+                "DUNKINGSHEEP_CODEX_STATE_DIR=/s",
+                "codex",
+                "--no-daemon",
+                "--dangerously-bypass-hook-trust",
+            ])),
+            Some("codex")
+        );
+        assert_eq!(
+            launch_harness(&argv(&["env", "-u", "X", "-i", "A=b", "claude"])),
+            Some("claude")
+        );
+        assert_eq!(
+            launch_harness(&argv(&["nice", "-n", "10", "nohup", "pi"])),
+            Some("pi")
+        );
+        // Not a known harness, or nothing after the prefixes: unknown, never guessed.
+        for unknown in [
+            argv(&["bash", "-lc", "codex"]),
+            argv(&["gemini"]),
+            argv(&["env", "A=b"]),
+            argv(&[]),
+            vec![json!(1), json!(null)],
+        ] {
+            assert_eq!(launch_harness(&unknown), None, "{unknown:?}");
+        }
+    }
+
+    #[test]
+    fn a_lane_without_a_registered_agent_takes_its_harness_from_a_live_launch_record() {
+        let launch = json!({"argv": ["env", "CODEX_HOME=/h", "codex", "--no-daemon"], "process_pid": 77, "process_start": "s"});
+        let base = || Env {
+            lanes: vec![
+                json!({"pane_id":"%1","agent":"","agent_name":"a","membership":{"scope":"global","project":null}}),
+                json!({"pane_id":"%2","agent":"claude","agent_name":"b","membership":{"scope":"global","project":null}}),
+            ],
+            launches: [
+                ("%1".to_string(), launch.clone()),
+                ("%2".to_string(), launch.clone()),
+            ]
+            .into(),
+            live_process: Some((77, "s".to_string())),
+            ..Env::default()
+        };
+        let rows = |env: &Env| {
+            roster(env, NOW).unwrap()["lanes"]
+                .as_array()
+                .unwrap()
+                .clone()
+        };
+        let live = rows(&base());
+        let by = |rows: &[Value], pane: &str| {
+            rows.iter()
+                .find(|row| row["pane_id"] == pane)
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(by(&live, "%1")["harness"], "codex");
+        assert_eq!(by(&live, "%1")["harness_source"], "launch");
+        // The registry wins over the launch record.
+        assert_eq!(by(&live, "%2")["harness"], "claude");
+        assert_eq!(by(&live, "%2")["harness_source"], "registry");
+        // A replaced process: the record names one that is no longer running here.
+        let stale = rows(&Env {
+            live_process: Some((78, "s".to_string())),
+            ..base()
+        });
+        assert!(by(&stale, "%1")["harness"].is_null());
+        assert!(by(&stale, "%1")["harness_source"].is_null());
+    }
+
+    /// Almost every live record is unbound (it has only `recorded_at`): it counts only when the
+    /// pane's root process started within `LAUNCH_BIND_S` of it, as for the model cell.
+    #[test]
+    fn an_unbound_launch_record_names_the_harness_only_when_tied_by_start_time() {
+        let at = NOW - 3_600.0;
+        let env = |recorded_at: Option<f64>, started: Option<f64>| Env {
+            lanes: vec![
+                json!({"pane_id":"%1","agent":"","agent_name":"a","membership":{"scope":"global","project":null}}),
+            ],
+            launches: [(
+                "%1".to_string(),
+                match recorded_at {
+                    Some(t) => json!({"argv": ["claude", "--model", "m"], "recorded_at": t}),
+                    None => json!({"argv": ["claude", "--model", "m"]}),
+                },
+            )]
+            .into(),
+            started,
+            ..Env::default()
+        };
+        let row = |env: &Env| roster(env, NOW).unwrap()["lanes"][0].clone();
+        // Started within the bind window: the record holds.
+        let tied = row(&env(Some(at), Some(at + LAUNCH_BIND_S)));
+        assert_eq!(
+            (tied["harness"].as_str(), tied["harness_source"].as_str()),
+            (Some("claude"), Some("launch"))
+        );
+        // A process started later (the lane was replaced): the record is for an earlier one.
+        let replaced = row(&env(Some(at), Some(at + LAUNCH_BIND_S + 1.0)));
+        assert!(replaced["harness"].is_null(), "{replaced}");
+        // No record time, or no readable start: it cannot be tied, so no harness.
+        assert!(row(&env(None, Some(at)))["harness"].is_null());
+        assert!(row(&env(Some(at), None))["harness"].is_null());
+    }
+
+    #[test]
+    fn the_launch_tie_rules_are_the_model_cells() {
+        let record = json!({"recorded_at": 1000.0});
+        assert_eq!(
+            launch_tie(&record, Some(Some(true)), None),
+            LaunchTie::Process
+        );
+        assert_eq!(
+            launch_tie(&record, Some(Some(false)), Some(1000.0)),
+            LaunchTie::Earlier
+        );
+        assert_eq!(
+            launch_tie(&record, Some(None), Some(1000.0)),
+            LaunchTie::ProcessUnreadable
+        );
+        assert_eq!(
+            launch_tie(&record, None, Some(1000.0 - LAUNCH_BIND_S)),
+            LaunchTie::StartTime
+        );
+        assert_eq!(
+            launch_tie(&record, None, Some(1000.0 + LAUNCH_BIND_S + 1.0)),
+            LaunchTie::Earlier
+        );
+        assert_eq!(
+            launch_tie(&json!({}), None, Some(1000.0)),
+            LaunchTie::NoTime
+        );
+        assert_eq!(launch_tie(&record, None, None), LaunchTie::StartUnreadable);
+        assert!(LaunchTie::Process.holds() && LaunchTie::StartTime.holds());
+        assert!(!LaunchTie::Earlier.holds() && !LaunchTie::NoTime.holds());
     }
 
     #[test]
