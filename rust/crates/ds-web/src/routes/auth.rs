@@ -9,7 +9,7 @@ use axum::{
     extract::{ConnectInfo, Extension, Json},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
     Router,
 };
 use serde::Deserialize;
@@ -118,10 +118,33 @@ pub fn router() -> Router {
 /// trusted proxy configuration rather than accepting client forwarding headers.
 pub fn router_with_scheme(scheme: RequestScheme) -> Router {
     Router::new()
+        .route("/api/session", get(session))
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
         .route("/api/password", post(change_password))
         .layer(Extension(scheme))
+}
+
+/// Validate only the existing session/API identity; desk startup needs no channel roster.
+async fn session(
+    Extension(backend): Extension<Arc<dyn AuthBackend>>,
+    Extension(scheme): Extension<RequestScheme>,
+    headers: HeaderMap,
+) -> Response {
+    let mut response = if let Some(refusal) = same_origin(&headers, scheme) {
+        refusal
+    } else {
+        let bearer = bearer_value(&headers);
+        let cookie = cookie_value(&headers, SESSION_COOKIE);
+        match backend.identity(bearer.as_deref(), cookie.as_deref()).await {
+            Ok(_) => Json(json!({"ok": true})).into_response(),
+            Err(error) => error.response(),
+        }
+    };
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 async fn login(
@@ -612,6 +635,7 @@ mod tests {
 
     struct FakeAuth {
         identity: Mutex<Result<Identity, AuthError>>,
+        identity_calls: Mutex<Vec<(Option<String>, Option<String>)>>,
         login_error: Mutex<Option<AuthError>>,
         changed_password: Mutex<Option<(String, String, Option<String>)>>,
         logged_out: Mutex<Option<Option<String>>>,
@@ -621,6 +645,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 identity: Mutex::new(Ok(Identity::Owner)),
+                identity_calls: Mutex::new(Vec::new()),
                 login_error: Mutex::new(None),
                 changed_password: Mutex::new(None),
                 logged_out: Mutex::new(None),
@@ -648,9 +673,13 @@ mod tests {
 
         fn identity<'a>(
             &'a self,
-            _bearer: Option<&'a str>,
-            _cookie: Option<&'a str>,
+            bearer: Option<&'a str>,
+            cookie: Option<&'a str>,
         ) -> AuthFuture<'a, Result<Identity, AuthError>> {
+            self.identity_calls
+                .lock()
+                .unwrap()
+                .push((bearer.map(str::to_owned), cookie.map(str::to_owned)));
             let result = self.identity.lock().expect("identity lock").clone();
             Box::pin(async move { result })
         }
@@ -670,6 +699,73 @@ mod tests {
                 Some((current.into(), new.into(), keep_cookie.map(str::to_owned)));
             Box::pin(async { Ok(()) })
         }
+    }
+
+    #[test]
+    fn session_route_checks_identity_without_loading_channels_or_changing_session() {
+        use tower::ServiceExt;
+        for (identity, expected) in [
+            (Ok(Identity::Owner), StatusCode::OK),
+            (Ok(Identity::Api), StatusCode::OK),
+            (Err(AuthError::SignInRequired), StatusCode::UNAUTHORIZED),
+            (
+                Err(AuthError::Internal("private storage detail".into())),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ] {
+            let fake = Arc::new(FakeAuth {
+                identity: Mutex::new(identity),
+                ..Default::default()
+            });
+            let backend: Arc<dyn AuthBackend> = fake.clone();
+            let request = axum::http::Request::builder()
+                .uri("/api/session")
+                .header(header::HOST, "desk.test")
+                .header(header::ORIGIN, "https://desk.test")
+                .header(header::COOKIE, "other=1; vp_session=private-session")
+                .header(header::AUTHORIZATION, "Bearer private-api")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = block_on(
+                router_with_scheme(RequestScheme::Https)
+                    .layer(Extension(backend))
+                    .oneshot(request),
+            )
+            .unwrap();
+            assert_eq!(response.status(), expected);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert!(!response.headers().contains_key(header::SET_COOKIE));
+            let text = body_text(response).1;
+            assert!(!text.contains("private"));
+            if expected == StatusCode::OK {
+                assert_eq!(
+                    serde_json::from_str::<Value>(&text).unwrap(),
+                    json!({"ok":true})
+                );
+            }
+            assert_eq!(
+                *fake.identity_calls.lock().unwrap(),
+                vec![(Some("private-api".into()), Some("private-session".into()))]
+            );
+            assert!(fake.logged_out.lock().unwrap().is_none());
+            assert!(fake.changed_password.lock().unwrap().is_none());
+        }
+        let fake = Arc::new(FakeAuth::default());
+        let backend: Arc<dyn AuthBackend> = fake.clone();
+        let request = axum::http::Request::builder()
+            .uri("/api/session")
+            .header(header::HOST, "desk.test")
+            .header(header::ORIGIN, "https://elsewhere.test")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = block_on(
+            router_with_scheme(RequestScheme::Https)
+                .layer(Extension(backend))
+                .oneshot(request),
+        )
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(fake.identity_calls.lock().unwrap().is_empty());
     }
 
     /// Owner decision i50225: a submitted password must not appear in a validation error body. Each

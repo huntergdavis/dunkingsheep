@@ -132,6 +132,16 @@ try:
             print(json.dumps({'width':width,'closed_rows_once':len(seen),'paging_filters_empty':'PASS','legacy':'PASS','late_response':'PASS','errors_and_metrics_independence':'PASS','horizontal_overflow':False,'page_errors':errors}),flush=True)
             page.close()
         assert all(method=='GET' for method,path,_ in calls if path.startswith('/api/tasks'))
+        assert any(path=='/api/session' for _,path,_ in calls)
+        assert not any(path=='/api/channels' for _,path,_ in calls), 'startup must not load channels'
+        # An expired session still goes to login before any task data is requested.
+        page=browser.new_page(); start=len(calls)
+        page.route('**/api/**',mock)
+        page.route('**/api/session',lambda route:fulfill(route,{'detail':'Sign in required'},401))
+        page.goto(base+'/dash/tasks',wait_until='domcontentloaded')
+        page.get_by_label('Owner password',exact=True).wait_for()
+        assert not any(path.startswith('/api/tasks') for _,path,_ in calls[start:])
+        page.close()
         browser.close()
 finally:
     server.shutdown();server.server_close()

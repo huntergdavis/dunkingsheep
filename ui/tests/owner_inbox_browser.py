@@ -39,8 +39,8 @@ def mock(route):
     query = parse_qs(urlsplit(route.request.url).query)
     path = urlsplit(route.request.url).path
     requests.append((route.request.method, path))
-    if path == '/api/channels':
-        value = {'channels': []}
+    if path == '/api/session':
+        value = {'ok': True}
     elif path == '/api/owner-thread':
         window_calls.append((mode, query.get('paged') == ['true'], bool(query.get('before'))))
         if mode in ('old_daemon', 'old_desk', 'auth_failure'):
@@ -157,7 +157,7 @@ try:
         page.close()
         # The existing shell reports viewport dimensions separately from mailbox browsing.
         assert all(method == 'GET' for method, path in requests if path != '/api/viewport'), requests
-        assert {path for _, path in requests} <= {'/api/channels', '/api/owner-thread', '/api/version', '/api/viewport'}
+        assert {path for _, path in requests} <= {'/api/session', '/api/owner-thread', '/api/version', '/api/viewport'}
         browser.close()
 finally:
     server.shutdown()

@@ -56,8 +56,8 @@ def mock(route):
     url = urlsplit(route.request.url)
     query = parse_qs(url.query)
     requests.append((route.request.method, url.path, query))
-    if url.path == '/api/channels':
-        return fulfill(route, {'channels': []})
+    if url.path == '/api/session':
+        return fulfill(route, {'ok': True})
     if url.path == '/api/owner-thread':
         return fulfill(route, {'items': [], 'next_before': None})
     if url.path == '/api/mailboxes':
@@ -165,7 +165,7 @@ try:
             assert page.get_by_role('checkbox').count() == 0
             page.close()
             assert all(method == 'GET' for method, path, _ in requests if path != '/api/viewport')
-            assert {path for _, path, _ in requests} <= {'/api/channels','/api/owner-thread','/api/mailboxes','/api/mailbox-messages','/api/mailbox-message','/api/version','/api/viewport'}
+            assert {path for _, path, _ in requests} <= {'/api/session','/api/owner-thread','/api/mailboxes','/api/mailbox-messages','/api/mailbox-message','/api/version','/api/viewport'}
             requests.clear()
         browser.close()
 finally:
