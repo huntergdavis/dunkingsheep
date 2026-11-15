@@ -17,7 +17,7 @@ export default function ProjectTerminal({ target, onClose }) {
     const term = new Terminal({ cursorBlink: true, scrollback: 5000, convertEol: false, fontSize: FONT_MAX });
     term.open(host.current);
     host.current.scrollIntoView({ block: 'nearest' });
-    let socket, timer, fitTimer, resizeTimer, readyTimer, frame, disposed = false, attempt = 0;
+    let socket, timer, fitFrame, resizeTimer, readyTimer, frame, disposed = false, attempt = 0;
     let paneSize = null, resizing = false, resizeReady = false, askedFor = '';
     const resizeKey = `ds-terminal-resize-unconfirmed:${target.pane_id}`;
     let resizeDisabled = true;
@@ -91,7 +91,8 @@ export default function ProjectTerminal({ target, onClose }) {
       }
     };
     const boxChanged = () => {
-      clearTimeout(fitTimer); fitTimer = setTimeout(applyFit, 100);
+      // Coalesce display-only font fitting with the next browser frame.
+      cancelAnimationFrame(fitFrame); fitFrame = requestAnimationFrame(applyFit);
       clearTimeout(resizeTimer); resizeTimer = setTimeout(resize, 600);
     };
     const observer = new ResizeObserver(boxChanged); observer.observe(host.current);
@@ -129,7 +130,7 @@ export default function ProjectTerminal({ target, onClose }) {
       for (let offset = 0; offset < bytes.length; offset += 4096) socket.send(bytes.slice(offset, offset + 4096));
     });
     connect();
-    return () => { disposed = true; clearTimeout(timer); clearTimeout(fitTimer); clearTimeout(resizeTimer); clearTimeout(readyTimer); cancelAnimationFrame(frame); observer.disconnect(); input.dispose(); socket?.close(); term.dispose(); };
+    return () => { disposed = true; clearTimeout(timer); cancelAnimationFrame(fitFrame); clearTimeout(resizeTimer); clearTimeout(readyTimer); cancelAnimationFrame(frame); observer.disconnect(); input.dispose(); socket?.close(); term.dispose(); };
   }, [target.name, target.pane_id]);
   return <section className="project-terminal" aria-label={`Terminal ${target.label || target.name}`}>
     <div className="project-terminal-header"><strong>{target.label || target.name}</strong><span role="status">{status}</span>{note && <span className="project-terminal-note" role="status">{note}</span>}<button onClick={onClose}>Close terminal</button></div>
