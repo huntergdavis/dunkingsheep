@@ -264,6 +264,18 @@ impl Flock {
         effort: Option<&str>,
         self_pane_id: Option<&str>,
     ) -> Result<Value, DunkError> {
+        // Who may switch: the owner role for any lane; a planner only for a lane whose explicit
+        // project is the one its project grant names (owner sign-off).
+        let owner = self.is_superuser(self_pane_id, services.delivery)?;
+        let planner = !owner
+            && self_pane_id.is_some_and(|caller| {
+                self.planner_grant_covers_lane(services.delivery, caller, pane)
+            });
+        if !owner && !planner {
+            return Err(refusal(format!(
+                "lane switch-model requires the owner role, or a planner grant for the project of {pane}"
+            )));
+        }
         let model = plain("model", model)?
             .ok_or_else(|| refusal("switch model needs the model (--model)"))?;
         let effort = plain("effort", effort)?;
@@ -348,8 +360,14 @@ impl Flock {
                 reason: Some(&reason),
                 self_pane_id,
                 keep_leases: true,
+                preauthorized: true,
             },
         )?;
+        result["authorized_as"] = json!(if owner {
+            "owner role"
+        } else {
+            "project planner"
+        });
         result["switched"] = json!({
             "from_model": previous,
             "model": model,

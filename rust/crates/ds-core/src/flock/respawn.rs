@@ -35,6 +35,10 @@ pub struct RespawnRequest<'a> {
     /// t4473 slice D: a live task lease does not refuse the respawn; it is kept, detached from
     /// the old process while the pane is replaced and bound to the new one after it is verified.
     pub keep_leases: bool,
+    /// The caller was already authorised by the code that built this request (t4473 slice D:
+    /// `switch_model` admits the owner role or a planner whose project grant covers the lane).
+    /// Every other check still runs. `respawn-pane` itself always passes false.
+    pub preauthorized: bool,
 }
 
 /// How long a lease kept across a respawn stays valid without a process.
@@ -93,7 +97,9 @@ impl Flock {
         services: &RespawnServices<'_>,
         request: RespawnRequest<'_>,
     ) -> Result<Value, DunkError> {
-        self.require_superuser(request.self_pane_id, "respawn-pane", services.delivery)?;
+        if !request.preauthorized {
+            self.require_superuser(request.self_pane_id, "respawn-pane", services.delivery)?;
+        }
         let pane_id = if truthy(request.pane_id) {
             py_str(request.pane_id).trim().to_owned()
         } else {

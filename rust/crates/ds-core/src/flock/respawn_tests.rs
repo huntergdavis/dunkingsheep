@@ -222,6 +222,7 @@ esac
                 reason: None,
                 self_pane_id: Some(OWNER),
                 keep_leases: false,
+                preauthorized: false,
             },
         )
     }
@@ -365,6 +366,34 @@ fn fixture_children_keep_claude_identity_and_are_cleaned_up() {
     for pid in pids {
         assert!(!crate::proc::process_alive(i64::from(pid), None));
     }
+}
+
+/// t4473: a caller that is neither the owner role nor a planner whose project grant covers the
+/// lane cannot switch its model, and nothing is respawned.
+#[test]
+fn switch_model_refuses_a_caller_without_the_owner_role_or_a_covering_grant() {
+    let f = Fixture::new();
+    let services = RespawnServices {
+        terminal: &f.terminal,
+        delivery: &f,
+        inbox: &f,
+        runtime: f.runtime.handle(),
+        env: &f.env,
+        verify_seconds: 0.01,
+        before_native_recheck: None,
+    };
+    for caller in [Some(P), Some("%9"), None] {
+        let error = f
+            .flock
+            .switch_model(&services, P, Some("opus-5.5"), None, caller)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("requires the owner role, or a planner grant for the project of %2"),
+            "{caller:?}: {error}"
+        );
+    }
+    assert!(!f.calls().contains("respawn-pane"), "nothing was respawned");
 }
 
 #[test]
@@ -654,6 +683,7 @@ fn codex_request(
             reason: None,
             self_pane_id: Some(OWNER),
             keep_leases: false,
+            preauthorized: false,
         },
     )
 }
@@ -792,6 +822,7 @@ fn native_rollout_changed_at_final_recheck_refuses_mutation() {
                 reason: None,
                 self_pane_id: Some(OWNER),
                 keep_leases: false,
+                preauthorized: false,
             },
         )
         .unwrap_err();
