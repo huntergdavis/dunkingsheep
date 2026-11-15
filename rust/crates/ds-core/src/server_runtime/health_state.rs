@@ -84,6 +84,9 @@ impl HealthEnv for CoreHealthEnv<'_, '_> {
     fn root_used_fraction(&self) -> Option<Result<f64, String>> {
         Some(crate::health::used_fraction(std::path::Path::new("/")))
     }
+    fn tmp_used_fractions(&self) -> Option<Result<(f64, f64), String>> {
+        Some(crate::health::used_fractions(std::path::Path::new("/tmp")))
+    }
 }
 
 struct CoreCaptureEnv<'a, 'b> {
@@ -589,14 +592,21 @@ with open(traffic,'w') as out:
                                 .and_then(|checks| checks.remove("disk_root"))
                                 .expect("the production health run samples the root filesystem");
                             assert!(disk["used_percent"].is_i64(), "{disk}");
-                            if disk["alerting"] == true {
+                            // `checks.tmp` (t3912 slice 1) is Rust-only too, for the same reason.
+                            let tmp = result["checks"]
+                                .as_object_mut()
+                                .and_then(|checks| checks.remove("tmp"))
+                                .expect("the production health run samples /tmp");
+                            assert!(tmp["used_percent"].is_i64(), "{tmp}");
+                            if disk["alerting"] == true || tmp["alerting"] == true {
                                 // A nearly full test machine: the disk problem is not the
                                 // oracle's either.
                                 if let Some(problems) = result["problems"].as_array_mut() {
                                     problems.retain(|problem| {
-                                        !problem
-                                            .as_str()
-                                            .is_some_and(|text| text.starts_with("root filesystem"))
+                                        !problem.as_str().is_some_and(|text| {
+                                            text.starts_with("root filesystem")
+                                                || text.starts_with("/tmp")
+                                        })
                                     });
                                     let ok = problems.is_empty();
                                     result["ok"] = json!(ok);

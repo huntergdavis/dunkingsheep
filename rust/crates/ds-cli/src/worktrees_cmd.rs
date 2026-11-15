@@ -573,6 +573,33 @@ pub fn inventory_command(
     }
 }
 
+/// `worktrees scratch [--root DIR] [--max-seconds S]` (t3912): the read-only report of this
+/// project's leftovers in the temp directory. Exit 2 when the directory cannot be read.
+pub fn scratch_command(root: Option<&str>, max_seconds: Option<f64>, json: bool) -> Outcome {
+    let root = PathBuf::from(root.filter(|root| !root.is_empty()).unwrap_or("/tmp"));
+    let uid = std::fs::metadata("/proc/self")
+        .map(|meta| std::os::unix::fs::MetadataExt::uid(&meta))
+        .unwrap_or(u32::MAX);
+    let held = ds_core::scratch_report::held_paths(Path::new("/proc"), uid);
+    let budget = worktree_disk::Budget::new(max_seconds.unwrap_or(120.0), usize::MAX);
+    match ds_core::scratch_report::report(&root, &held, wall_now(), &budget) {
+        Ok(report) => Outcome {
+            stdout: if json {
+                format!("{}\n", sorted_json(&report))
+            } else {
+                ds_core::scratch_report::render_text(&report)
+            },
+            stderr: String::new(),
+            code: 0,
+        },
+        Err(error) => Outcome {
+            stdout: String::new(),
+            stderr: format!("worktrees scratch: {error}\n"),
+            code: 2,
+        },
+    }
+}
+
 #[cfg(test)]
 mod inventory_tests {
     use super::*;

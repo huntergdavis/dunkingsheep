@@ -16160,6 +16160,92 @@
  {
   "argv": [
    "worktrees",
+   "scratch"
+  ],
+  "namespace": {
+   "command": "worktrees",
+   "json": false,
+   "max_seconds": null,
+   "no_start_daemon": false,
+   "root": null,
+   "self_pane": null,
+   "socket": null,
+   "worktrees_command": "scratch"
+  }
+ },
+ {
+  "argv": [
+   "worktrees",
+   "scratch",
+   "--json"
+  ],
+  "namespace": {
+   "command": "worktrees",
+   "json": true,
+   "max_seconds": null,
+   "no_start_daemon": false,
+   "root": null,
+   "self_pane": null,
+   "socket": null,
+   "worktrees_command": "scratch"
+  }
+ },
+ {
+  "argv": [
+   "--json",
+   "worktrees",
+   "scratch"
+  ],
+  "namespace": {
+   "command": "worktrees",
+   "json": true,
+   "max_seconds": null,
+   "no_start_daemon": false,
+   "root": null,
+   "self_pane": null,
+   "socket": null,
+   "worktrees_command": "scratch"
+  }
+ },
+ {
+  "argv": [
+   "worktrees",
+   "scratch",
+   "--root",
+   "x"
+  ],
+  "namespace": {
+   "command": "worktrees",
+   "json": false,
+   "max_seconds": null,
+   "no_start_daemon": false,
+   "root": "x",
+   "self_pane": null,
+   "socket": null,
+   "worktrees_command": "scratch"
+  }
+ },
+ {
+  "argv": [
+   "worktrees",
+   "scratch",
+   "--max-seconds",
+   "1.5"
+  ],
+  "namespace": {
+   "command": "worktrees",
+   "json": false,
+   "max_seconds": 1.5,
+   "no_start_daemon": false,
+   "root": null,
+   "self_pane": null,
+   "socket": null,
+   "worktrees_command": "scratch"
+  }
+ },
+ {
+  "argv": [
+   "worktrees",
    "clean"
   ],
   "namespace": {

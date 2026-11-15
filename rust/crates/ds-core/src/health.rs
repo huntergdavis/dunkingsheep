@@ -75,6 +75,11 @@ pub trait HealthEnv {
     fn root_used_fraction(&self) -> Option<Result<f64, String>> {
         None
     }
+    /// t3912: how full `/tmp` is, as `(blocks used, inodes used)` fractions; `None` when this
+    /// environment does not sample it, `Err` when the sample failed.
+    fn tmp_used_fractions(&self) -> Option<Result<(f64, f64), String>> {
+        None
+    }
 }
 
 /// The used fraction of the filesystem holding `path`, the way `df` prints it: used blocks over
@@ -92,6 +97,21 @@ pub fn used_fraction(path: &Path) -> Result<f64, String> {
     Ok(used as f64 / usable as f64)
 }
 
+/// t3912: the used fractions of the filesystem holding `path`: blocks (as `used_fraction`) and
+/// inodes. A filesystem that reports no inodes (some do not count them) has an inode fraction
+/// of 0.
+pub fn used_fractions(path: &Path) -> Result<(f64, f64), String> {
+    let blocks = used_fraction(path)?;
+    let stat = statvfs(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let files = stat.files() as f64;
+    let inodes = if files > 0.0 {
+        (files - stat.files_free() as f64).max(0.0) / files
+    } else {
+        0.0
+    };
+    Ok((blocks, inodes))
+}
+
 /// Is the root filesystem a problem now? It becomes one at the warning level and stays one
 /// until it is below the clearing level.
 pub fn disk_alerting(used: f64, was_alerting: bool, thresholds: &Thresholds) -> bool {
@@ -105,10 +125,15 @@ pub fn disk_alerting(used: f64, was_alerting: bool, thresholds: &Thresholds) -> 
 /// Whether the last written health report had the root filesystem as a problem. A report that
 /// is missing or unreadable says no.
 fn disk_was_alerting(config_dir: &Path) -> bool {
+    check_was_alerting(config_dir, "disk_root")
+}
+
+/// Whether the last written health report had the check `name` alerting.
+fn check_was_alerting(config_dir: &Path, name: &str) -> bool {
     std::fs::read_to_string(config_dir.join("health.json"))
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .is_some_and(|report| report["checks"]["disk_root"]["alerting"] == true)
+        .is_some_and(|report| report["checks"][name]["alerting"] == true)
 }
 
 /// `HEALTH_PATH`: `~/.config/dunkingsheep/health.json` (the Python expands `~`, it does not
@@ -359,6 +384,33 @@ pub fn run_health(
             }
         };
         checks.insert("disk_root".into(), disk);
+    }
+    // t3912: /tmp is a small tmpfs every lane and test writes to; it filled up (98-100%) more
+    // than once. The same 85%/80% rule as the root filesystem, on blocks or inodes, whichever
+    // is fuller, through the same problem list (and so the same watchdog alert path).
+    if let Some(sample) = env.tmp_used_fractions() {
+        let was = check_was_alerting(config_dir, "tmp");
+        let percent = |fraction: f64| (fraction * 100.0 + 1e-9).floor() as i64;
+        let tmp = match sample {
+            Ok((blocks, inodes)) => {
+                let alerting = disk_alerting(blocks.max(inodes), was, thresholds);
+                if alerting {
+                    problems.push(format!(
+                        "/tmp {}% used, {}% of inodes (a problem from {}%, until below {}%)",
+                        percent(blocks),
+                        percent(inodes),
+                        percent(thresholds.disk_warn_used_fraction),
+                        percent(thresholds.disk_clear_used_fraction),
+                    ));
+                }
+                json!({"used_percent": percent(blocks), "inodes_percent": percent(inodes), "alerting": alerting, "reason": null})
+            }
+            Err(error) => {
+                problems.push(format!("/tmp usage could not be read: {error}"));
+                json!({"used_percent": null, "inodes_percent": null, "alerting": was, "reason": error})
+            }
+        };
+        checks.insert("tmp".into(), tmp);
     }
 
     match env.task_totals() {

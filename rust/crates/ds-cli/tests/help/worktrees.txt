@@ -6,6 +6,8 @@ positional arguments:
                 each directory
     inventory   read-only: every worktree of the repository with its class,
                 build caches and why the cleaner keeps each
+    scratch     read-only: this project's test and tool leftovers in /tmp, by
+                prefix, with age, size and whether held open
     clean       delete merged worktrees' Cargo build caches; a dry run unless
                 --apply
 
