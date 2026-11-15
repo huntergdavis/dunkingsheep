@@ -171,6 +171,20 @@ class RustRolloutTests(unittest.TestCase):
             return []
         return read(self.log).splitlines()
 
+    def test_inventory_delegates_quoted_arguments_without_legacy_commands(self):
+        helper = os.path.join(self.bindir, "ds-release")
+        write(helper, '#!/bin/sh\nprintf "%s\\n" "$@"\n', mode=0o755)
+        self.env["RUST_RELEASE_OPERATOR"] = helper
+        record = os.path.join(self.tmp, 'packet $(touch canary)')
+        proc = self.run_script("inventory", "--record", record, "--json")
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        self.assertEqual(["inventory", "--releases", self.releases,
+                          "--record", record, "--json"], proc.stdout.splitlines())
+        self.assertEqual([], self.log_lines())
+        self.assertFalse(os.path.exists(self.releases))
+        self.assertFalse(os.path.exists(self.state))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "canary")))
+
     def stage(self):
         proc = self.run_script("stage", "--sha", self.sha, apply=True)
         self.assertEqual(0, proc.returncode, proc.stderr + proc.stdout)
