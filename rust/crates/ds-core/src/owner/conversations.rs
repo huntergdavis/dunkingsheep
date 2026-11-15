@@ -1052,7 +1052,8 @@ mod tests {
         let request = RequestCtx {
             self_pane_id: pane.map(str::to_owned),
             service_token: token,
-            socket_peer: Some(false),
+            socket_peer: Some(true),
+            socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
             ..Default::default()
         };
         let context = crate::api::HandlerContext {

@@ -4,25 +4,15 @@ use crate::{db::map_sqlite, error::DunkError, owner::ConversationFilter};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 pub(super) const SCHEMA: &str = "
 CREATE INDEX IF NOT EXISTS message_threads_by_view
  ON message_threads(conversation_kind,thread_version,sender_kind,message_id);
 CREATE INDEX IF NOT EXISTS message_thread_routes_recipient
  ON message_thread_routes(recipient_kind,message_id);
-CREATE TRIGGER IF NOT EXISTS thread_pages_message_delete AFTER DELETE ON messages
-BEGIN
- INSERT INTO counters(name,value) VALUES('thread_page_revision',1)
- ON CONFLICT(name) DO UPDATE SET value=CAST(value AS INTEGER)+1;
-END;
-CREATE TRIGGER IF NOT EXISTS thread_pages_message_change
- AFTER UPDATE OF state,created_at ON messages
- WHEN OLD.created_at IS NOT NEW.created_at OR
- (OLD.state IS NOT NEW.state AND (OLD.state='cancelled' OR NEW.state='cancelled'))
-BEGIN
- INSERT INTO counters(name,value) VALUES('thread_page_revision',1)
- ON CONFLICT(name) DO UPDATE SET value=CAST(value AS INTEGER)+1;
-END;
+
 ";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,9 +48,104 @@ struct Cursor {
     root_id: Option<String>,
     fence: i64,
     view_revision: i64,
-    page_revision: i64,
-    before_at: f64,
+    digest: Option<String>,
+    anchors: Vec<Anchor>,
+    before_at_bits: u64,
     before_id: i64,
+}
+
+// Exact SQLite REAL bits avoid a JSON decimal round-trip at the keyset boundary.
+type Anchor = (String, String, u64);
+
+fn timestamp_bits(connection: &Connection, id: &str) -> Result<u64, DunkError> {
+    let at: f64 = connection
+        .query_row("SELECT created_at FROM messages WHERE id=?", [id], |r| {
+            r.get(0)
+        })
+        .map_err(map_sqlite)?;
+    if !at.is_finite() {
+        return Err(refuse("invalid thread timestamp"));
+    }
+    Ok(at.to_bits())
+}
+
+// Called ONLY for Load older. First-page polling never scans/hashes this metadata.
+// The first continuation verifies the already returned prefix before establishing
+// its digest; later continuations compare that digest under the same ID fence.
+fn snapshot(
+    connection: &Connection,
+    prefix: &str,
+    fence: i64,
+    root: Option<&str>,
+    bootstrap: bool,
+    limit: usize,
+) -> Result<(String, Vec<Anchor>), DunkError> {
+    let sql = format!("{prefix} SELECT thread_key,id,created_at FROM visible ORDER BY CAST(SUBSTR(id,2) AS INTEGER)");
+    let mut statement = connection.prepare(&sql).map_err(map_sqlite)?;
+    let mut rows = if let Some(root) = root {
+        statement.query(params![fence, root])
+    } else {
+        statement.query(params![fence])
+    }
+    .map_err(map_sqlite)?;
+    let mut hash = Sha256::new();
+    let mut latest: HashMap<String, Anchor> = HashMap::new();
+    while let Some(row) = rows.next().map_err(map_sqlite)? {
+        let key: String = row.get(0).map_err(map_sqlite)?;
+        let id: String = row.get(1).map_err(map_sqlite)?;
+        let at: f64 = row.get(2).map_err(map_sqlite)?;
+        number(&key)?;
+        number(&id)?;
+        if !at.is_finite() {
+            return Err(refuse("invalid thread timestamp"));
+        }
+        for field in [&key, &id] {
+            hash.update((field.len() as u64).to_le_bytes());
+            hash.update(field.as_bytes());
+        }
+        hash.update(at.to_bits().to_le_bytes());
+        if bootstrap {
+            let anchor = (key.clone(), id, at.to_bits());
+            let group = if root.is_some() {
+                anchor.1.clone()
+            } else {
+                key
+            };
+            let replace = latest
+                .get(&group)
+                .is_none_or(|old| anchor_order(&anchor, old).is_gt());
+            if replace {
+                latest.insert(group, anchor);
+            }
+        }
+    }
+    let mut anchors: Vec<_> = latest.into_values().collect();
+    anchors.sort_by(|a, b| anchor_order(b, a));
+    anchors.truncate(limit);
+    Ok((format!("{:x}", hash.finalize()), anchors))
+}
+
+fn anchor_order(a: &Anchor, b: &Anchor) -> std::cmp::Ordering {
+    f64::from_bits(a.2)
+        .total_cmp(&f64::from_bits(b.2))
+        .then_with(|| {
+            number(&a.1)
+                .unwrap_or_default()
+                .cmp(&number(&b.1).unwrap_or_default())
+        })
+}
+
+fn reload(options: &ThreadPageOptions, fence: i64, view_revision: i64) -> Value {
+    let mut result = json!({"mailbox":"owner","thread_mode":options.mode.name(),"source_filter":options.filter.name(),"include_internal":false,
+        "view_revision":view_revision,"fence_id":fence,"next_cursor":null,"reload_from_top":true,"message":"List changed, reload from top."});
+    match options.mode {
+        ThreadPageMode::Heads => result["threads"] = json!([]),
+        ThreadPageMode::Messages => {
+            result["root_id"] = json!(options.root_id);
+            result["messages"] = json!([]);
+        }
+    }
+    result
 }
 
 fn number(id: &str) -> Result<i64, DunkError> {
@@ -205,13 +290,12 @@ fn annotate(
     Ok(())
 }
 
-fn revisions(connection: &Connection) -> Result<(i64, i64, i64), DunkError> {
+fn revisions(connection: &Connection) -> Result<(i64, i64), DunkError> {
     connection.query_row(
         "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM counters WHERE name='thread_view_revision'),0),
-         COALESCE((SELECT CAST(value AS INTEGER) FROM counters WHERE name='thread_page_revision'),0),
          COALESCE((SELECT CAST(value AS INTEGER) FROM counters WHERE name='message'),
                   (SELECT MAX(CAST(SUBSTR(id,2) AS INTEGER)) FROM messages),0)",
-        [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+        [], |r| Ok((r.get(0)?,r.get(1)?)),
     ).map_err(map_sqlite)
 }
 
@@ -239,7 +323,7 @@ impl Store {
             .cursor
             .as_deref()
             .map(|raw| {
-                if raw.len() > 4096 {
+                if raw.len() > 16384 {
                     return Err(refuse("invalid thread page cursor"));
                 }
                 serde_json::from_str(raw).map_err(|_| refuse("invalid thread page cursor"))
@@ -248,23 +332,35 @@ impl Store {
         self.readers.with(|connection| {
             // One snapshot for revisions, ID fence, membership, counts and the selected rows.
             let tx = connection.unchecked_transaction().map_err(map_sqlite)?;
-            let (view_revision,page_revision,current_fence)=revisions(&tx)?;
-            if view_revision<0 || page_revision<0 || current_fence<0 {
+            let (view_revision,current_fence)=revisions(&tx)?;
+            if view_revision<0 || current_fence<0 {
                 return Err(refuse("thread page metadata unavailable"));
             }
             if let Some(c)=&cursor {
                 if c.version!=1 || c.mode!=options.mode.name() || c.filter!=options.filter.name()
                     || c.limit!=options.limit || c.root_id!=options.root_id
                     || c.fence<0 || c.fence>current_fence || c.before_id<=0 || c.before_id>c.fence
-                    || !c.before_at.is_finite() {
+                    || !f64::from_bits(c.before_at_bits).is_finite()
+                    || c.anchors.len()>options.limit as usize
+                    || c.digest.as_ref().is_some_and(|d|d.len()!=64 || !d.bytes().all(|b|b.is_ascii_hexdigit()))
+                    || (c.digest.is_none() && c.anchors.len()!=options.limit as usize)
+                    || (c.digest.is_some() && !c.anchors.is_empty())
+                    || c.anchors.iter().any(|a|number(&a.0).is_err() || number(&a.1).is_err() || !f64::from_bits(a.2).is_finite()) {
                     return Err(refuse("thread page cursor does not match this query"));
                 }
-                if c.view_revision!=view_revision || c.page_revision!=page_revision {
-                    return Err(refuse("thread history changed; refresh to continue"));
-                }
+
             }
             let fence=cursor.as_ref().map_or(current_fence,|c|c.fence);
-            let before_at=cursor.as_ref().map(|c|c.before_at);
+            let mut digest=None;
+            if let Some(c)=&cursor {
+                if c.view_revision!=view_revision {return Ok(reload(options,fence,view_revision));}
+                let (current,anchors)=snapshot(&tx,&prefix,fence,options.root_id.as_deref(),c.digest.is_none(),options.limit as usize)?;
+                if c.digest.as_ref().is_some_and(|old|old!=&current) || (c.digest.is_none() && c.anchors!=anchors) {
+                    return Ok(reload(options,fence,view_revision));
+                }
+                digest=Some(current);
+            }
+            let before_at=cursor.as_ref().map(|c|f64::from_bits(c.before_at_bits));
             let before_id=cursor.as_ref().map(|c|c.before_id);
             let mut rows = match options.mode {
                 ThreadPageMode::Heads => {
@@ -304,12 +400,20 @@ impl Store {
             let next_cursor=if has_more {
                 let last=rows.last().ok_or_else(||refuse("missing thread cursor boundary"))?;
                 let id=last["id"].as_str().ok_or_else(||refuse("invalid thread row"))?;
-                let at=last["created_at"].as_f64().filter(|v|v.is_finite()).ok_or_else(||refuse("invalid thread timestamp"))?;
-                Some(serde_json::to_string(&Cursor{version:1,mode:options.mode.name().into(),filter:options.filter.name().into(),limit:options.limit,root_id:options.root_id.clone(),fence,view_revision,page_revision,before_at:at,before_id:number(id)?}).map_err(DunkError::from)?)
+                let before_at_bits=timestamp_bits(&tx,id)?;
+                let mut anchors=Vec::new();
+                if cursor.is_none() {
+                    for row in &rows {
+                        let row_id=row["id"].as_str().ok_or_else(||refuse("invalid thread row"))?;
+                        let key=if options.mode==ThreadPageMode::Heads {row["thread_key"].as_str()} else {options.root_id.as_deref()}.ok_or_else(||refuse("missing thread key"))?;
+                        anchors.push((key.into(),row_id.into(),timestamp_bits(&tx,row_id)?));
+                    }
+                }
+                Some(serde_json::to_string(&Cursor{version:1,mode:options.mode.name().into(),filter:options.filter.name().into(),limit:options.limit,root_id:options.root_id.clone(),fence,view_revision,digest,anchors,before_at_bits,before_id:number(id)?}).map_err(DunkError::from)?)
             } else {None};
             annotate(&tx,&mut rows,options.filter==ConversationFilter::Historical)?;
             let mut result=json!({"mailbox":"owner","thread_mode":options.mode.name(),"source_filter":options.filter.name(),"include_internal":false,
-                "view_revision":view_revision,"page_revision":page_revision,"fence_id":fence,"next_cursor":next_cursor});
+                "view_revision":view_revision,"reload_from_top":false,"fence_id":fence,"next_cursor":next_cursor});
             match options.mode {
                 ThreadPageMode::Heads => {
                     let mut heads=Vec::with_capacity(rows.len());

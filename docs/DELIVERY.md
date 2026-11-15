@@ -441,7 +441,7 @@ A first thread list uses:
 ```
 
 The response has `threads`, `next_cursor`, `source_filter`, `include_internal:false`,
-`view_revision`, `page_revision`, and `thread_mode`. Each thread contains:
+`view_revision`, `reload_from_top`, and `thread_mode`. Each thread contains:
 
 - `thread_id`: trusted root ID, or the individual message ID in Historical.
 - `latest`: recorded routing/lineage and sender/time/state metadata, plus a preview
@@ -474,18 +474,27 @@ unavailable. GET-style queries never consume, read, acknowledge, or notify mail.
 Thread pages use a fixed initial numeric-message-ID fence so later replies cannot
 move unseen threads past an older-page cursor, including across clock changes.
 Fresh first-page polling sees new replies/threads and merges by `thread_id`.
-One short read transaction keeps the fence, membership, counts and revisions
-consistent. Existing promotion revisions invalidate visibility changes. A separate
-page revision invalidates cancellation, deletion, or changes to an existing
-message timestamp; ordinary read/ack transitions refresh unread counts without
-reordering or invalidating the page. On a changed-history refusal, start again
-with no cursor. Keep the existing five-second refresh in the future UI adapter.
+One read transaction keeps the fence, membership, counts and selected rows
+consistent. First-page polling never computes a digest. Its continuation holds
+bounded anchors for the returned rows. On the first Load older, the daemon
+verifies that prefix and establishes a SHA-256 digest of visible ID/root/exact
+SQLite timestamp metadata under the fixed fence. Subsequent continuations compare
+that digest. Existing promotion revisions also invalidate visibility changes.
+Ordinary read/ack changes refresh unread counts without invalidating pagination.
+Changed history returns a successful, empty result with `reload_from_top:true`,
+`message:"List changed, reload from top."`, and `next_cursor:null`; reload without a
+cursor. Malformed or query-mismatched cursors remain refused. Keep the existing
+five-second refresh in the future UI adapter. Exact SQLite REAL timestamp bits in
+the opaque cursor avoid decimal rounding at keyset boundaries.
 
 The inbox store creates two additive `IF NOT EXISTS` covering indexes at startup:
 `message_threads_by_view` and `message_thread_routes_recipient`. There is no global
-message ordering index or per-request DDL. Two additive SQLite triggers maintain
-`counters.thread_page_revision` for head-affecting existing-message mutations.
+message ordering index, per-request DDL, custom write trigger, or new counter.
 No table/column is replaced and no historical messages are rewritten. Older
-binaries ignore these indexes and the extra counter; their existing writes remain
-valid with the triggers present. A release still requires its normal private
-rollback proof before activation.
+binaries can read and write with these indexes retained. Index maintenance still
+has normal SQLite write/storage cost. In the private synthetic 70k-row study,
+creating the two indexes took 572.26 ms combined and added 2,928,640 bytes;
+checking existing indexes took 0.22 ms (single Python/SQLite observations, not a
+production or Rust startup guarantee). Cursor digest work adds a metadata scan
+only to Load older. A release still requires its normal private rollback proof
+before activation.

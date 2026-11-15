@@ -123,6 +123,10 @@ fn thread_heads_cover_whole_threads_counts_preview_and_chronological_paged_detai
                 .map(|r| r["id"].as_str().unwrap().to_owned()),
         );
         cursor = page["next_cursor"].as_str().map(str::to_owned);
+        assert!(
+            seen.len() <= first_ids.len(),
+            "duplicate or nonterminating detail page"
+        );
         if cursor.is_none() {
             break;
         }
@@ -302,13 +306,15 @@ fn cancellation_deletion_timestamp_change_and_promotion_invalidate_cursors_but_p
             }
             _ => unreachable!(),
         }
-        let error = store
+        let changed = store
             .conversation_thread_page(&ThreadPageOptions {
                 cursor: Some(cursor),
                 ..opts
             })
-            .unwrap_err();
-        assert!(error.to_string().contains("changed"), "{mutation}: {error}");
+            .unwrap();
+        assert_eq!(changed["reload_from_top"], true, "{mutation}: {changed}");
+        assert!(changed["threads"].as_array().unwrap().is_empty());
+        assert!(changed["next_cursor"].is_null());
     }
 }
 
@@ -370,4 +376,124 @@ fn numeric_ties_empty_views_bounds_and_additive_reopen_keep_legacy_wire_stable()
         old
     );
     assert_eq!(heads(&store, ConversationFilter::HumanThreads), page);
+}
+
+#[test]
+fn cursor_bootstrap_then_digest_returns_clean_reload_and_installs_no_write_hooks() {
+    let (_dir, store) = fixture();
+    for _ in 0..5 {
+        write(&store, None, true, ThreadRoute::Vp);
+    }
+    let opts = options(ThreadPageMode::Heads, ConversationFilter::HumanThreads, 1);
+    let first = store.conversation_thread_page(&opts).unwrap();
+    let initial: Cursor = serde_json::from_str(first["next_cursor"].as_str().unwrap()).unwrap();
+    assert!(initial.digest.is_none());
+    assert_eq!(initial.anchors.len(), 1);
+    let second = store
+        .conversation_thread_page(&ThreadPageOptions {
+            cursor: first["next_cursor"].as_str().map(str::to_owned),
+            ..opts.clone()
+        })
+        .unwrap();
+    let established: Cursor =
+        serde_json::from_str(second["next_cursor"].as_str().unwrap()).unwrap();
+    assert_eq!(established.digest.as_ref().unwrap().len(), 64);
+    assert!(established.anchors.is_empty());
+    // Change a previously served head after bootstrap; no duplicate/partial result.
+    let seen = first["threads"][0]["latest"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    store.delete(&[seen]).unwrap();
+    let changed = store
+        .conversation_thread_page(&ThreadPageOptions {
+            cursor: second["next_cursor"].as_str().map(str::to_owned),
+            ..opts.clone()
+        })
+        .unwrap();
+    assert_eq!(changed["reload_from_top"], true);
+    assert_eq!(changed["message"], "List changed, reload from top.");
+    assert_eq!(changed["threads"], json!([]));
+    assert!(changed["next_cursor"].is_null());
+    let polled = store.conversation_thread_page(&opts).unwrap();
+    let poll_cursor: Cursor =
+        serde_json::from_str(polled["next_cursor"].as_str().unwrap()).unwrap();
+    assert!(poll_cursor.digest.is_none());
+    store.readers.with(|c| {
+        let hooks:i64=c.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'thread_pages_%'",[],|r|r.get(0)).map_err(map_sqlite)?;
+        let counters:i64=c.query_row("SELECT COUNT(*) FROM counters WHERE name='thread_page_revision'",[],|r|r.get(0)).map_err(map_sqlite)?;
+        assert_eq!((hooks,counters),(0,0));
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn exact_fractional_sqlite_boundaries_page_every_head_and_detail_once() {
+    let (_dir, store) = fixture();
+    let root = write(&store, None, true, ThreadRoute::Vp);
+    let mut ids = vec![root.clone()];
+    for _ in 0..11 {
+        ids.push(write(&store, Some(&root), false, ThreadRoute::Human));
+    }
+    for _ in 0..11 {
+        write(&store, None, true, ThreadRoute::Vp);
+    }
+    store
+        .writer
+        .call(|c| {
+            for n in 1..=23 {
+                let at = f64::from_bits(1_794_771_000.1234567_f64.to_bits() + n / 2);
+                c.execute(
+                    "UPDATE messages SET created_at=? WHERE id=?",
+                    params![at, format!("i{n}")],
+                )
+                .map_err(map_sqlite)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    for mode in [ThreadPageMode::Heads, ThreadPageMode::Messages] {
+        let mut opts = options(mode, ConversationFilter::HumanThreads, 2);
+        if mode == ThreadPageMode::Messages {
+            opts.root_id = Some(root.clone());
+        }
+        let mut seen = Vec::new();
+        let mut finished = false;
+        for _ in 0..20 {
+            let page = store.conversation_thread_page(&opts).unwrap();
+            assert_eq!(page["reload_from_top"], false);
+            let rows = page[if mode == ThreadPageMode::Heads {
+                "threads"
+            } else {
+                "messages"
+            }]
+            .as_array()
+            .unwrap();
+            for row in rows {
+                let id = if mode == ThreadPageMode::Heads {
+                    &row["thread_id"]
+                } else {
+                    &row["id"]
+                }
+                .as_str()
+                .unwrap()
+                .to_owned();
+                assert!(!seen.contains(&id), "duplicate {id}");
+                seen.push(id);
+            }
+            opts.cursor = page["next_cursor"].as_str().map(str::to_owned);
+            if opts.cursor.is_none() {
+                finished = true;
+                break;
+            }
+        }
+        assert!(finished, "pagination did not terminate");
+        if mode == ThreadPageMode::Heads {
+            assert_eq!(seen.len(), 12);
+        } else {
+            seen.sort();
+            ids.sort();
+            assert_eq!(seen, ids);
+        }
+    }
 }
