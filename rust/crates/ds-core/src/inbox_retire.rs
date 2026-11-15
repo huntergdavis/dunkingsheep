@@ -321,11 +321,13 @@ mod tests {
         ] {
             let (class, why) = class_of(row(name, 90.0), &identities);
             assert_eq!(class, "ambiguous", "{name}");
-            assert_eq!(
-                why[0], "a role-like name: a person may still write to it",
-                "{name}"
+            assert!(
+                why.iter()
+                    .any(|w| w == "a role-like name: a person may still write to it"),
+                "{name}: {why:?}"
             );
-            // t5014: a name with spaces also carries the nickname reason.
+            // t5014: a name with spaces also carries the nickname reason (added before the
+            // role-like one).
             let spaced = name.contains(' ');
             assert_eq!(why.len(), 1 + usize::from(spaced), "{name}: {why:?}");
         }
