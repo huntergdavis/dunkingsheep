@@ -322,10 +322,12 @@ mod tests {
             let (class, why) = class_of(row(name, 90.0), &identities);
             assert_eq!(class, "ambiguous", "{name}");
             assert_eq!(
-                why,
-                ["a role-like name: a person may still write to it"],
+                why[0], "a role-like name: a person may still write to it",
                 "{name}"
             );
+            // t5014: a name with spaces also carries the nickname reason.
+            let spaced = name.contains(' ');
+            assert_eq!(why.len(), 1 + usize::from(spaced), "{name}: {why:?}");
         }
         // A word that merely contains a role word is not role-like.
         assert_eq!(
