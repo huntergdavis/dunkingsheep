@@ -83,6 +83,38 @@ impl DetachedOwnerCall {
     }
 }
 
+/// t4553: the executable of a root process, or `?` when it cannot be read.
+fn root_exe(pid: i64) -> String {
+    std::fs::read_link(format!("/proc/{pid}/exe"))
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "?".into())
+}
+
+/// t4553: the journal line for a detached owner-token call under an unregistered root. Free
+/// text is escaped and bounded; no token, argument or environment is included.
+pub(crate) fn detached_refusal_line(
+    verdict: crate::roles::DetachedVerdict,
+    caller: &crate::proc::ProcStat,
+    root: &crate::proc::ProcStat,
+    exe: &str,
+) -> String {
+    let short = |text: &str| text.chars().take(120).collect::<String>();
+    let what = if verdict == crate::roles::DetachedVerdict::Refuse {
+        "refused"
+    } else {
+        "would refuse (dry run, accepted)"
+    };
+    format!(
+        "owner token from a detached caller under an unregistered root: {what}: caller={:?} \
+         pid={} root={}:{} root_exe={:?}",
+        short(&caller.comm),
+        caller.pid,
+        root.pid,
+        short(&root.start),
+        short(exe),
+    )
+}
+
 fn refuse(text: impl Into<String>) -> DunkError {
     DunkError::Refused(text.into())
 }
@@ -363,6 +395,44 @@ impl Flock {
         *last = Some(call);
     }
 
+    /// t4553: check a detached owner-token caller's root against `owner-detached-roots.json`.
+    /// Never logs token text: only the root's pid, start, executable and the caller's name.
+    fn detached_root_check(&self, chain: &[crate::proc::ProcStat]) -> Result<(), DunkError> {
+        use crate::roles::{detached_verdict, DetachedVerdict};
+        let (Some(caller), Some(top)) = (chain.first(), chain.last()) else {
+            return Ok(());
+        };
+        let root = (top.pid, top.start.clone());
+        let listed = self
+            .with_roles(|roles, _| Ok(roles.owner_detached_roots()))
+            .unwrap_or(None);
+        let verdict = detached_verdict(listed.as_ref(), &root);
+        if verdict == DetachedVerdict::Accept {
+            return Ok(());
+        }
+        let line = detached_refusal_line(verdict, caller, top, &root_exe(top.pid));
+        eprintln!("{line}");
+        if let Some(metrics) = self.stores().metrics {
+            metrics.record(&crate::metrics::Event {
+                at: crate::clock::now_s(),
+                kind: if verdict == DetachedVerdict::Refuse {
+                    "owner.detached_refused".into()
+                } else {
+                    "owner.detached_would_refuse".into()
+                },
+                source: Some(format!("{}:{}", root.0, root.1)),
+                reason: Some(caller.comm.chars().take(120).collect()),
+                ..crate::metrics::Event::default()
+            });
+        }
+        if verdict == DetachedVerdict::Refuse {
+            return Err(refuse(
+                "owner token refused: the detached caller's process root is not one the owner registered",
+            ));
+        }
+        Ok(())
+    }
+
     /// Where a socket caller's process sits relative to the listed panes: its verified
     /// ancestry chain and every listed pane whose root process is in that chain. Fails with
     /// `refuse_peer()` whenever the answer cannot be established: no verified socket peer, a
@@ -540,9 +610,11 @@ impl Flock {
         } = self.peer_place(env, &refuse_peer)?;
         let start = start.as_str();
         if matched.is_empty() {
-            // Legacy detached owner compatibility: still accepted, now on the record.
+            // Legacy detached owner compatibility: still accepted, now on the record. t4553:
+            // the owner can list the roots detached callers may run under; until enforcement is
+            // turned on, a caller under any other root is accepted and logged as "would refuse".
             self.audit_detached_owner(&chain);
-            return Ok(());
+            return self.detached_root_check(&chain);
         }
         if matched.len() != 1 {
             return Err(refuse_peer());
