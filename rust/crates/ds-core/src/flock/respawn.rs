@@ -32,7 +32,13 @@ pub struct RespawnRequest<'a> {
     pub confirm_idle: bool,
     pub reason: Option<&'a Value>,
     pub self_pane_id: Option<&'a str>,
+    /// t4473 slice D: a live task lease does not refuse the respawn; it is kept, detached from
+    /// the old process while the pane is replaced and bound to the new one after it is verified.
+    pub keep_leases: bool,
 }
+
+/// How long a lease kept across a respawn stays valid without a process.
+const LEASE_HOLD_S: f64 = 900.0;
 fn refusal(text: impl Into<String>) -> DunkError {
     DunkError::Refused(text.into())
 }
@@ -201,7 +207,7 @@ impl Flock {
         let leases = services
             .runtime
             .block_on(tasks.leases_for_pane(&pane_id, None))?;
-        if !leases.is_empty() {
+        if !leases.is_empty() && !request.keep_leases {
             return Err(refusal(format!(
                 "respawn-pane refused: pane {pane_id} has a live task lease ({})",
                 leases
@@ -282,6 +288,27 @@ impl Flock {
         if let Some(snapshot) = snapshot {
             snapshot.assert_unchanged().map_err(native_error)?;
         }
+        // Kept leases are detached from the process that is about to be replaced, so the reaper
+        // does not take them while the pane is between processes.
+        let kept: Vec<String> = if request.keep_leases && !leases.is_empty() {
+            services.runtime.block_on(tasks.detach_leases_for_respawn(
+                &pane_id,
+                crate::clock::now_s(),
+                LEASE_HOLD_S,
+            ))?
+        } else {
+            Vec::new()
+        };
+        let lease_note = |error: DunkError| -> DunkError {
+            if kept.is_empty() {
+                error
+            } else {
+                refusal(format!(
+                    "{error}; task lease(s) {} kept without a process until their deadline",
+                    kept.join(", ")
+                ))
+            }
+        };
         let result = services
             .terminal
             .lock()
@@ -296,19 +323,19 @@ impl Flock {
                     .expect("terminal lock")
                     .get_pane(&pane_id)
                     .and_then(|p| p.pane_pid);
-                return Err(self.respawn_failed(
+                return Err(lease_note(self.respawn_failed(
                     &failure_context,
                     current,
                     format!("respawn-pane failed: {error}"),
-                ));
+                )));
             }
         };
         let Some(new_pid) = replacement.pane_pid else {
-            return Err(self.respawn_failed(
+            return Err(lease_note(self.respawn_failed(
                 &failure_context,
                 None,
                 "respawn-pane returned no new pane pid".into(),
-            ));
+            )));
         };
         let failure = if new_pid == pane_pid || !crate::proc::process_alive(new_pid, None) {
             Some("respawn-pane did not produce a live replacement process".into())
@@ -318,7 +345,11 @@ impl Flock {
                 .map(|e| e.to_string())
         };
         if let Some(message) = failure {
-            return Err(self.respawn_failed(&failure_context, Some(new_pid), message));
+            return Err(lease_note(self.respawn_failed(
+                &failure_context,
+                Some(new_pid),
+                message,
+            )));
         }
         let mut fields = vec![
             (
@@ -347,11 +378,30 @@ impl Flock {
         // t4473: the respawned process is the pane's new root.
         fields.extend(super::launch_identity(request.argv, Some(new_pid)));
         self.record_launch(&pane_id, &fields);
+        // The kept leases now belong to the agent process in the replaced pane.
+        let mut leases_bound = 0;
+        if !kept.is_empty() {
+            let agent = crate::proc::pane_agent_pids(Some(new_pid))
+                .unwrap_or_default()
+                .into_iter()
+                .find(|process| crate::proc::agent_name(process.pid).is_some())
+                .map(|process| process.pid)
+                .unwrap_or(new_pid);
+            if let Some(start) = crate::proc::process_start(agent) {
+                leases_bound = services.runtime.block_on(tasks.bind_leases_after_respawn(
+                    &pane_id,
+                    &kept,
+                    (agent, start, crate::proc::agent_name(agent)),
+                    crate::clock::now_s(),
+                    crate::tasks::default_lease_s(),
+                ))?;
+            }
+        }
         self.respawn_metric("pane.respawn", &pane_id, "ok", Some(&reason));
         *self.last_message.lock().expect("last message lock") =
             format!("Respawned pane {pane_id} ({pane_pid} -> {new_pid})");
         Ok(
-            json!({"pane_id":pane_id,"old_pid":pane_pid,"pane_pid":new_pid,"argv":request.argv,"rollback_argv":rollback,"reason":reason}),
+            json!({"pane_id":pane_id,"old_pid":pane_pid,"pane_pid":new_pid,"argv":request.argv,"rollback_argv":rollback,"reason":reason,"leases_kept":kept,"leases_bound":leases_bound}),
         )
     }
     fn respawn_metric(&self, kind: &str, pane: &str, outcome: &str, reason: Option<&str>) {

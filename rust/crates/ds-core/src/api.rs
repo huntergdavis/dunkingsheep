@@ -3411,9 +3411,30 @@ pub fn h_lanes(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkEr
     if action == "model" {
         return lane_model(context, &args);
     }
+    if action == "switch_model" {
+        // t4473 slice D: restart the lane with another model through the guarded respawn.
+        let pane = args
+            .get("pane")
+            .and_then(Value::as_str)
+            .filter(|pane| !pane.trim().is_empty())
+            .ok_or_else(|| DunkError::Refused("switch model needs a pane id".into()))?
+            .to_string();
+        let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::to_string);
+        let (model, effort) = (text("model"), text("effort"));
+        let mut operation = |services: &crate::flock::respawn::RespawnServices<'_>| {
+            context.flock.switch_model(
+                services,
+                &pane,
+                model.as_deref(),
+                effort.as_deref(),
+                context.self_pane_id(),
+            )
+        };
+        return context.env.with_respawn_pane_env(&mut operation);
+    }
     if action != "list" {
         return Err(DunkError::Refused(
-            "lanes action must be list, set, project, model or planner".into(),
+            "lanes action must be list, set, project, model, switch_model or planner".into(),
         ));
     }
     let mut rows = context.flock.lanes();

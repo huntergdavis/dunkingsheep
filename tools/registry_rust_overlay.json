@@ -155,6 +155,7 @@
        "set",
        "project",
        "model",
+       "switch_model",
        "planner"
       ]
      }
@@ -202,7 +203,7 @@
      "model",
      {
       "type": "string",
-      "description": "model: the model the lane now runs. Recorded, not applied: nothing is typed into the pane or respawned. A lane may declare its own; the owner may declare any lane's."
+      "description": "model: the model the lane now runs (recorded, not applied). switch_model: the model to restart the lane with, resuming its session through the guarded respawn (owner role)."
      }
     ],
     [

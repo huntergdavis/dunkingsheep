@@ -1028,6 +1028,33 @@ fn lane(ns: &Map<String, Value>) -> Outcome {
                 }),
             )
         }
+        "switch-model" => {
+            let mut args = Map::new();
+            args.insert("action".into(), Value::String("switch_model".into()));
+            for key in ["pane", "model", "effort"] {
+                args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+            }
+            (
+                "lanes",
+                args,
+                Box::new(|result| {
+                    let switched = &result["switched"];
+                    format!(
+                        "{}: restarted with {} (session {} resumed; pid {} -> {}); task lease(s) kept: {}\n",
+                        crate::render_fleet::py_str(&result["pane_id"]),
+                        crate::render_fleet::py_str(&switched["model"]),
+                        crate::render_fleet::py_str(&switched["session"]),
+                        crate::render_fleet::py_str(&result["old_pid"]),
+                        crate::render_fleet::py_str(&result["pane_pid"]),
+                        result["leases_kept"]
+                            .as_array()
+                            .filter(|ids| !ids.is_empty())
+                            .map(|ids| ids.iter().map(crate::render_fleet::py_str).collect::<Vec<_>>().join(", "))
+                            .unwrap_or_else(|| "none".into()),
+                    )
+                }),
+            )
+        }
         "register" => {
             let mut args = Map::new();
             for key in ["pane", "role", "provider", "model", "label"] {

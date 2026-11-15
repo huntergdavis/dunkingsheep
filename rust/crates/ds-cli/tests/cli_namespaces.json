@@ -12815,6 +12815,90 @@
  {
   "argv": [
    "lane",
+   "switch-model",
+   "x",
+   "--model",
+   "x"
+  ],
+  "namespace": {
+   "command": "lane",
+   "effort": null,
+   "json": false,
+   "lane_command": "switch-model",
+   "model": "x",
+   "no_start_daemon": false,
+   "pane": "x",
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "lane",
+   "switch-model",
+   "x",
+   "--model",
+   "x",
+   "--json"
+  ],
+  "namespace": {
+   "command": "lane",
+   "effort": null,
+   "json": true,
+   "lane_command": "switch-model",
+   "model": "x",
+   "no_start_daemon": false,
+   "pane": "x",
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "--json",
+   "lane",
+   "switch-model",
+   "x",
+   "--model",
+   "x"
+  ],
+  "namespace": {
+   "command": "lane",
+   "effort": null,
+   "json": true,
+   "lane_command": "switch-model",
+   "model": "x",
+   "no_start_daemon": false,
+   "pane": "x",
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "lane",
+   "switch-model",
+   "x",
+   "--model",
+   "x",
+   "--effort",
+   "x"
+  ],
+  "namespace": {
+   "command": "lane",
+   "effort": "x",
+   "json": false,
+   "lane_command": "switch-model",
+   "model": "x",
+   "no_start_daemon": false,
+   "pane": "x",
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "lane",
    "planner",
    "grant"
   ],

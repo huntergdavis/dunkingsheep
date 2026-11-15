@@ -1,0 +1,10 @@
+usage: dunkingsheep lane switch-model [-h] --model MODEL [--effort EFFORT]
+                                      pane
+
+positional arguments:
+  pane             live pane id
+
+options:
+  -h, --help       show this help message and exit
+  --model MODEL    the model to restart the lane with
+  --effort EFFORT  the reasoning effort

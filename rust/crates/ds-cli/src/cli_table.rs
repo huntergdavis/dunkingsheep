@@ -2515,6 +2515,24 @@ pub static ROOT: Cmd = Cmd {
                     ],
                 },
                 Cmd {
+                    name: "switch-model", aliases: &[],
+                    help: Some("restart a lane with another model, resuming its session (owner role)"),
+                    raw: false,
+                    raw_text: false,
+                    about: None,
+                    epilog: None,
+                    args: &[
+                        Arg { id: "json", dest: "json", tri: false, default_int: false, flags: &["--json"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: None, hidden: true, metavar: None, version: None },
+                        Arg { id: "pane", dest: "pane", tri: false, default_int: false, flags: &[], positional: true, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: true, help: Some("live pane id"), hidden: false, metavar: None, version: None },
+                        Arg { id: "model", dest: "model", tri: false, default_int: false, flags: &["--model"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: true, help: Some("the model to restart the lane with"), hidden: false, metavar: None, version: None },
+                        Arg { id: "effort", dest: "effort", tri: false, default_int: false, flags: &["--effort"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("the reasoning effort"), hidden: false, metavar: None, version: None },
+                    ],
+                    groups: &[],
+                    sub_dest: None, sub_metavar: None, sub_required: false,
+                    subs: &[
+                    ],
+                },
+                Cmd {
                     name: "planner", aliases: &[],
                     help: Some("owner-controlled planner grants and task project scope"),
                     raw: false,
