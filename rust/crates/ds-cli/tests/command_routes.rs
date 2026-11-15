@@ -157,8 +157,24 @@ fn assert_matches_python(args: &[&str]) {
         let rust_guide = std::str::from_utf8(&rust.stdout).unwrap();
         let mut recovery_changes = 0;
         let mut author_changes = 0;
+        let mut human_address_changes = 0;
         for entry in overlay["replacements"].as_array().unwrap() {
             let old = entry["old"].as_str().unwrap();
+            if old == "can never borrow each other's identity.\n" {
+                let new = entry["new"].as_str().unwrap();
+                assert_eq!(
+                    text.matches(old).count(),
+                    1,
+                    "archived sender guidance changed"
+                );
+                assert!(
+                    rust_guide.contains(new),
+                    "explicit human-recipient guidance missing"
+                );
+                text = text.replacen(old, new, 1);
+                human_address_changes += 1;
+                continue;
+            }
             if old == "cleared with `task unblock`.\n" {
                 let new = entry["new"].as_str().unwrap();
                 assert_eq!(
@@ -194,6 +210,7 @@ fn assert_matches_python(args: &[&str]) {
         }
         assert_eq!(recovery_changes, 3);
         assert_eq!(author_changes, 1);
+        assert_eq!(human_address_changes, 1);
         text.into_bytes()
     } else {
         python.stdout
