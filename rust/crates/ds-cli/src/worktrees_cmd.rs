@@ -414,6 +414,332 @@ pub fn disk_command(
     }
 }
 
+/// `worktrees inventory` reads every worktree within this time unless `--max-seconds` says
+/// otherwise; past it the report is partial and says how much it left out.
+// 120 s left 95 of 324 live worktrees uninspected on 2026-11-15; a full run took about 4 min.
+pub const INVENTORY_MAX_SECONDS: f64 = 300.0;
+const MAIN_REF: &str = "refs/remotes/origin/main";
+
+/// A read-only git call: `GIT_OPTIONAL_LOCKS=0` stops `git status` refreshing the index, so not
+/// even a lock file is written.
+fn git_read(dir: &Path, args: &[&str]) -> Option<Output> {
+    run_bounded(
+        Command::new("git")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .arg("-C")
+            .arg(dir)
+            .args(args),
+        GIT_TIMEOUT,
+    )
+    .ok()
+}
+
+fn git_text(dir: &Path, args: &[&str]) -> Option<String> {
+    git_read(dir, args)
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// What git says about one worktree, compared with `main_ref`. No fetch: the main branch is
+/// the local copy of the remote ref, as old as the last fetch.
+pub fn git_state(dir: &Path, main_ref: &str) -> ds_core::worktree_inventory::GitState {
+    use ds_core::worktree_inventory::{count_status, GitState};
+    let status = git_text(dir, &["status", "--porcelain", "--untracked-files=normal"]);
+    let (changed, untracked) = match status.as_deref().map(count_status) {
+        Some((changed, untracked)) => (Some(changed), Some(untracked)),
+        None => (None, None),
+    };
+    // `merge-base --is-ancestor` answers with its exit code: 0 yes, 1 no, anything else unknown.
+    let merged =
+        git_read(dir, &["merge-base", "--is-ancestor", "HEAD", main_ref]).and_then(|output| {
+            match output.status.code() {
+                Some(0) => Some(true),
+                Some(1) => Some(false),
+                _ => None,
+            }
+        });
+    let unpushed = git_text(
+        dir,
+        &[
+            "rev-list",
+            "--count",
+            "HEAD",
+            "--not",
+            main_ref,
+            "--remotes",
+        ],
+    )
+    .and_then(|text| text.trim().parse().ok());
+    let last_author = git_text(dir, &["log", "-1", "--format=%an"])
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty());
+    GitState {
+        merged,
+        changed,
+        untracked,
+        unpushed,
+        last_author,
+    }
+}
+
+/// The inventory for `repo` and `root`, with the machine's readings supplied: everything but
+/// the process table, which the caller reads. Exit 2 when the repository's worktrees cannot be
+/// listed.
+pub fn inventory_for(
+    repo: &Path,
+    root: &Path,
+    panes: &[(String, PathBuf)],
+    busy: &Result<Vec<PathBuf>, String>,
+    link: &dyn Fn(&Path) -> PrLink,
+    max_seconds: f64,
+) -> Result<Value, String> {
+    let listing = git_text(repo, &["worktree", "list", "--porcelain"])
+        .ok_or_else(|| format!("{}: git worktree list failed", repo.display()))?;
+    let worktrees = ds_core::worktree_inventory::parse_worktree_list(&listing);
+    let git = |dir: &Path| git_state(dir, MAIN_REF);
+    let sources = ds_core::worktree_inventory::Sources {
+        git: &git,
+        link,
+        panes,
+        busy,
+    };
+    let budget = worktree_disk::Budget::new(max_seconds, usize::MAX);
+    Ok(ds_core::worktree_inventory::inventory(
+        root,
+        MAIN_REF,
+        &worktrees,
+        &sources,
+        wall_now(),
+        &budget,
+    ))
+}
+
+/// `worktrees inventory [--repo DIR] [--root DIR] [--max-seconds S]` (t4705): the read-only
+/// inventory of every worktree of the repository. It runs no git write (no prune, fetch or
+/// remove) and deletes nothing. Exit 2 when the repository cannot be read.
+pub fn inventory_command(
+    repo: Option<&str>,
+    root: Option<&str>,
+    max_seconds: Option<f64>,
+    json: bool,
+) -> Outcome {
+    let root = default_root(root);
+    let repo = match repo.filter(|repo| !repo.is_empty()) {
+        Some(repo) => PathBuf::from(repo),
+        None => std::env::current_dir().unwrap_or_default(),
+    };
+    let uid = std::fs::metadata("/proc/self")
+        .map(|meta| std::os::unix::fs::MetadataExt::uid(&meta))
+        .unwrap_or(u32::MAX);
+    let scan = worktree_disk::busy_paths(Path::new("/proc"), &root, uid);
+    let busy = scan
+        .as_ref()
+        .map(|scan| scan.paths.clone())
+        .map_err(Clone::clone);
+    let panes = ds_core::worktree_inventory::pane_dirs(Path::new("/proc"));
+    let cache = PrCache::default();
+    let link = |dir: &Path| live_link(dir, &cache, None);
+    match inventory_for(
+        &repo,
+        &root,
+        &panes,
+        &busy,
+        &link,
+        max_seconds.unwrap_or(INVENTORY_MAX_SECONDS),
+    ) {
+        Ok(mut report) => {
+            if let Ok(scan) = &scan {
+                worktree_disk::note_uninspected(
+                    &mut report,
+                    scan.uninspected_own,
+                    scan.uninspected_other,
+                );
+            }
+            Outcome {
+                stdout: if json {
+                    format!("{}\n", sorted_json(&report))
+                } else {
+                    ds_core::worktree_inventory::render_text(&report)
+                },
+                stderr: String::new(),
+                code: 0,
+            }
+        }
+        Err(error) => Outcome {
+            stdout: String::new(),
+            stderr: format!("worktrees inventory: {error}\n"),
+            code: 2,
+        },
+    }
+}
+
+#[cfg(test)]
+mod inventory_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn run(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "Fixture Lane (%42)")
+            .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Fixture Lane (%42)")
+            .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    fn tagged_target(dir: &Path) {
+        let target = dir.join("rust/target/debug");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("blob"), vec![0u8; 8192]).unwrap();
+        std::fs::write(
+            dir.join("rust/target/CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n# created by cargo\n",
+        )
+        .unwrap();
+    }
+
+    /// A repository with a fake `origin/main`, and one worktree per class under a root, plus
+    /// one outside it, one deleted, and a plain directory with a cache that is not a worktree.
+    #[test]
+    fn every_class_a_symlinked_root_a_missing_dir_and_a_pane_in_a_subdirectory() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("file"), "one\n").unwrap();
+        // As in the real repository, build caches are ignored, so they do not make a tree dirty.
+        std::fs::write(repo.join(".gitignore"), "target/\n").unwrap();
+        run(&repo, &["add", "file", ".gitignore"]);
+        run(&repo, &["commit", "-q", "-m", "one"]);
+        run(&repo, &["update-ref", MAIN_REF, "HEAD"]);
+        let real_root = home.path().join("work");
+        std::fs::create_dir_all(&real_root).unwrap();
+        // The root is given through a symbolic link; worktrees are registered by real path.
+        let root = home.path().join("work-link");
+        std::os::unix::fs::symlink(&real_root, &root).unwrap();
+        let add = |name: &str, base: &Path| {
+            let path = base.join(name);
+            run(
+                &repo,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    name,
+                    path.to_str().unwrap(),
+                    "main",
+                ],
+            );
+            path
+        };
+        let merged = add("308-merged", &real_root);
+        tagged_target(&merged);
+        let unmerged = add("unmerged", &real_root);
+        std::fs::write(unmerged.join("file"), "two\n").unwrap();
+        run(&unmerged, &["commit", "-q", "-am", "two"]);
+        let dirty = add("dirty", &real_root);
+        std::fs::write(dirty.join("scratch"), "x").unwrap();
+        let busy = add("busy", &real_root);
+        std::fs::create_dir_all(busy.join("deep/er")).unwrap();
+        let outside = add("outside", home.path());
+        let gone = add("gone", &real_root);
+        std::fs::remove_dir_all(&gone).unwrap();
+        let clone = real_root.join("plain-copy");
+        std::fs::create_dir_all(clone.join(".git")).unwrap();
+        tagged_target(&clone);
+
+        let panes = vec![("%9".to_string(), busy.join("deep/er"))];
+        let link = |_: &Path| PrLink {
+            state: "merged".into(),
+            ..PrLink::default()
+        };
+        let report = inventory_for(&repo, &root, &panes, &Ok(vec![]), &link, 60.0).unwrap();
+        let class_of = |path: &Path| {
+            report["worktrees"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["path"].as_str() == path.to_str())
+                .unwrap_or_else(|| panic!("{} not listed: {report:#}", path.display()))
+                .clone()
+        };
+        assert_eq!(class_of(&merged)["class"], "clean-merged");
+        assert_eq!(class_of(&merged)["likely_owner"], "%308");
+        assert_eq!(
+            class_of(&merged)["likely_owner_basis"],
+            "directory name prefix"
+        );
+        assert_eq!(class_of(&unmerged)["class"], "clean-unmerged");
+        assert_eq!(class_of(&unmerged)["unpushed_commits"], 1);
+        assert_eq!(class_of(&unmerged)["likely_owner"], "%42");
+        assert_eq!(class_of(&dirty)["class"], "dirty");
+        assert_eq!(class_of(&dirty)["untracked_files"], 1);
+        assert_eq!(report["totals"]["dirty_untracked_only"], 1);
+        assert_eq!(class_of(&busy)["class"], "in-use");
+        assert_eq!(class_of(&busy)["live_panes"], json!(["%9"]));
+        assert_eq!(class_of(&outside)["class"], "unmanaged-location");
+        assert_eq!(class_of(&gone)["class"], "missing");
+        assert_eq!(class_of(&repo)["main_checkout"], true);
+
+        // The merged worktree's cache: tagged, under 12 h old, so the cleaner keeps it for that.
+        let target = &class_of(&merged)["targets"][0];
+        assert_eq!(target["cargo_tag"], true);
+        assert_eq!(target["size_is_lower_bound"], false);
+        assert_eq!(
+            target["cleaner_keep_reasons"],
+            json!(["changed in the last 12 hours"])
+        );
+        // The plain directory with a cache is reported, not lost.
+        assert_eq!(
+            report["unregistered"][0]["path"],
+            json!(root.join("plain-copy")),
+            "listed under the root as given"
+        );
+        assert_eq!(
+            report["unregistered"].as_array().unwrap().len(),
+            1,
+            "registered worktrees are not repeated"
+        );
+        assert_eq!(report["unregistered"][0]["kind"], "a separate git clone");
+        assert_eq!(report["totals"]["by_class"]["missing"]["worktrees"], 1);
+        assert_eq!(report["partial"], false);
+
+        // Read-only: no worktree was pruned and no lock or index change was left behind.
+        let listing = git_text(&repo, &["worktree", "list", "--porcelain"]).unwrap();
+        assert!(
+            listing.contains("gone"),
+            "the missing worktree is still registered"
+        );
+        assert!(!repo.join(".git/index.lock").exists());
+    }
+
+    #[test]
+    fn a_budget_of_zero_inspects_nothing_and_says_so() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run(&repo, &["init", "-q", "-b", "main"]);
+        let link = |_: &Path| PrLink::default();
+        let report = inventory_for(&repo, home.path(), &[], &Ok(vec![]), &link, 0.0).unwrap();
+        assert_eq!(report["partial"], true);
+        assert_eq!(report["not_inspected"]["worktrees"], 1);
+    }
+
+    #[test]
+    fn a_directory_that_is_not_a_repository_is_a_usage_error() {
+        let home = tempfile::tempdir().unwrap();
+        let outcome = inventory_command(home.path().to_str(), home.path().to_str(), None, true);
+        assert_eq!(outcome.code, 2, "{}", outcome.stderr);
+        assert!(outcome.stderr.starts_with("worktrees inventory: "));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

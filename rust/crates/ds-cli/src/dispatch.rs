@@ -3934,6 +3934,12 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                 ns.get("max_dirs").and_then(Value::as_i64),
                 json,
             ),
+            Some("inventory") => crate::worktrees_cmd::inventory_command(
+                text(ns, "repo"),
+                text(ns, "root"),
+                ns.get("max_seconds").and_then(Value::as_f64),
+                json,
+            ),
             Some(other) => not_ported(&format!("worktrees {other}")),
             None => not_ported("worktrees"),
         },

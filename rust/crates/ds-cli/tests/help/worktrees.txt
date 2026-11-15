@@ -4,6 +4,8 @@ positional arguments:
   <subcommand>
     disk        read-only report: size, age, pull request and build caches of
                 each directory
+    inventory   read-only: every worktree of the repository with its class,
+                build caches and why the cleaner keeps each
     clean       delete merged worktrees' Cargo build caches; a dry run unless
                 --apply
 

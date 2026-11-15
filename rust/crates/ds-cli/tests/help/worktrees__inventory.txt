@@ -1,0 +1,10 @@
+usage: dunkingsheep worktrees inventory [-h] [--repo DIR] [--root DIR]
+                                        [--max-seconds S] [--json]
+
+options:
+  -h, --help       show this help message and exit
+  --repo DIR       the repository (default: the current directory)
+  --root DIR       the worktree root (default: ~/workspace/.dunk-port-work)
+  --max-seconds S  stop after S seconds and mark the report partial (default:
+                   300)
+  --json

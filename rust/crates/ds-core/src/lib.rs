@@ -84,6 +84,7 @@ pub mod watchdog_deadman;
 pub mod wire_json;
 pub mod worktree_clean;
 pub mod worktree_disk;
+pub mod worktree_inventory;
 
 pub use error::{refusal, DunkError};
 

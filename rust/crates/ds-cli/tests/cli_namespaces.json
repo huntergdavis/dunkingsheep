@@ -16050,6 +16050,116 @@
  {
   "argv": [
    "worktrees",
+   "inventory"
+  ],
+  "namespace": {
+   "command": "worktrees",
+   "json": false,
+   "max_seconds": null,
+   "no_start_daemon": false,
+   "repo": null,
+   "root": null,
+   "self_pane": null,
+   "socket": null,
+   "worktrees_command": "inventory"
+  }
+ },
+ {
+  "argv": [
+   "worktrees",
+   "inventory",
+   "--json"
+  ],
+  "namespace": {
+   "command": "worktrees",
+   "json": true,
+   "max_seconds": null,
+   "no_start_daemon": false,
+   "repo": null,
+   "root": null,
+   "self_pane": null,
+   "socket": null,
+   "worktrees_command": "inventory"
+  }
+ },
+ {
+  "argv": [
+   "--json",
+   "worktrees",
+   "inventory"
+  ],
+  "namespace": {
+   "command": "worktrees",
+   "json": true,
+   "max_seconds": null,
+   "no_start_daemon": false,
+   "repo": null,
+   "root": null,
+   "self_pane": null,
+   "socket": null,
+   "worktrees_command": "inventory"
+  }
+ },
+ {
+  "argv": [
+   "worktrees",
+   "inventory",
+   "--repo",
+   "x"
+  ],
+  "namespace": {
+   "command": "worktrees",
+   "json": false,
+   "max_seconds": null,
+   "no_start_daemon": false,
+   "repo": "x",
+   "root": null,
+   "self_pane": null,
+   "socket": null,
+   "worktrees_command": "inventory"
+  }
+ },
+ {
+  "argv": [
+   "worktrees",
+   "inventory",
+   "--root",
+   "x"
+  ],
+  "namespace": {
+   "command": "worktrees",
+   "json": false,
+   "max_seconds": null,
+   "no_start_daemon": false,
+   "repo": null,
+   "root": "x",
+   "self_pane": null,
+   "socket": null,
+   "worktrees_command": "inventory"
+  }
+ },
+ {
+  "argv": [
+   "worktrees",
+   "inventory",
+   "--max-seconds",
+   "1.5"
+  ],
+  "namespace": {
+   "command": "worktrees",
+   "json": false,
+   "max_seconds": 1.5,
+   "no_start_daemon": false,
+   "repo": null,
+   "root": null,
+   "self_pane": null,
+   "socket": null,
+   "worktrees_command": "inventory"
+  }
+ },
+ {
+  "argv": [
+   "worktrees",
    "clean"
   ],
   "namespace": {
