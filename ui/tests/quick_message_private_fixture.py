@@ -1,4 +1,4 @@
-"""t4644: the quick message, end to end on a PRIVATE fixture: a real daemon, a real desk and a
+"""t4644 (manual, NOT in CI: not named *_browser.py on purpose, it needs built binaries): the quick message, end to end on a PRIVATE fixture: a real daemon, a real desk and a
 real browser, against fixture state only (private tmux server, config dir, socket and a
 fixture-only web token and password). Nothing live is touched.
 
