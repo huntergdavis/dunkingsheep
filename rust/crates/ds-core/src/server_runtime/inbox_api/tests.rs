@@ -1557,3 +1557,59 @@ fn inbox_body_view_only_owner_and_web_can_retrieve_even_with_agent_opt_in() {
     assert!(store.get_message(&id).unwrap().read_at.is_none());
     dispatcher.close();
 }
+
+#[test]
+fn inbox_vp_recipient_snapshot_is_independent_of_service_token_role() {
+    let (_dir, services) = make_services("thread-target-role", factory(None), None);
+    let dispatcher = services.dispatcher(handlers());
+    let store = services.flock().stores().inbox.unwrap();
+    let (web, system) = services
+        .flock()
+        .with_roles(|roles, _| {
+            Ok((
+                roles.issue_token("web", Some("private-web-fixture"), None)?,
+                roles.issue_token("system", Some("private-system-fixture"), None)?,
+            ))
+        })
+        .unwrap();
+    for (command, token, kind, sender) in [
+        ("inbox_send_human", &web, "human", "human"),
+        ("inbox_send", &system, "vp", "system"),
+    ] {
+        let ctx = RequestCtx {
+            service_token: Some(token.clone()),
+            socket_peer: Some(true),
+            socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
+            ..RequestCtx::default()
+        };
+        let sent = dispatcher
+            .dispatch(
+                command,
+                &json!({"to":"w2:p2","body":"recorded target role","notify":false}),
+                &ctx,
+            )
+            .unwrap();
+        let info = store
+            .thread_info(sent["message_id"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(info["conversation_kind"], kind);
+        assert_eq!(info["sender_kind"], sender);
+        assert_eq!(info["recipient_route_kind"], "vp");
+    }
+    let worker = dispatcher
+        .dispatch(
+            "inbox_send",
+            &json!({"to":"w2:p2","body":"worker coordination","notify":false}),
+            &request("w1:p1"),
+        )
+        .unwrap();
+    let info = store
+        .thread_info(worker["message_id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(info["conversation_kind"], "vp");
+    assert_eq!(info["sender_kind"], "agent");
+    assert_eq!(info["recipient_route_kind"], "vp");
+    dispatcher.close();
+}

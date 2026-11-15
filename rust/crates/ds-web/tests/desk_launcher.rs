@@ -19,6 +19,15 @@ fn production_launcher_handles_term_as_soon_as_listener_is_bound() {
 }
 
 fn exercise(early_term: bool) {
+    struct PrivateDesk(std::process::Child);
+    impl Drop for PrivateDesk {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    // The listener binds before persistent-auth initialization performs its KDF.
+    const STARTUP_CEILING: Duration = Duration::from_secs(120);
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     fs::create_dir_all(root.join("ui/dist")).unwrap();
@@ -32,37 +41,37 @@ fn exercise(early_term: bool) {
     let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = reservation.local_addr().unwrap().port();
     drop(reservation);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ds-desk"))
-        .current_dir(root)
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("HOME", root)
-        .env("DUNKINGSHEEP_DIR", root.join("config"))
-        .env("VP_DATA_DIR", root.join("data"))
-        .env("DUNKINGSHEEP_SERVICE_TOKEN_FILE", root.join("token"))
-        .env("VP_PASSWORD", "fixture-password")
-        .env("VP_BIND", "127.0.0.1")
-        .env("VP_PORT", port.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let until = Instant::now() + Duration::from_secs(20);
+    let mut child = PrivateDesk(
+        Command::new(env!("CARGO_BIN_EXE_ds-desk"))
+            .current_dir(root)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", root)
+            .env("DUNKINGSHEEP_DIR", root.join("config"))
+            .env("VP_DATA_DIR", root.join("data"))
+            .env("DUNKINGSHEEP_SERVICE_TOKEN_FILE", root.join("token"))
+            .env("VP_PASSWORD", "fixture-password")
+            .env("VP_BIND", "127.0.0.1")
+            .env("VP_PORT", port.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let until = Instant::now() + STARTUP_CEILING;
     let mut stream = loop {
         if let Ok(s) = TcpStream::connect(("127.0.0.1", port)) {
             break s;
         }
         assert!(
-            child.try_wait().unwrap().is_none(),
+            child.0.try_wait().unwrap().is_none(),
             "desk exited before listening"
         );
         assert!(Instant::now() < until, "desk did not start");
         thread::sleep(Duration::from_millis(50));
     };
     if !early_term {
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        stream.set_read_timeout(Some(STARTUP_CEILING)).unwrap();
         stream
             .write_all(b"GET /api/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
             .unwrap();
@@ -74,18 +83,18 @@ fn exercise(early_term: bool) {
     drop(stream);
     assert!(Command::new("kill")
         .arg("-TERM")
-        .arg(child.id().to_string())
+        .arg(child.0.id().to_string())
         .status()
         .unwrap()
         .success());
     let until = Instant::now() + Duration::from_secs(20);
     loop {
-        if let Some(status) = child.try_wait().unwrap() {
+        if let Some(status) = child.0.try_wait().unwrap() {
             assert!(status.success(), "{status}");
             break;
         }
         if Instant::now() >= until {
-            let _ = child.kill();
+            let _ = child.0.kill();
             panic!("desk did not shut down");
         }
         thread::sleep(Duration::from_millis(50));

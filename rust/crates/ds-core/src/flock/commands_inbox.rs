@@ -715,9 +715,16 @@ impl Flock {
             } else {
                 ThreadSender::System
             };
-            let recipient_is_vp = pane_id
-                .as_deref()
-                .is_some_and(|pane| env.caller_role(pane).is_ok_and(|r| r == "owner"));
+            let recipient_is_vp = match pane_id.as_deref() {
+                None => false,
+                Some(pane) => {
+                    let info = env
+                        .list_panes()
+                        .into_iter()
+                        .find(|row| row["pane_id"].as_str() == Some(pane));
+                    self.registered_pane_role(pane, info.as_ref())?.as_deref() == Some("owner")
+                }
+            };
             let kind = if actor == ThreadSender::Human
                 || crate::inbox::normalise_mailbox(&mailbox) == "owner"
             {

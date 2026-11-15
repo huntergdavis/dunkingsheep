@@ -428,7 +428,7 @@ async fn api_pane_inbox(
             ),
         );
     }
-    Json(json!({
+    let mut result = json!({
         "ok": true,
         "pane": pane,
         "route": "inbox",
@@ -438,10 +438,22 @@ async fn api_pane_inbox(
         "state": stored["state"],
         "notified": stored["notified"] == true,
         "redirected": stored["redirected"],
-        "thread": stored["thread"],
         "note": "Stored in the lane's inbox. It has not been read until the lane opens its mail.",
-    }))
-    .into_response()
+    });
+    if human {
+        let thread = &stored["thread"];
+        if !ds_core::inbox::valid_message_id(message_id)
+            || thread["thread_version"] != 1
+            || thread["root_id"] != message_id
+            || thread.get("parent_id") != Some(&Value::Null)
+            || thread["conversation_kind"] != "human"
+            || thread["sender_kind"] != "human"
+        {
+            return detail(StatusCode::BAD_GATEWAY,"The human message receipt could not be verified. Check your inbox before sending again.");
+        }
+        result["thread"] = thread.clone();
+    }
+    Json(result).into_response()
 }
 /// A lane's unread inbox count (t3335). The roster count is filed under both the lane's pane id
 /// and its name; Python added the two lookups, which doubled the count whenever both keys named
@@ -1208,6 +1220,34 @@ mod tests {
             assert_eq!(inbox(f, r#"{"pane":"%9","text":"hi"}"#).0, 502);
         }
     }
+
+    #[test]
+    fn pane_inbox_owner_session_uses_private_producer_and_confirms_human_root() {
+        let thread = json!({"thread_version":1,"root_id":"i77","parent_id":null,"conversation_kind":"human","sender_kind":"human"});
+        for returned in [
+            thread.clone(),
+            Value::Null,
+            json!({"thread_version":1,"root_id":"i8","parent_id":null,"conversation_kind":"human","sender_kind":"human"}),
+        ] {
+            let f = Fake::setup();
+            f.reply("delivery_capability", json!({"alive":true}));
+            f.reply("inbox_send_human",json!({"message_id":"i77","mailbox":"stable-lane","state":"queued","notified":false,"thread":returned}));
+            let (status, body) = http(
+                owner_app(f.clone()),
+                "/api/pane-inbox",
+                Some(r#"{"pane":"%9","text":"human message"}"#),
+            );
+            if returned == thread {
+                assert_eq!(status, 200);
+                assert_eq!(body["thread"], thread);
+            } else {
+                assert_eq!(status, 502);
+                assert_ne!(body["outcome"], "stored");
+            }
+            assert_eq!(f.calls(), vec!["delivery_capability", "inbox_send_human"]);
+        }
+    }
+
     #[test]
     fn pane_send_auth_precedes_json_and_backend() {
         for body in ["{", r#"{"pane":"%9","text":"hi"}"#] {

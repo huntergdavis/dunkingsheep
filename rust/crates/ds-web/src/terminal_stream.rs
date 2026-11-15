@@ -1137,7 +1137,7 @@ mod tests {
         let server = PrivateServer(socket.clone());
         let tmux = |args: &[&str]| {
             let output = std::process::Command::new("tmux")
-                .args(["-L", &server.0])
+                .args(["-L", &server.0, "-f", "/dev/null"])
                 .args(args)
                 .output()
                 .unwrap();
@@ -1257,7 +1257,17 @@ mod tests {
         );
         let server = PrivateServer(socket.clone());
         let started = std::process::Command::new("tmux")
-            .args(["-L", &server.0, "new-session", "-d", "-s", "fixture", "cat"])
+            .args([
+                "-L",
+                &server.0,
+                "-f",
+                "/dev/null",
+                "new-session",
+                "-d",
+                "-s",
+                "fixture",
+                "cat",
+            ])
             .output()
             .unwrap();
         assert!(started.status.success());
