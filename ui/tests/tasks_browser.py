@@ -3,7 +3,7 @@ import json, os, re, threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect, sync_playwright
 
 DIST = Path(__file__).resolve().parents[1] / 'dist'
 class Handler(SimpleHTTPRequestHandler):
@@ -63,13 +63,19 @@ try:
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'),width
             if os.environ.get('TASKS_SCREENSHOT_DIR'):
                 page.screenshot(path=str(Path(os.environ['TASKS_SCREENSHOT_DIR'])/f'tasks-{width}.png'))
-            seen=[]; number=1
-            while True:
-                seen.extend(page.locator('.tasks-table tbody tr td:first-child strong').all_text_contents())
-                if page.get_by_role('button',name='Next page',exact=True).is_disabled(): break
-                number+=1
-                page.get_by_role('button',name='Next page',exact=True).click()
-                page.get_by_text(re.compile(rf'^Page {number} ·')).wait_for()
+            # 235 rows at 50 per page is 5 pages. Wait on each page's own state rather than reading
+            # the Next button while a page is still loading (a slow runner stopped early at page 2).
+            seen=[]; cells=page.locator('.tasks-table tbody tr td:first-child strong'); next_button=page.get_by_role('button',name='Next page',exact=True)
+            for number in range(1,6):
+                if number>1:
+                    previous_first=cells.first.text_content()
+                    expect(next_button).to_be_enabled()
+                    next_button.click()
+                    page.get_by_text(re.compile(rf'^Page {number} ·')).wait_for()
+                    expect(cells.first).not_to_have_text(previous_first)
+                expect(cells).to_have_count(50 if number<5 else 35)
+                seen.extend(cells.all_text_contents())
+            expect(next_button).to_be_disabled()
             assert len(seen)==235 and len(set(seen))==235,(width,len(seen))
             assert number==5
             page.get_by_role('button',name='Previous page',exact=True).click()
