@@ -1890,14 +1890,13 @@ fn inbox_fetch_checks_parent_mailbox_before_destination_writes() {
         [&own],
     )
     .unwrap();
-    let (web, system, unbound_worker) = services
+    let (web, system) = services
         .flock()
         .with_roles(|roles, _| {
             roles.register("w4:p4", "planner", None, None, None, None, None, None)?;
             Ok((
                 roles.issue_token("web", Some("private-fetch-web"), None)?,
                 roles.issue_token("system", Some("private-fetch-system"), None)?,
-                roles.issue_token("worker", Some("private-fetch-unbound"), None)?,
             ))
         })
         .unwrap();
@@ -1993,7 +1992,6 @@ fn inbox_fetch_checks_parent_mailbox_before_destination_writes() {
     }
     let unbound_dest = dir.path().join("unbound-copy");
     let unbound = RequestCtx {
-        service_token: Some(unbound_worker),
         socket_peer: Some(true),
         socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
         ..Default::default()
