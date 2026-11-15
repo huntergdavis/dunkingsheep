@@ -134,6 +134,15 @@ pub struct Applied {
 /// nothing is ever removed.
 pub fn apply(argv: &[String], template: &Template, scope_label: &str) -> Applied {
     let mut out = argv.to_vec();
+    // t5383: added flags go right after the program, never at the end: a launch command often
+    // ends with a prompt or a '--', after which a flag is read as text or a positional.
+    let mut at = super::launched_program_index(argv).map_or(out.len(), |index| index + 1);
+    let mut insert = |out: &mut Vec<String>, tokens: &[&str]| {
+        for token in tokens {
+            out.insert(at, (*token).to_string());
+            at += 1;
+        }
+    };
     let mut sources = Map::new();
     let mut would_refuse = None;
     let program = super::launched_program(argv).unwrap_or("").to_lowercase();
@@ -157,7 +166,7 @@ pub fn apply(argv: &[String], template: &Template, scope_label: &str) -> Applied
                 let source = if bypass || has_flag(argv, names) {
                     "explicit".to_string()
                 } else if let Some(value) = value {
-                    out.extend([flag.to_string(), value.clone()]);
+                    insert(&mut out, &[flag, value.as_str()]);
                     scope_label.to_string()
                 } else {
                     "unset".to_string()
@@ -174,7 +183,7 @@ pub fn apply(argv: &[String], template: &Template, scope_label: &str) -> Applied
             let source = if has_flag(argv, &["--dangerously-skip-permissions"]) {
                 "explicit"
             } else if template.claude_permission_bypass {
-                out.push("--dangerously-skip-permissions".into());
+                insert(&mut out, &["--dangerously-skip-permissions"]);
                 scope_label
             } else {
                 "unset"
@@ -265,13 +274,13 @@ mod tests {
             applied.argv,
             v(&[
                 "codex",
-                "-m",
-                "MODEL",
-                "--no-daemon",
                 "-s",
                 "danger-full-access",
                 "-a",
-                "never"
+                "never",
+                "-m",
+                "MODEL",
+                "--no-daemon"
             ])
         );
         assert_eq!(applied.sources["sandbox"], "project:LookingGlassNX");
@@ -286,7 +295,7 @@ mod tests {
         assert_eq!(applied.sources["approval"], "project:LookingGlassNX");
         assert_eq!(
             applied.argv,
-            v(&["codex", "-s", "workspace-write", "-a", "never"])
+            v(&["codex", "-a", "never", "-s", "workspace-write"])
         );
         // (b) no template at all: WARN-ONLY: launched unchanged, with the would-refuse line.
         let applied = apply(
@@ -324,6 +333,60 @@ mod tests {
             .argv,
             v(&["claude", "--dangerously-skip-permissions"]),
             "a false/absent field never removes a flag"
+        );
+        // t5383: never after a trailing prompt or '--', and after an env prefix's program.
+        assert_eq!(
+            apply(
+                &v(&["codex", "-m", "M", "You are the writer."]),
+                &lgnx,
+                "project:LookingGlassNX"
+            )
+            .argv,
+            v(&[
+                "codex",
+                "-s",
+                "danger-full-access",
+                "-a",
+                "never",
+                "-m",
+                "M",
+                "You are the writer."
+            ])
+        );
+        assert_eq!(
+            apply(
+                &v(&["env", "TMPDIR=/s/x", "codex", "--", "prompt"]),
+                &lgnx,
+                "project:LookingGlassNX"
+            )
+            .argv,
+            v(&[
+                "env",
+                "TMPDIR=/s/x",
+                "codex",
+                "-s",
+                "danger-full-access",
+                "-a",
+                "never",
+                "--",
+                "prompt"
+            ])
+        );
+        assert_eq!(
+            apply(
+                &v(&["claude", "--model", "M", "-p", "hello"]),
+                &global,
+                "global"
+            )
+            .argv,
+            v(&[
+                "claude",
+                "--dangerously-skip-permissions",
+                "--model",
+                "M",
+                "-p",
+                "hello"
+            ])
         );
         // Other programs are untouched.
         assert_eq!(
