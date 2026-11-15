@@ -328,6 +328,8 @@ impl Store {
         if let Some(view) = thread_view {
             if view == "historical" {
                 sql.push_str(" AND NOT EXISTS (SELECT 1 FROM message_threads t WHERE t.message_id = messages.id AND t.thread_version = 1 AND t.conversation_kind IN ('human', 'vp'))");
+            } else if view == "human" {
+                sql.push_str(" AND EXISTS (SELECT 1 FROM message_threads t WHERE t.message_id = messages.id AND t.thread_version = 1 AND (t.conversation_kind = 'human' OR (t.conversation_kind = 'vp' AND t.sender_kind = 'agent' AND EXISTS (SELECT 1 FROM message_thread_routes r WHERE r.message_id = t.message_id AND r.recipient_kind = 'human'))))");
             } else {
                 sql.push_str(" AND EXISTS (SELECT 1 FROM message_threads t WHERE t.message_id = messages.id AND t.thread_version = 1 AND t.conversation_kind = ?)");
                 values.push(SqlValue::Text(view.to_owned()));

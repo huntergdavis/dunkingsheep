@@ -2066,12 +2066,7 @@ pub fn h_owner_delivered_thread(
     context: &HandlerContext<'_>,
     args: Args,
 ) -> Result<Value, DunkError> {
-    if context.self_pane_id().is_some() || context.flock.caller_role(None, context.env)? != "system"
-    {
-        return Err(DunkError::Refused(
-            "thread receipts require the bridge service".into(),
-        ));
-    }
+    require_telegram_thread_bridge(context)?;
     let string = |key: &str| {
         args.get(key)
             .and_then(Value::as_str)
@@ -2080,6 +2075,11 @@ pub fn h_owner_delivered_thread(
     };
     let id = string("message_id")?;
     let transport = string("transport")?;
+    if transport != "telegram" {
+        return Err(DunkError::Refused(
+            "bridge receipts require telegram transport".into(),
+        ));
+    }
     let channel = string("transport_channel")?;
     let ids = args
         .get("transport_message_ids")
@@ -2368,6 +2368,28 @@ pub fn h_owner_page_confirmed(
     }))
 }
 
+/// The bridge has a dedicated registered token; unrelated system timers cannot claim a human.
+fn require_telegram_thread_bridge(context: &HandlerContext<'_>) -> Result<(), DunkError> {
+    let role = context
+        .flock
+        .caller_role(context.self_pane_id(), context.env)?;
+    let label = match context.request.service_token.as_deref() {
+        Some(token) => context
+            .flock
+            .with_roles(|roles, _| roles.token_label(token))?,
+        None => None,
+    };
+    if context.self_pane_id().is_some()
+        || role != "system"
+        || label.as_deref() != Some("telegram-bridge")
+    {
+        return Err(DunkError::Refused(
+            "thread operation requires the dedicated telegram-bridge service token".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Internal producer operation; the public legacy ingest cannot claim human provenance.
 pub fn h_owner_ingest_thread(
     context: &HandlerContext<'_>,
@@ -2399,6 +2421,15 @@ pub fn h_owner_ingest(context: &HandlerContext<'_>, args: Args) -> Result<Value,
         if context.self_pane_id().is_some() || !matches!(role.as_str(), "web" | "system") {
             return Err(DunkError::Refused(
                 "threaded human ingress requires the web or bridge service".into(),
+            ));
+        }
+        if role == "system" {
+            require_telegram_thread_bridge(context)?;
+        }
+        let expected_transport = if role == "web" { "web" } else { "telegram" };
+        if args.get("transport").and_then(Value::as_str) != Some(expected_transport) {
+            return Err(DunkError::Refused(
+                "human ingress transport does not match its producer".into(),
             ));
         }
         let mut thread = crate::inbox_store::ThreadWrite::root(

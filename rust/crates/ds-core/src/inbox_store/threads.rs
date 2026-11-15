@@ -310,7 +310,7 @@ pub(super) fn prepare(
                 }
             }
             let inherited = ThreadKind::parse(&kind)?;
-            result.kind = if context.kind == ThreadKind::Human {
+            result.kind = if context.sender == ThreadSender::Human {
                 ThreadKind::Human
             } else if inherited == ThreadKind::Other && context.kind == ThreadKind::Vp {
                 ThreadKind::Vp

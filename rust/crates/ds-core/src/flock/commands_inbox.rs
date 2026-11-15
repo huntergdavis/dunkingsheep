@@ -725,11 +725,12 @@ impl Flock {
                     self.registered_pane_role(pane, info.as_ref())?.as_deref() == Some("owner")
                 }
             };
-            let kind = if actor == ThreadSender::Human
+            let kind = if actor == ThreadSender::Human {
+                ThreadKind::Human
+            } else if role == "owner"
+                || recipient_is_vp
                 || crate::inbox::normalise_mailbox(&mailbox) == "owner"
             {
-                ThreadKind::Human
-            } else if role == "owner" || recipient_is_vp {
                 ThreadKind::Vp
             } else {
                 ThreadKind::Other

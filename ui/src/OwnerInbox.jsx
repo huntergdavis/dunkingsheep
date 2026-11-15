@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import MessageBody from './MessageBody';
 import InboxCompose from './InboxCompose';
 import InboxReply from './InboxReply';
-import { HISTORICAL_REASONS, INBOX_VIEWS, validateInboxPage } from './inbox-views.js';
+import { HISTORICAL_REASONS, INBOX_VIEWS, messageKindLabels, validateInboxPage } from './inbox-views.js';
 import './owner-inbox.css';
 
 const PAGE_SIZE = 25;
@@ -12,6 +12,7 @@ const senderLabel = item => item.thread_version === 1 && item.sender_kind === 'h
 // Fetching and selecting messages only performs GETs; no read/ack operation is sent.
 export default function OwnerInbox({ api }) {
   const [sourceFilter, setSourceFilter] = useState('human_threads');
+  const [requestedRoot, setRequestedRoot] = useState(null);
   const viewButtons = useRef({});
   const restoreFocus = useRef(false);
   useEffect(() => {
@@ -21,13 +22,14 @@ export default function OwnerInbox({ api }) {
   const controls = <nav className="owner-inbox-views" aria-label="Inbox views">
     {Object.entries(INBOX_VIEWS).map(([name, view]) => <button key={name} type="button"
       ref={node => { viewButtons.current[name] = node; }} aria-pressed={sourceFilter === name}
-      onClick={() => { restoreFocus.current = true; setSourceFilter(name); }}>{view.label}</button>)}
+      onClick={() => { restoreFocus.current = true; setRequestedRoot(null); setSourceFilter(name); }}>{view.label}</button>)}
   </nav>;
   // A view change unmounts old bodies; late responses cannot cross into another view.
-  return <OwnerInboxThread key={sourceFilter} api={api} sourceFilter={sourceFilter} controls={controls} />;
+  return <OwnerInboxThread key={sourceFilter} api={api} sourceFilter={sourceFilter} controls={controls} requestedRoot={requestedRoot} openVpThread={root => { setRequestedRoot(root); setSourceFilter('vp_threads'); }} />;
 }
 
-function OwnerInboxThread({ api, sourceFilter, controls }) {
+function OwnerInboxThread({ api, sourceFilter, controls, requestedRoot, openVpThread }) {
+  const [wantedRoot, setWantedRoot] = useState(requestedRoot);
   const view = INBOX_VIEWS[sourceFilter];
   const [items, setItems] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
@@ -98,7 +100,7 @@ function OwnerInboxThread({ api, sourceFilter, controls }) {
     finally { olderBusy.current = false; }
   }
   const rows = items || [];
-  const selected = rows.find(item => item.id === selectedId) || rows[0];
+  const selected = wantedRoot ? rows.find(item => item.id === selectedId && item.root_id === wantedRoot) || rows.find(item => item.root_id === wantedRoot) : rows.find(item => item.id === selectedId) || rows[0];
   const thread = selected?.thread_version === 1 ? rows.filter(row => row.root_id === selected.root_id).sort((a,b) => new Date(a.created_at)-new Date(b.created_at) || a.id-b.id) : [];
   const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
   const currentPage = Math.min(page, pages - 1);
@@ -119,6 +121,7 @@ function OwnerInboxThread({ api, sourceFilter, controls }) {
     </div>}
     {items === null && !error && <p role="status">Loading inbox…</p>}
     {items !== null && !rows.length && <p role="status">No messages in this inbox yet.</p>}
+    {wantedRoot && !selected && items !== null && <p role="status">Conversation {wantedRoot} is not loaded. Load older messages to find its recorded history.</p>}
     {rows.length > 0 && <div className="owner-inbox-columns">
       <section className="owner-inbox-list" aria-label="Inbox messages">
         <nav className="owner-inbox-pages" aria-label="Message pages">
@@ -127,11 +130,11 @@ function OwnerInboxThread({ api, sourceFilter, controls }) {
           <button disabled={currentPage + 1 >= pages} onClick={() => setPage(currentPage + 1)}>Older</button>
         </nav>
         <ul>{rows.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE).map(item => <li key={item.id}>
-          <button className="owner-inbox-row" aria-current={selected?.id === item.id ? 'true' : undefined} onClick={() => setSelectedId(item.id)}>
+          <button className="owner-inbox-row" aria-current={selected?.id === item.id ? 'true' : undefined} onClick={() => { setWantedRoot(null); setSelectedId(item.id); }}>
             <strong>{senderLabel(item)}</strong>
             <time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time>
             <span className="owner-inbox-preview">{item.body?.trim().split('\n').find(line => line.trim()) || '(Empty message)'}</span>
-            <small>{sourceFilter === 'historical' ? [HISTORICAL_REASONS[item.historical_reason], ...item.historical_labels].join(' · ') : view.label}</small>
+            <small>{sourceFilter === 'historical' ? [HISTORICAL_REASONS[item.historical_reason], ...item.historical_labels].join(' · ') : [view.label, ...messageKindLabels(item)].join(' · ')}</small>
           </button>
         </li>)}</ul>
       </section>
@@ -139,12 +142,15 @@ function OwnerInboxThread({ api, sourceFilter, controls }) {
         <header><h2>{senderLabel(selected)}</h2>
           <p><time dateTime={selected.created_at}>{new Date(selected.created_at).toLocaleString()}</time> · {selected.message_id || selected.id}</p>
           {sourceFilter === 'historical' && <p>{[HISTORICAL_REASONS[selected.historical_reason], ...selected.historical_labels].join(' · ')}</p>}
+          {sourceFilter !== 'historical' && <p>{messageKindLabels(selected).join(' · ')}</p>}
+          {sourceFilter === 'human_threads' && selected.conversation_kind === 'vp' && <button type="button" onClick={() => openVpThread(selected.root_id)}>Open VP thread {selected.root_id}</button>}
           <p>{view.label}{sourceFilter === 'historical' && selected.reply_to ? ` · Original reply reference: ${selected.reply_to}` : ''}</p>
         </header>
         {selected.thread_version === 1 ? <section aria-label="Conversation thread">
           <h3>Conversation {selected.root_id}</h3>
           <p>Showing loaded messages in this conversation. Load older messages to see earlier history.</p>
           {thread.map(message => <section key={message.message_id} className="owner-thread-message">
+            <p>{messageKindLabels(message).join(' · ')}</p>
             <h4>{message.sender_kind === 'human' ? 'You' : message.sender || 'System'} · {message.message_id}</h4>
             {message.parent_id && <p>Reply to {message.parent_id}{!thread.some(row => row.message_id === message.parent_id) ? ' · earlier message is not loaded' : ''}</p>}
             {message.unresolved_parent && <p>The earlier transport message is unavailable. This starts a new conversation.</p>}

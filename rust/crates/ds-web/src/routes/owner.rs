@@ -652,7 +652,11 @@ async fn owner_thread(
                     }
                 } else {
                     if row["thread_version"].as_i64() != Some(1)
-                        || row["conversation_kind"].as_str() != Some(view)
+                        || !(row["conversation_kind"].as_str() == Some(view)
+                            || view == "human"
+                                && row["conversation_kind"] == "vp"
+                                && row["sender_kind"] == "agent"
+                                && row["recipient_route_kind"] == "human")
                         || !row["root_id"]
                             .as_str()
                             .is_some_and(ds_core::inbox::valid_message_id)
@@ -750,6 +754,20 @@ async fn owner_thread(
                                 item["historical_labels"] = json!(labels);
                             }
                             if view != "historical" {
+                                let mut labels = Vec::new();
+                                if row["sender_kind"] == "system" {
+                                    labels.push("System");
+                                }
+                                if row["audience"] == "agent" {
+                                    labels.push("Agent-only");
+                                }
+                                if row["sender"] == ds_core::owner::conversations::OWNER_PAGE_SENDER
+                                    && row["subject"]
+                                        == ds_core::owner::conversations::OWNER_PAGE_SUBJECT
+                                {
+                                    labels.push("Alert");
+                                }
+                                item["kind_labels"] = json!(labels);
                                 item["role"] =
                                     json!(if row["sender_kind"].as_str() == Some("human") {
                                         "owner"
@@ -2269,6 +2287,55 @@ mod tests {
             assert!(!body.to_string().contains("DO_NOT_DISPLAY"));
         }
     }
+    #[test]
+    fn human_view_accepts_only_recorded_addressed_agent_rows_from_vp_threads() {
+        for sender in ["agent", "system"] {
+            let backend = Arc::new(FakeOwner::new());
+            let row = json!({"id":"i8","mailbox":"owner","audience":null,"created_at":100,"body":"addressed row","thread_version":1,"parent_id":"i7","root_id":"i7","conversation_kind":"vp","sender_kind":sender,"recipient_route_kind":"human"});
+            backend.reply(
+                "owner_conversation",
+                json!({"source_filter":"human_threads","include_internal":false,"messages":[row]}),
+            );
+            let response = block_on(app(authorized(), backend).oneshot(request(
+                "GET",
+                "/api/owner-thread?paged=true&filter=human_threads",
+                None,
+            )))
+            .unwrap();
+            let (status, body, _) = response_json(response);
+            if sender == "agent" {
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(body["items"][0]["conversation_kind"], "vp");
+                assert_eq!(body["items"][0]["root_id"], "i7");
+                assert_eq!(body["items"][0]["conversation_source"], "human");
+            } else {
+                assert_eq!(status, StatusCode::BAD_GATEWAY);
+            }
+        }
+    }
+
+    #[test]
+    fn vp_kind_labels_distinguish_system_alerts_and_agent_only_mail() {
+        let backend = Arc::new(FakeOwner::new());
+        let row = json!({"id":"i7","mailbox":"owner","sender":"owner-page","subject":"PAGE OWNER","audience":"agent","created_at":100,"body":"not used to classify","thread_version":1,"parent_id":null,"root_id":"i7","conversation_kind":"vp","sender_kind":"system"});
+        backend.reply(
+            "owner_conversation",
+            json!({"source_filter":"vp_threads","include_internal":false,"messages":[row]}),
+        );
+        let response = block_on(app(authorized(), backend).oneshot(request(
+            "GET",
+            "/api/owner-thread?paged=true&filter=vp_threads",
+            None,
+        )))
+        .unwrap();
+        let (status, body, _) = response_json(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["items"][0]["kind_labels"],
+            json!(["System", "Agent-only", "Alert"])
+        );
+    }
+
     #[test]
     fn historical_labels_use_recorded_audience_digest_and_existing_routine_marker() {
         let backend = Arc::new(FakeOwner::new());

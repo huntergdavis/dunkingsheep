@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { INBOX_VIEWS, validateInboxPage } from './inbox-views.js';
+import { INBOX_VIEWS, messageKindLabels, validateInboxPage } from './inbox-views.js';
 const row = (kind, audience = null) => ({ id: 1, message_id: 'i1', body: 'human agent-only VP words do not classify', conversation_source: kind, audience,
   thread_version: 1, parent_id: null, root_id: 'i1', conversation_kind: kind, sender_kind: 'agent' });
 const page = (name, rows) => ({ view_revision: 0, source_filter: name, include_internal: false, next_before: null, items: rows });
@@ -28,4 +28,14 @@ test('Historical requires honest fallback reasons and reviewed labels', () => {
 
 test('versioned pages require a nonnegative revision to invalidate moved threads', () => {
   for (const revision of [undefined, null, -1, '1', 1.5]) assert.throws(() => validateInboxPage({ ...page('vp_threads', []), view_revision: revision }, 'vp_threads'));
+});
+
+test('addressed agent rows link a VP thread without promoting its history', () => {
+  const addressed = { ...row('vp'), conversation_source:'human', recipient_route_kind:'human', parent_id:'i2', root_id:'i2' };
+  assert.equal(validateInboxPage(page('human_threads', [addressed]), 'human_threads').items[0].conversation_kind, 'vp');
+  for (const bad of [{sender_kind:'system'}, {recipient_route_kind:'vp'}, {recipient_route_kind:undefined}]) assert.throws(() => validateInboxPage(page('human_threads', [{...addressed,...bad}]), 'human_threads'));
+});
+test('system, alert and agent-only messages have visible recorded kind labels', () => {
+  assert.deepEqual(messageKindLabels({...row('vp','agent'),sender_kind:'system',kind_labels:['Alert','System']}), ['System','Agent-only','Alert']);
+  assert.throws(() => validateInboxPage(page('vp_threads', [{...row('vp'),kind_labels:['human guess']}]), 'vp_threads'));
 });

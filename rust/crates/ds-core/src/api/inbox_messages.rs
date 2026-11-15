@@ -236,22 +236,6 @@ fn inbox_read_out(r: &crate::flock::commands_inbox::ReadResult) -> Value {
     out
 }
 
-fn attach_read_threads(
-    out: &mut Value,
-    store: &crate::inbox_store::Store,
-) -> Result<(), DunkError> {
-    if let Some(messages) = out["messages"].as_array_mut() {
-        for message in messages {
-            if let Some(id) = message["message_id"].as_str() {
-                if let Some(thread) = store.thread_info(id)? {
-                    message["thread"] = thread;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 pub fn h_inbox_read(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let m = mailbox(&args);
     let n = limit(&args, 10)?;
@@ -295,12 +279,8 @@ pub fn h_inbox_read(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
             }
             // Every message in the batch is the most that can be marked, so that count is sized in.
             let total = full.messages.len();
-            let mut full_out = inbox_read_out(&full);
-            attach_read_threads(&mut full_out, env.store())?;
-            let mut bare_out = bare.as_ref().map(inbox_read_out);
-            if let Some(out) = &mut bare_out {
-                attach_read_threads(out, env.store())?;
-            }
+            let full_out = inbox_read_out(&full);
+            let bare_out = bare.as_ref().map(inbox_read_out);
             let (mut out, ids) = crate::roles::desk_inbox_read(&full_out, bare_out.as_ref(), total);
             let marked = if ids.is_empty() {
                 0
@@ -333,7 +313,6 @@ pub fn h_inbox_read(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
             c.self_pane_id(),
         )?;
         let mut out = inbox_read_out(&r);
-        attach_read_threads(&mut out, env.store())?;
         if let Some(marked) = r.marked_read {
             out["marked_read"] = json!(marked);
         }
@@ -525,7 +504,12 @@ pub fn h_inbox_send(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
         )?;
         let mut out = owner_message_value(&r.snapshot);
         out["notified"] = json!(r.notified);
-        if let Some(thread) = env.store().thread_info(&r.snapshot.summary.message_id)? {
+        let thread = if human_origin {
+            env.store().thread_info(&r.snapshot.summary.message_id)?
+        } else {
+            None
+        };
+        if let Some(thread) = thread {
             out["thread"] = thread;
         }
         if let Some(v) = r.redirected {

@@ -388,3 +388,55 @@ fn normal_delete_cleans_all_thread_sidecars_and_preserves_the_other_conversation
         assert_eq!(count, 0);
     }
 }
+
+#[test]
+fn agent_addressed_to_human_is_visible_alone_until_human_participates() {
+    let (_dir, store) = fixture();
+    let mut context = ThreadWrite::root(ThreadKind::Vp, ThreadSender::Agent);
+    context.sender_route = ThreadRoute::Vp;
+    context.recipient_route = ThreadRoute::Lane("worker".into());
+    let root = write(&store, "worker", context).summary.message_id;
+    // Even a caller's proposed Human scope cannot promote on an agent write.
+    let mut agent = ThreadWrite::root(ThreadKind::Human, ThreadSender::Agent);
+    agent.parent_id = Some(root.clone());
+    agent.sender_route = ThreadRoute::Lane("worker".into());
+    agent.recipient_route = ThreadRoute::Human;
+    let addressed = write(&store, "owner", agent).summary.message_id;
+    let read = |filter| store.conversation_thread_cursor(100, None, filter).unwrap();
+    let ids = |rows: Vec<serde_json::Value>| {
+        rows.into_iter()
+            .map(|row| row["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(store.thread_view_revision().unwrap(), 0);
+    assert_eq!(
+        store.thread_info(&root).unwrap().unwrap()["conversation_kind"],
+        "vp"
+    );
+    assert_eq!(
+        store.thread_info(&addressed).unwrap().unwrap()["root_id"],
+        root
+    );
+    assert_eq!(
+        store.thread_info(&addressed).unwrap().unwrap()["conversation_kind"],
+        "vp"
+    );
+    assert_eq!(
+        ids(read(crate::owner::ConversationFilter::HumanThreads)),
+        vec![addressed.clone()]
+    );
+    let mut vp = ids(read(crate::owner::ConversationFilter::VpThreads));
+    vp.sort();
+    let mut expected = vec![root.clone(), addressed.clone()];
+    expected.sort();
+    assert_eq!(vp, expected);
+    let mut follow = human();
+    follow.parent_id = Some(addressed);
+    write(&store, "owner", follow);
+    assert_eq!(store.thread_view_revision().unwrap(), 1);
+    assert!(read(crate::owner::ConversationFilter::VpThreads).is_empty());
+    assert_eq!(
+        read(crate::owner::ConversationFilter::HumanThreads).len(),
+        3
+    );
+}

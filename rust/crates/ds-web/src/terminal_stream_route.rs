@@ -2162,12 +2162,55 @@ mod tests {
             StatusCode::CONFLICT
         );
         assert_eq!(geometry(), before);
+        // A linked window repeats its pane IDs in `list-panes -a`. The existing
+        // ambiguity guard revokes this stream, now also checked immediately by
+        // layout resynchronization. Do not assume it survives the link/unlink.
+        assert!(
+            timeout(Duration::from_secs(6), async {
+                while let Some(Ok(message)) = ws.next().await {
+                    if matches!(message, ClientMessage::Close(_)) {
+                        return true;
+                    }
+                }
+                false
+            })
+            .await
+            .unwrap(),
+            "linked-window ambiguity must revoke the original stream"
+        );
+        drop(ws);
         assert_eq!(
             inspect_backend
                 .run(&["unlink-window", "-t", "linked:5"])
                 .unwrap()
                 .code,
             0
+        );
+        let (mut ws, _) = tokio_tungstenite::connect_async(request(&origin, true))
+            .await
+            .unwrap();
+        ws.send(ClientMessage::Binary(b"after-unlink\n".to_vec().into()))
+            .await
+            .unwrap();
+        assert!(
+            timeout(Duration::from_secs(8), async {
+                let mut received = Vec::new();
+                while let Some(Ok(message)) = ws.next().await {
+                    if let ClientMessage::Binary(bytes) = message {
+                        received.extend_from_slice(&bytes);
+                        if received
+                            .windows(b"after-unlink".len())
+                            .any(|w| w == b"after-unlink")
+                        {
+                            return true;
+                        }
+                    }
+                }
+                false
+            })
+            .await
+            .unwrap(),
+            "the primary stream must be live again before testing shared clients"
         );
         let (mut other, _) = tokio_tungstenite::connect_async(request(&origin, true))
             .await

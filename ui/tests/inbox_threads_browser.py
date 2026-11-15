@@ -32,7 +32,7 @@ try:
      if mode=='bad':return fulfill(route,dict(outcome='stored',message_id='i5',thread=dict(thread_version=1,parent_id='i999',root_id='i1',conversation_kind='human',sender_kind='human')))
      if mode=='hold':pending.append(route);return
      assert mode=='promote'
-     revision+=1;human.extend([{**item,'conversation_source':'human','conversation_kind':'human'} for item in vp]);vp=[]
+     revision+=1;human.extend([{**item,'conversation_source':'human','conversation_kind':'human'} for item in vp if item['root_id']=='i10']);vp=[item for item in vp if item['root_id']!='i10']
      new=row(12,body['text'],root=10,parent=11);human.append(new)
      return fulfill(route,dict(outcome='stored',message_id='i12',thread=new))
     return fulfill(route,{'channels':[],'ok':True})
@@ -48,14 +48,25 @@ try:
    new=row(5,'KEPT REPLY DRAFT',parent=3);human.append(new);fulfill(pending.pop(),dict(outcome='stored',message_id='i5',thread=new));mode='promote'
    form.get_by_role('status').filter(has_text='Reply stored as i5').wait_for();assert text.input_value()==''
    reader.get_by_text('KEPT REPLY DRAFT',exact=True).wait_for()
-   nav=page.get_by_role('navigation',name='Inbox views');nav.get_by_role('button',name='VP',exact=True).click()
+   # An addressed agent row appears alone; opening its recorded link loads the VP history.
+   human.append({**vp[1],'conversation_source':'human','recipient_route_kind':'human'})
+   vp.append({**row(13,'SYSTEM ALERT EVENT',kind='vp',root=13,sender='system'),'audience':'agent','kind_labels':['System','Alert','Agent-only']})
+   nav=page.get_by_role('navigation',name='Inbox views');nav.get_by_role('button',name='VP',exact=True).click();nav.get_by_role('button',name='Your inbox',exact=True).click()
+   reader=page.get_by_role('article',name='Selected message');reader.get_by_role('heading',name='Conversation i10',exact=True).wait_for()
+   assert reader.get_by_text('VP FOLLOW UP',exact=True).count()==1
+   assert reader.get_by_text('VP ROOT',exact=True).count()==0
+   reader.get_by_role('button',name='Open VP thread i10',exact=True).click()
    page.get_by_role('heading',name='Conversation i10',exact=True).wait_for()
+   assert reader.get_by_text('VP ROOT',exact=True).count()==1
+   page.locator('.owner-inbox-row').filter(has_text='SYSTEM ALERT EVENT').click()
+   reader.get_by_text('System · Agent-only · Alert',exact=True).first.wait_for()
+   page.locator('.owner-inbox-row').filter(has_text='VP FOLLOW UP').click()
    form=page.get_by_role('form',name='Reply to message');form.get_by_role('textbox',name='Reply message').fill('HUMAN JOINS VP THREAD');form.get_by_role('button',name='Send reply',exact=True).click()
-   page.get_by_text('No messages in this inbox yet.',exact=True).wait_for();assert page.get_by_text('VP ROOT',exact=True).count()==0
+   reader.get_by_text('SYSTEM ALERT EVENT',exact=True).wait_for();assert page.get_by_text('VP ROOT',exact=True).count()==0
    nav.get_by_role('button',name='Your inbox',exact=True).click();reader=page.get_by_role('article',name='Selected message');reader.get_by_text('HUMAN JOINS VP THREAD',exact=True).wait_for();assert reader.get_by_text('VP ROOT',exact=True).count()==1
    if os.environ.get('INBOX_THREAD_SCREENSHOT_DIR'):page.screenshot(path=str(Path(os.environ['INBOX_THREAD_SCREENSHOT_DIR'])/f'inbox-thread-{width}.png'),full_page=True)
    nav.get_by_role('button',name='Historical / prior versions',exact=True).click();page.get_by_text('LEGACY BODY',exact=True).first.wait_for();assert page.get_by_role('form',name='Reply to message').count()==0
    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth');assert not errors,errors
-   print(json.dumps(dict(width=width,thread_chain='PASS',draft_failure_and_bad_receipt='PASS',single_flight='PASS',vp_promotion_cache_invalidation='PASS',historical_no_reply='PASS')),flush=True);page.close()
+   print(json.dumps(dict(width=width,thread_chain='PASS',draft_failure_and_bad_receipt='PASS',single_flight='PASS',vp_promotion_cache_invalidation='PASS',historical_no_reply='PASS',addressed_agent_no_promotion_and_vp_link='PASS',system_alert_agent_only_labels='PASS')),flush=True);page.close()
   browser.close()
 finally:server.shutdown()

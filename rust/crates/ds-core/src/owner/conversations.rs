@@ -619,7 +619,14 @@ impl<'a> OwnerConversations<'a> {
             transport: Some(transport),
             reply_to: None,
             external_id: external_id.as_deref(),
-            thread: None,
+            thread: Some({
+                let mut thread = crate::inbox_store::ThreadWrite::root(
+                    crate::inbox_store::ThreadKind::Vp,
+                    crate::inbox_store::ThreadSender::System,
+                );
+                thread.recipient_route = crate::inbox_store::ThreadRoute::Vp;
+                thread
+            }),
         };
         let message_id = store.send(&outgoing)?;
         let message = store.get_message(&message_id)?;
