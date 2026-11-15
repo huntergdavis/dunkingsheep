@@ -62,6 +62,31 @@ pub const SEND_TEXT_CHUNK_DELAY_S: f64 = 0.05;
 /// in the composer before the submission arrives.
 pub const SEND_TEXT_SETTLE_DELAY_S: f64 = 0.2;
 
+/// t5331: a pane whose foreground is the shell start-agent's command left in front of its agent
+/// is the agent kind the registry recorded, when a live child of that kind runs under it
+/// (`agent_child`). Panes already detected as an agent are not touched.
+pub(crate) fn apply_registered_kinds(
+    proc_root: &std::path::Path,
+    panes: &mut [Pane],
+    registry: &serde_json::Map<String, serde_json::Value>,
+) {
+    for pane in panes {
+        if crate::state::AGENT_EXES.contains(&pane.command.as_str()) {
+            continue;
+        }
+        let registered = registry
+            .get("panes")
+            .and_then(|panes| panes.get(&pane.pane_id))
+            .and_then(|entry| entry.get("agent_kind"))
+            .and_then(serde_json::Value::as_str);
+        if let Some(kind) =
+            super::agent_child::registered_kind(proc_root, &pane.command, pane.pane_pid, registered)
+        {
+            pane.command = kind;
+        }
+    }
+}
+
 /// The fourteen pane fields, in the Python's `TmuxBackend.PANE_FORMAT` order.
 const PANE_FORMAT_FIELDS: [&str; 14] = [
     "#{pane_id}",
@@ -228,6 +253,9 @@ impl TmuxBackend {
                 pane.label = name.clone();
             }
         }
+        if let Ok(registry) = self.registry.load() {
+            apply_registered_kinds(std::path::Path::new("/proc"), &mut panes, &registry);
+        }
         Ok(panes)
     }
     fn list_panes_raw(&self) -> Result<Vec<Pane>, super::tmux_registry::RegistryError> {
@@ -244,6 +272,9 @@ impl TmuxBackend {
             if let Some(label) = labels.get(&pane.pane_id) {
                 pane.label = label.clone();
             }
+        }
+        if let Ok(registry) = self.registry.load_raw() {
+            apply_registered_kinds(std::path::Path::new("/proc"), &mut panes, &registry);
         }
         Ok(panes)
     }
