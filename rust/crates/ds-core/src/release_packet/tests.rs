@@ -17,8 +17,11 @@ struct Fake {
     units: BTreeMap<String, State>,
     token: PathBuf,
     calls: Vec<String>,
+    client_calls: usize,
+    external_daemon_restart: bool,
     now: i64,
     bad_web_once: bool,
+    bad_unit_once: Option<String>,
     fail_old_tg_start: bool,
     terminal: bool,
     terminal_after_daemon: bool,
@@ -37,6 +40,12 @@ impl Fixture {
         ]))
     }
     fn with_triggers(triggers: Value) -> Self {
+        Self::with_selection(triggers, None)
+    }
+    fn selecting(selected: &[&str]) -> Self {
+        Self::with_selection(json!([]), Some(selected))
+    }
+    fn with_selection(triggers: Value, selected: Option<&[&str]>) -> Self {
         let dir = crate::testsupport::dir("release-packet");
         let root = dir.path().join("packet");
         fs::create_dir_all(root.join("state")).unwrap();
@@ -44,7 +53,15 @@ impl Fixture {
         let cli = base.join("bin/dunkingsheep");
         put(&cli, b"old-cli", 0o755);
         put(&root.join("launcher.before"), b"old-cli", 0o755);
-        put(&root.join("launcher.pending"), b"new-cli", 0o755);
+        put(
+            &root.join("launcher.pending"),
+            if selected.is_none_or(|keys| keys.contains(&"daemon")) {
+                b"new-cli"
+            } else {
+                b"old-cli"
+            },
+            0o755,
+        );
         let poll = base.join("bin/dunk-poll");
         put(&poll, b"poll-unchanged", 0o755);
         let token = base.join("config/telegram-bridge-token");
@@ -54,6 +71,7 @@ impl Fixture {
         let mut units = serde_json::Map::new();
         let mut rows = Vec::new();
         for (index, key) in ORDER.iter().enumerate() {
+            let switch = selected.is_none_or(|keys| keys.contains(key));
             let (service, binary) = match *key {
                 "daemon" => ("dunkingsheep.service", "dunkingsheep"),
                 "web" => ("dunkingsheep-web.service", "ds-desk"),
@@ -63,26 +81,44 @@ impl Fixture {
             let new = base.join(format!("new-{key}/{binary}"));
             let staged = root.join(format!("{key}/{binary}"));
             put(&old, format!("old-{key}").as_bytes(), 0o555);
-            put(&new, format!("new-{key}").as_bytes(), 0o555);
-            put(&staged, format!("new-{key}").as_bytes(), 0o555);
+            if switch {
+                put(&new, format!("new-{key}").as_bytes(), 0o555);
+                put(&staged, format!("new-{key}").as_bytes(), 0o555);
+            }
             let config = base.join(format!("units/{service}.d/10-existing.conf"));
             let drop = config.parent().unwrap().join("99-reviewed-release.conf");
             put(&config, b"old configuration", 0o644);
-            put(
-                &root.join(format!("{key}.conf.pending")),
-                format!("[Service]\nExecStart=\nExecStart={}\n", new.display()).as_bytes(),
-                0o444,
-            );
-            units.insert((*key).into(), json!({"unit":service,"binary":binary,"release":new.parent().unwrap(),"drop":drop,"snippet":format!("{key}.conf.pending"),"baseline":{"MainPID":(11+index).to_string(),"NRestarts":"0","executable":old,"binary_sha256":hash(&old).unwrap(),"DropInPaths":config.to_str().unwrap(),"unit_file_hashes":{config.to_str().unwrap():hash(&config).unwrap()}}}));
-            let source = base.join(format!("build-{key}/{binary}"));
-            put(&source, format!("new-{key}").as_bytes(), 0o555);
-            rows.push(json!({"unit":key,"source":source,"stage":staged.strip_prefix(&root).unwrap(),"release":new,"sha256":hash(&new).unwrap()}));
+            if switch {
+                put(
+                    &root.join(format!("{key}.conf.pending")),
+                    format!("[Service]\nExecStart=\nExecStart={}\n", new.display()).as_bytes(),
+                    0o444,
+                );
+            }
+            let mut unit = json!({"unit":service,"binary":binary,"release":new.parent().unwrap(),"drop":drop,"snippet":format!("{key}.conf.pending"),"baseline":{"MainPID":(11+index).to_string(),"NRestarts":"0","executable":old,"binary_sha256":hash(&old).unwrap(),"DropInPaths":config.to_str().unwrap(),"unit_file_hashes":{config.to_str().unwrap():hash(&config).unwrap()}}});
+            if selected.is_some() {
+                unit["switch"] = json!(switch);
+            }
+            if !switch {
+                unit["release"] = json!(old.parent().unwrap());
+                unit.as_object_mut().unwrap().remove("drop");
+                unit.as_object_mut().unwrap().remove("snippet");
+            }
+            units.insert((*key).into(), unit);
+            if switch {
+                let source = base.join(format!("build-{key}/{binary}"));
+                put(&source, format!("new-{key}").as_bytes(), 0o555);
+                rows.push(json!({"unit":key,"source":source,"stage":staged.strip_prefix(&root).unwrap(),"release":new,"sha256":hash(&new).unwrap()}));
+            }
             if *key == "web" {
                 put(
                     &old.parent().unwrap().join("ui/dist/index.html"),
                     b"OLD UI",
                     0o444,
                 );
+                if !switch {
+                    continue;
+                }
                 let page = new.parent().unwrap().join("ui/dist/index.html");
                 let copy = root.join("web/ui/dist/index.html");
                 put(&page, b"NEW UI", 0o444);
@@ -154,10 +190,13 @@ impl Fixture {
             units: states,
             token,
             calls: Vec::new(),
+            client_calls: 0,
+            external_daemon_restart: false,
             now: DateTime::parse_from_rfc3339("2026-11-14T19:00:00Z")
                 .unwrap()
                 .timestamp_millis(),
             bad_web_once: false,
+            bad_unit_once: None,
             fail_old_tg_start: false,
             terminal: false,
             terminal_after_daemon: false,
@@ -219,8 +258,17 @@ impl Host for Fake {
                 }
                 _ => return Err("unexpected private systemctl operation".into()),
             }
+            if action == "restart" && self.external_daemon_restart {
+                self.external_daemon_restart = false;
+                self.units
+                    .get_mut("dunkingsheep.service")
+                    .unwrap()
+                    .status
+                    .pid += 1;
+            }
             return Ok(String::new());
         }
+        self.client_calls += 1;
         fail(!args.contains(&"issue"), "no fixture token issuance")?;
         if args.contains(&"list") {
             return Ok("telegram-bridge system\n".into());
@@ -228,6 +276,10 @@ impl Host for Fake {
         Ok("{}".into())
     }
     fn status(&mut self, unit: &str) -> Result<UnitStatus> {
+        if self.bad_unit_once.as_deref() == Some(unit) && self.units[unit].candidate {
+            self.bad_unit_once = None;
+            return Err("injected candidate postcheck failure".into());
+        }
         Ok(self.units.get(unit).ok_or("unknown unit")?.status.clone())
     }
     fn image(&mut self, pid: u32) -> Result<(PathBuf, String)> {
@@ -630,4 +682,276 @@ fn snapshot_only_packets_keep_all_schema_through_switch_failure_and_recovery() {
             );
         }
     }
+}
+
+impl Fixture {
+    fn edit_manifest(&mut self, edit: impl FnOnce(&mut Value)) {
+        let path = self.root.join("STAGING-MANIFEST.json");
+        let mut manifest: Value = load(&path).unwrap();
+        edit(&mut manifest);
+        fs::remove_file(&path).unwrap();
+        put(&path, &serde_json::to_vec(&manifest).unwrap(), 0o444);
+        let sums = self.root.join("SHA256SUMS");
+        let rewritten = fs::read_to_string(&sums)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                if line.ends_with("  STAGING-MANIFEST.json") {
+                    format!("{}  STAGING-MANIFEST.json\n", hash(&path).unwrap())
+                } else {
+                    format!("{line}\n")
+                }
+            })
+            .collect::<String>();
+        fs::remove_file(&sums).unwrap();
+        put(&sums, rewritten.as_bytes(), 0o444);
+        self.digest = hash(&sums).unwrap();
+        for name in ["ACTIVATION-GO.json", "REVIEW-ACCEPTANCE.json"] {
+            let path = self.root.join("state").join(name);
+            let mut value: Value = load(&path).unwrap();
+            value["packet_sha256"] = json!(self.digest);
+            put(&path, &serde_json::to_vec(&value).unwrap(), 0o600);
+        }
+    }
+    fn controls_only(&self, selected: &[&str]) {
+        for call in &self.host.calls {
+            let mut words = call.split_whitespace();
+            if matches!(words.next(), Some("restart" | "stop" | "start")) {
+                let service = words.next().unwrap();
+                let key = match service {
+                    "dunkingsheep.service" => "daemon",
+                    "dunkingsheep-web.service" => "web",
+                    "dunkingsheep-telegram.service" => "telegram",
+                    _ => panic!("unknown controlled service: {service}"),
+                };
+                assert!(
+                    selected.contains(&key),
+                    "controlled untouched service: {call}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn selected_units_switch_and_roll_back_without_touching_other_services() {
+    for selected in [
+        vec!["daemon"],
+        vec!["web"],
+        vec!["telegram"],
+        vec!["web", "daemon"],
+        vec!["telegram", "web"],
+        vec!["telegram", "daemon"],
+    ] {
+        let mut f = Fixture::selecting(&selected);
+        let cli = load::<Manifest>(&f.root.join("STAGING-MANIFEST.json"))
+            .unwrap()
+            .launcher
+            .path;
+        let cli_before = hash(&cli).unwrap();
+        let plan: Value = serde_json::from_str(&f.run("plan", false).unwrap()).unwrap();
+        let order: Vec<_> = ORDER
+            .into_iter()
+            .filter(|key| selected.contains(key))
+            .collect();
+        assert_eq!(plan["order"], json!(order));
+        assert!(f.host.calls.is_empty());
+        f.run("activate", true).unwrap();
+        f.run("verify", true).unwrap();
+        for key in ORDER {
+            let service = match key {
+                "daemon" => "dunkingsheep.service",
+                "web" => "dunkingsheep-web.service",
+                _ => "dunkingsheep-telegram.service",
+            };
+            let state = &f.host.units[service];
+            assert_eq!(state.candidate, selected.contains(&key));
+            if !selected.contains(&key) {
+                assert_eq!(state.status.pid.to_string(), state.unit.baseline.pid);
+            }
+        }
+        if !selected.contains(&"daemon") {
+            assert_eq!(hash(&cli).unwrap(), cli_before);
+        }
+        f.run("rollback", true).unwrap();
+        f.old_active();
+        f.controls_only(&selected);
+        assert_eq!(hash(&cli).unwrap(), cli_before);
+        let starts: Vec<_> = f
+            .host
+            .calls
+            .iter()
+            .filter(|call| call.starts_with("start "))
+            .cloned()
+            .collect();
+        let expected: Vec<_> = order
+            .iter()
+            .rev()
+            .map(|key| {
+                format!(
+                    "start {}",
+                    match *key {
+                        "daemon" => "dunkingsheep.service",
+                        "web" => "dunkingsheep-web.service",
+                        _ => "dunkingsheep-telegram.service",
+                    }
+                )
+            })
+            .collect();
+        assert_eq!(starts, expected);
+    }
+}
+
+#[test]
+fn each_single_unit_failure_recovers_only_that_unit() {
+    for key in ORDER {
+        let mut f = Fixture::selecting(&[key]);
+        let service = match key {
+            "daemon" => "dunkingsheep.service",
+            "web" => "dunkingsheep-web.service",
+            _ => "dunkingsheep-telegram.service",
+        };
+        f.host.bad_unit_once = Some(service.into());
+        assert!(f
+            .run("activate", true)
+            .unwrap_err()
+            .contains("automatic rollback: PASS"));
+        f.old_active();
+        f.controls_only(&[key]);
+        f.run("rollback", true).unwrap();
+        f.controls_only(&[key]);
+    }
+}
+
+#[test]
+fn terminal_detachment_is_required_only_when_web_is_selected() {
+    for key in ORDER {
+        let mut f = Fixture::selecting(&[key]);
+        f.host.terminal = true;
+        let path = f.root.join("state/ACTIVATION-GO.json");
+        let mut go: Value = load(&path).unwrap();
+        go["no_terminal_confirmed"] = json!(false);
+        put(&path, &serde_json::to_vec(&go).unwrap(), 0o600);
+        if key == "web" {
+            assert!(f
+                .run("activate", true)
+                .unwrap_err()
+                .contains("no-terminal confirmation"));
+            assert!(!f.root.join("state/ACTIVATION-START.json").exists());
+            go["no_terminal_confirmed"] = json!(true);
+            put(&path, &serde_json::to_vec(&go).unwrap(), 0o600);
+            assert!(f
+                .run("activate", true)
+                .unwrap_err()
+                .contains("attached terminal"));
+            assert!(!f.root.join("state/ACTIVATION-START.json").exists());
+            f.controls_only(&[]);
+        } else {
+            f.run("activate", true).unwrap();
+            f.run("rollback", true).unwrap();
+            f.controls_only(&[key]);
+        }
+    }
+}
+
+#[test]
+fn untouched_pid_configuration_and_cli_drift_fail_verification_without_service_control() {
+    for drift in ["pid", "configuration", "cli"] {
+        let mut f = Fixture::selecting(&["web"]);
+        f.run("activate", true).unwrap();
+        let daemon = f.host.units.get_mut("dunkingsheep.service").unwrap();
+        match drift {
+            "pid" => daemon.status.pid += 1,
+            "configuration" => {
+                let path = daemon.unit.baseline.unit_file_hashes.keys().next().unwrap();
+                fs::write(path, "external drift").unwrap();
+            }
+            _ => {
+                let m: Manifest = load(&f.root.join("STAGING-MANIFEST.json")).unwrap();
+                fs::write(m.launcher.path, "external CLI drift").unwrap();
+            }
+        }
+        let calls = f.host.calls.len();
+        let clients = f.host.client_calls;
+        assert!(f.run("verify", true).is_err());
+        if drift == "cli" {
+            assert_eq!(
+                f.host.client_calls, clients,
+                "executed drifted CLI before checking its hash"
+            );
+        }
+        assert!(f.host.calls[calls..]
+            .iter()
+            .all(|call| !call.starts_with("start ")
+                && !call.starts_with("stop ")
+                && !call.starts_with("restart ")));
+    }
+}
+
+#[test]
+fn invalid_selections_refuse_before_host_calls_or_attempt_records() {
+    for invalid in [
+        "empty",
+        "untouched-overlay",
+        "untouched-artifact",
+        "cli",
+        "not-boolean",
+    ] {
+        let mut f = Fixture::selecting(&["web"]);
+        f.edit_manifest(|m| match invalid {
+            "empty" => m["units"]["web"]["switch"] = json!(false),
+            "untouched-overlay" => {
+                m["units"]["daemon"]["drop"] =
+                    json!("/private/dunkingsheep.service.d/99-forbidden.conf")
+            }
+            "untouched-artifact" => m["rows"][0]["unit"] = json!("daemon"),
+            "cli" => m["launcher"]["new_sha256"] = json!("unexpected-new-launcher"),
+            _ => m["units"]["web"]["switch"] = Value::Null,
+        });
+        assert!(f.run("activate", true).is_err(), "accepted {invalid}");
+        assert!(f.host.calls.is_empty());
+        assert!(!f.root.join("state/ACTIVATION-START.json").exists());
+        assert!(!f.root.join("state/operation.lock").exists());
+    }
+}
+
+#[test]
+fn mixed_selection_resumes_partial_rollback_after_its_old_bridge_start_fails() {
+    let mut f = Fixture::selecting(&["web", "telegram"]);
+    f.host.bad_unit_once = Some("dunkingsheep-telegram.service".into());
+    f.host.fail_old_tg_start = true;
+    assert!(f
+        .run("activate", true)
+        .unwrap_err()
+        .contains("automatic rollback: INCOMPLETE"));
+    assert_eq!(f.host.units["dunkingsheep-telegram.service"].status.pid, 0);
+    assert!(f.host.units["dunkingsheep-web.service"].candidate);
+    assert_eq!(f.host.units["dunkingsheep.service"].status.pid, 11);
+    f.host.now += 7_200_000;
+    f.run("rollback", true).unwrap();
+    f.old_active();
+    f.controls_only(&["web", "telegram"]);
+    assert_eq!(f.host.units["dunkingsheep.service"].status.pid, 11);
+}
+
+#[test]
+fn external_restart_of_untouched_unit_is_reported_without_restarting_it_again() {
+    let mut f = Fixture::selecting(&["web"]);
+    f.host.external_daemon_restart = true;
+    let error = f.run("activate", true).unwrap_err();
+    assert!(error.contains("untouched PID differs: daemon"));
+    assert!(error.contains("automatic rollback: INCOMPLETE"));
+    f.controls_only(&["web"]);
+    assert!(!f.host.units["dunkingsheep-web.service"].candidate);
+    assert_eq!(f.host.units["dunkingsheep.service"].status.pid, 12);
+    // The independent fixture service is restored externally, not by the executor.
+    f.host
+        .units
+        .get_mut("dunkingsheep.service")
+        .unwrap()
+        .status
+        .pid = 11;
+    f.run("rollback", true).unwrap();
+    f.old_active();
+    f.controls_only(&["web"]);
 }
