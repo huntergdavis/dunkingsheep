@@ -567,6 +567,7 @@ remains excluded from reviewing the PR.
 A process-bound planner with the repository/task project grant can correct an
 attribution using `dunkingsheep pr correct-author OWNER/REPO#PR --head FULL_SHA
 --author-task TASK_ID --author PANE --reason "explanation"` (one command).
+Correction is CLI/socket-only and does not widen the grouped MCP schemas.
 The named work task must be associated with the corrected writer. This is also
 the explicit coordinator exception for rebinding a task to a different PR.
 Contributors cannot correct their own PR, even after becoming a planner. The

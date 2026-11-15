@@ -1268,7 +1268,7 @@
     "author",
     "reason"
    ],
-   "mcp": true,
+   "mcp": false,
    "owner_only": false,
    "roles": [
     "planner"

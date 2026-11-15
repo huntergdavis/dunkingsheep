@@ -364,3 +364,16 @@ fn task_paging_socket_arguments_are_explicit_and_absent_from_public_schema() {
         assert!(grouped["properties"].get(key).is_none());
     }
 }
+
+#[test]
+fn pr_author_correction_stays_planner_only_and_socket_only() {
+    let command = registry::command("pr_author_correct").unwrap();
+    assert!(
+        !command.mcp,
+        "rare coordinator mutation must not expand MCP schemas"
+    );
+    assert_eq!(command.roles, &["planner"]);
+    assert!(!registry::GROUPS
+        .iter()
+        .any(|g| g.actions.iter().any(|(_, cmd)| *cmd == "pr_author_correct")));
+}

@@ -827,7 +827,7 @@ pub static COMMANDS: &[Command] = &[
         params: &[Param { name: "target", schema: "{\"type\":\"string\"}" }, Param { name: "head", schema: "{\"type\":\"string\"}" }, Param { name: "author_task", schema: "{\"type\":\"string\"}" }, Param { name: "author", schema: "{\"type\":\"string\"}" }, Param { name: "reason", schema: "{\"type\":\"string\"}" }],
         dispatch_required: &["target", "head", "author_task", "author", "reason"],
         required: &["target", "head", "author_task", "author", "reason"],
-        mcp: true,
+        mcp: false,
         owner_only: false,
         roles: &["planner"],
     },
