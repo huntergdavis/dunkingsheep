@@ -36,9 +36,23 @@ impl AuthBackend for Auth {
 fn write_entry(store: &Path, class: &str, slug: &str, meta: &[(&str, &str)], body: &str) {
     let folder = store.join(class);
     fs::create_dir_all(&folder).unwrap();
-    let mut text = String::from("---\n");
-    text.push_str(&format!("class: {class}\n"));
+    // The store requires these keys; a test entry gives each a default it can override.
+    let mut fields: Vec<(&str, String)> = vec![
+        ("class", class.to_string()),
+        ("subject", slug.to_string()),
+        ("type", "reference".to_string()),
+        ("scope", "project".to_string()),
+        ("authority", "agent".to_string()),
+        ("stated", "2026-11-01".to_string()),
+    ];
     for (key, value) in meta {
+        match fields.iter_mut().find(|(k, _)| k == key) {
+            Some(field) => field.1 = value.to_string(),
+            None => fields.push((key, value.to_string())),
+        }
+    }
+    let mut text = String::from("---\n");
+    for (key, value) in fields {
         text.push_str(&format!("{key}: {value}\n"));
     }
     text.push_str("---\n");
@@ -401,6 +415,37 @@ async fn an_entry_that_is_a_link_or_leaves_the_store_is_skipped() {
     );
     let text = view.to_string();
     assert!(!text.contains("not a store entry") && !text.contains("beta measured"));
+}
+
+#[tokio::test]
+async fn an_unreadable_entry_is_shown_under_its_class_directory_with_the_error() {
+    let w = world();
+    fs::write(
+        w.alpha.join(".dunkingsheep/ground-truth/broken.md"),
+        "no front matter at all\n",
+    )
+    .unwrap();
+    let (_, view) = get(
+        &w.config,
+        Some(Identity::Owner),
+        "/api/project-context/project/alpha",
+    )
+    .await;
+    let broken = view["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["slug"] == "broken")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (broken["class"].as_str(), broken["ground_truth"].as_bool()),
+        (Some("ground-truth"), Some(true))
+    );
+    assert!(
+        broken["error"].as_str().unwrap().contains("front matter"),
+        "{broken}"
+    );
 }
 
 #[tokio::test]

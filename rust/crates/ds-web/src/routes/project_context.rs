@@ -138,13 +138,26 @@ fn class_rank(class: Option<&str>) -> usize {
         .unwrap_or(CLASSES.len())
 }
 
+/// An entry's class: its front matter, else the class directory it lives in (an entry whose
+/// front matter cannot be read still belongs to its directory).
+fn class_of(entry: &Entry) -> Option<&str> {
+    entry.get("class").or_else(|| {
+        entry
+            .path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .filter(|name| CLASSES.contains(name))
+    })
+}
+
 fn entry_json(entry: &Entry, now: chrono::NaiveDateTime) -> Value {
     let body: String = entry.body.chars().take(MAX_BODY_CHARS).collect();
     let truncated = entry.body.chars().count() > MAX_BODY_CHARS;
     json!({
         "slug": entry.slug,
-        "class": entry.get("class"),
-        "ground_truth": entry.get("class") == Some("ground-truth"),
+        "class": class_of(entry),
+        "ground_truth": class_of(entry) == Some("ground-truth"),
         "type": entry.get("type"),
         "authority": entry.get("authority"),
         "source": entry.get("source"),
@@ -204,7 +217,7 @@ pub fn store_view(root: &Path, query: Option<&str>) -> Value {
         "shown": list.len(),
         "truncated": total > MAX_ENTRIES,
         "skipped_links": skipped,
-        "ground_truths": entries.iter().filter(|e| e.get("class") == Some("ground-truth")).count(),
+        "ground_truths": entries.iter().filter(|e| class_of(e) == Some("ground-truth")).count(),
         "entries": list,
     })
 }
@@ -218,18 +231,19 @@ fn refusal(status: StatusCode, detail: &str) -> Response {
     (status, Json(json!({"detail": detail}))).into_response()
 }
 
-async fn owner_only(
+/// `None` for the owner; otherwise the response to send.
+async fn not_owner(
     auth: &dyn AuthBackend,
     headers: &HeaderMap,
     scheme: RequestScheme,
-) -> Result<(), Response> {
+) -> Option<Response> {
     match super::fleet::authenticate_identity(auth, headers, scheme).await {
-        Ok(Identity::Owner) => Ok(()),
-        Ok(_) => Err(refusal(
+        Ok(Identity::Owner) => None,
+        Ok(_) => Some(refusal(
             StatusCode::FORBIDDEN,
             "the information browser is for the owner",
         )),
-        Err(response) => Err(response),
+        Err(error) => Some(error.into_response()),
     }
 }
 
@@ -239,7 +253,7 @@ async fn api_list(
     Extension(scheme): Extension<RequestScheme>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = owner_only(auth.as_ref(), &headers, scheme).await {
+    if let Some(response) = not_owner(auth.as_ref(), &headers, scheme).await {
         return response;
     }
     let (map_state, projects) = match read_map(&config) {
@@ -275,7 +289,7 @@ async fn api_project(
     Query(query): Query<SearchQuery>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = owner_only(auth.as_ref(), &headers, scheme).await {
+    if let Some(response) = not_owner(auth.as_ref(), &headers, scheme).await {
         return response;
     }
     let mapped = match read_map(&config) {
@@ -307,7 +321,7 @@ async fn api_global(
     Query(query): Query<SearchQuery>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = owner_only(auth.as_ref(), &headers, scheme).await {
+    if let Some(response) = not_owner(auth.as_ref(), &headers, scheme).await {
         return response;
     }
     if !Store::new(Some(&config.global_store), false).exists() {

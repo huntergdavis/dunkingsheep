@@ -710,10 +710,8 @@ pub(crate) async fn authenticate_identity(
     backend: &dyn AuthBackend,
     headers: &HeaderMap,
     scheme: RequestScheme,
-) -> Result<Identity, Response> {
-    authenticate(backend, headers, scheme)
-        .await
-        .map_err(IntoResponse::into_response)
+) -> Result<Identity, WebResponseError> {
+    authenticate(backend, headers, scheme).await
 }
 
 async fn authenticate(
