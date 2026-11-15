@@ -1,4 +1,5 @@
 """Server-zone timestamp presentation with a different browser zone; private APIs only."""
+from thread_page_fixture import project
 import json
 import os
 import threading
@@ -66,7 +67,7 @@ def api(route):
             'subject': 'Timestamp fact', 'body': 'Fixture', 'stated': ISO, 'ground_truth': False}]}
     else:
         value = {'ok': True}
-    route.fulfill(status=status, content_type='application/json', body=json.dumps(value))
+    route.fulfill(status=status, content_type='application/json', body=json.dumps(project(route,value)))
 
 
 server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)

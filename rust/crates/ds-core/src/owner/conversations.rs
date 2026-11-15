@@ -266,12 +266,14 @@ impl<'a> OwnerConversations<'a> {
                 "thread pages require the owner or web role".into(),
             ))
         };
-        eprintln!(
-            "{}",
-            serde_json::json!({"event":"owner_thread_page", "role":role,
+        if result.is_err() {
+            eprintln!(
+                "{}",
+                serde_json::json!({"event":"owner_thread_page", "role":role,
             "pane":self_pane_id, "mode":options.mode.name(), "source_filter":options.filter.name(),
             "root_id":options.root_id, "result":if result.is_ok(){"ok"}else{"refused_or_error"}})
-        );
+            );
+        }
         result
     }
 

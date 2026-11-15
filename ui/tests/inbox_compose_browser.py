@@ -1,4 +1,5 @@
 """Synthetic compose/delivery boundary checks; never contact the live desk/daemon."""
+from thread_page_fixture import project
 import json
 import os
 import threading
@@ -27,7 +28,7 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 base = f'http://127.0.0.1:{server.server_port}'
 
 def fulfill(route, data, status=200):
-    route.fulfill(status=status, content_type='application/json', body=json.dumps(data))
+    route.fulfill(status=status, content_type='application/json', body=json.dumps(project(route,data)))
 
 def mock(route):
     path = urlsplit(route.request.url).path
