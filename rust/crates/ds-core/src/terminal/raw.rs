@@ -126,6 +126,12 @@ split-window) printf '%%1\n' ;;
 esac
 "#.replace("__SEP__", crate::terminal::parse::pane_separator())).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Settle inherited writer descriptors before the first backend exec (t3591).
+        crate::testsupport::exec_retrying_busy(|| {
+            std::process::Command::new(&script).arg("warm-up").status()
+        })
+        .expect("settle the fake tmux");
+        std::fs::remove_file(dir.path().join("argv")).unwrap();
         let registry = dir.path().join("registry.json");
         let mut backend = TmuxBackend::with_registry(&script, &registry);
         for label in [
@@ -237,6 +243,12 @@ list-panes) printf '%%1__SEP__$1__SEP__@1__SEP__/work__SEP__bash__SEP__shell__SE
 esac
 "#.replace("__SEP__", crate::terminal::parse::pane_separator())).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Settle inherited writer descriptors before the first backend exec (t3591).
+        crate::testsupport::exec_retrying_busy(|| {
+            std::process::Command::new(&script).arg("warm-up").status()
+        })
+        .expect("settle the fake tmux");
+        std::fs::remove_file(dir.path().join("calls")).unwrap();
         let registry = dir.path().join("registry.json");
         let mut backend = TmuxBackend::with_registry(&script, &registry);
         for (panes, tabs, category, message) in [
