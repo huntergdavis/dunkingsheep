@@ -223,6 +223,30 @@ impl Flock {
     }
 
     /// Query representation for clients without treating missing membership as global.
+    /// t4473: whether the planner pane `planner` holds a project grant for the explicit project
+    /// of `lane`, both read with their live process identity. Any failure to read is `false`.
+    pub fn planner_grant_covers_lane(
+        &self,
+        env: &dyn PaneInfoEnv,
+        planner: &str,
+        lane: &str,
+    ) -> bool {
+        let (Ok((planner_pid, planner_start)), Ok((lane_pid, lane_start))) =
+            (identity(env, planner), identity(env, lane))
+        else {
+            return false;
+        };
+        let Ok(db) = self.project_connection() else {
+            return false;
+        };
+        crate::tasks::planner_scope::project_grant_covers_lane(
+            &db,
+            (planner, planner_pid, &planner_start),
+            (lane, lane_pid, &lane_start),
+        )
+        .unwrap_or(false)
+    }
+
     pub fn lane_project_view(&self, env: &dyn PaneInfoEnv, pane: &str) -> Value {
         match self.lane_project(env, pane) {
             Ok(Some(scope)) => display(&scope),

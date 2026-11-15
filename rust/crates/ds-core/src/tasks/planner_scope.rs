@@ -238,9 +238,76 @@ pub fn allows(
     Ok(false)
 }
 
+/// t4473: does the planner `planner` hold a PROJECT grant whose project is the explicit project
+/// membership of the lane `lane`? Both are bound to their verified process identity. A global
+/// grant does not count here: switching a lane's model restarts it, and only a grant that names
+/// the lane's own project authorises that.
+pub fn project_grant_covers_lane(
+    db: &Connection,
+    planner: (&str, i64, &str),
+    lane: (&str, i64, &str),
+) -> rusqlite::Result<bool> {
+    let project: Option<String> = db
+        .query_row(
+            "SELECT project FROM planner_scope_grants WHERE pane_id=?1 AND pane_pid=?2 AND proc_start=?3 AND scope_kind='project'",
+            params![planner.0, planner.1, planner.2],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(project) = project else {
+        return Ok(false);
+    };
+    let membership = super::lane_project::get(db, lane.0, lane.1, lane.2)?;
+    Ok(membership.is_some_and(|m| m.scope == ProjectScope::Project(project)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// t4473: only a project grant naming the lane's explicit project covers the lane, and both
+    /// identities must be the live ones.
+    #[test]
+    fn a_project_grant_covers_only_lanes_of_its_own_project() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)", [])
+            .unwrap();
+        migrate(&db).unwrap();
+        super::super::lane_project::migrate(&db).unwrap();
+        let member = |pane: &str, pid: i64, project: &str| {
+            super::super::lane_project::set(
+                &db,
+                &super::super::lane_project::Membership {
+                    pane: pane.into(),
+                    pid,
+                    start: "s".into(),
+                    scope: ProjectScope::Project(project.into()),
+                },
+            )
+            .unwrap();
+        };
+        member("%10", 10, "alpha");
+        member("%11", 11, "beta");
+        let covers = |planner: (&str, i64, &str), lane: (&str, i64, &str)| {
+            project_grant_covers_lane(&db, planner, lane).unwrap()
+        };
+        // No grant at all.
+        assert!(!covers(("%2", 42, "p"), ("%10", 10, "s")));
+        set_grant(&db, "%2", 42, "p", &ProjectScope::Project("alpha".into())).unwrap();
+        assert!(covers(("%2", 42, "p"), ("%10", 10, "s")), "in project");
+        assert!(!covers(("%2", 42, "p"), ("%11", 11, "s")), "out of project");
+        assert!(
+            !covers(("%2", 42, "p"), ("%12", 12, "s")),
+            "a lane with no membership"
+        );
+        // The planner's grant is bound to its process; a replaced planner process holds none.
+        assert!(!covers(("%2", 43, "p"), ("%10", 10, "s")));
+        // The lane's membership is bound to its process too.
+        assert!(!covers(("%2", 42, "p"), ("%10", 99, "s")));
+        // A global grant does not authorise restarting a lane.
+        set_grant(&db, "%3", 7, "g", &ProjectScope::Global).unwrap();
+        assert!(!covers(("%3", 7, "g"), ("%10", 10, "s")));
+    }
 
     #[test]
     fn review_creation_uses_bound_grant_and_exact_repo_mapping() {

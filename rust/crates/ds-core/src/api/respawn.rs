@@ -68,6 +68,7 @@ pub fn h_respawn_pane(context: &HandlerContext<'_>, args: Args) -> Result<Value,
                 reason: parsed.reason,
                 self_pane_id: context.self_pane_id(),
                 keep_leases: false,
+                preauthorized: false,
             },
         )
     };
