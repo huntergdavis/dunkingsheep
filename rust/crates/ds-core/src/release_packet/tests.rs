@@ -1,4 +1,5 @@
 use super::*;
+use std::os::unix::fs::PermissionsExt;
 
 struct Fixture {
     _dir: tempfile::TempDir,
