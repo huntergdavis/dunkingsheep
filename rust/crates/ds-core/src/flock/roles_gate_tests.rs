@@ -777,6 +777,212 @@ fn accepted_detached_owner_token_calls_are_audited() {
     let _ = unrelated.wait();
 }
 
+// ---- t4553: owner-registered roots for detached owner-token callers (dry run first) ----
+
+#[test]
+fn the_detached_roots_file_is_strict_and_absent_means_todays_behaviour() {
+    use crate::roles::{detached_verdict, DetachedRoots, DetachedVerdict};
+    let parsed =
+        DetachedRoots::parse(r#"{"enforce": true, "roots": [{"pid": 700, "start": "3"}]}"#)
+            .unwrap();
+    assert_eq!(
+        parsed,
+        DetachedRoots {
+            enforce: true,
+            roots: vec![(700, "3".into())]
+        }
+    );
+    assert_eq!(
+        DetachedRoots::parse("{}").unwrap(),
+        DetachedRoots::default()
+    );
+    for bad in [
+        "",
+        "[]",
+        r#"{"enforce": "yes"}"#,
+        r#"{"enforce": false, "extra": 1}"#,
+        r#"{"roots": [{"pid": 1, "start": "3"}]}"#,
+        r#"{"roots": [{"pid": 700}]}"#,
+        r#"{"roots": [{"pid": 700, "start": " "}]}"#,
+        r#"{"roots": {"pid": 700, "start": "3"}}"#,
+    ] {
+        assert_eq!(DetachedRoots::parse(bad), None, "{bad}");
+    }
+    let root = (700, "3".to_string());
+    let other = (701, "3".to_string());
+    let dry = DetachedRoots {
+        enforce: false,
+        roots: vec![root.clone()],
+    };
+    let enforced = DetachedRoots {
+        enforce: true,
+        ..dry.clone()
+    };
+    assert_eq!(detached_verdict(None, &other), DetachedVerdict::Accept);
+    assert_eq!(detached_verdict(Some(&dry), &root), DetachedVerdict::Accept);
+    assert_eq!(
+        detached_verdict(Some(&dry), &other),
+        DetachedVerdict::WouldRefuse
+    );
+    assert_eq!(
+        detached_verdict(Some(&enforced), &root),
+        DetachedVerdict::Accept
+    );
+    assert_eq!(
+        detached_verdict(Some(&enforced), &other),
+        DetachedVerdict::Refuse
+    );
+    // Same pid, different start: a recycled pid is a different process.
+    let recycled = (700, "4".to_string());
+    assert_eq!(
+        detached_verdict(Some(&enforced), &recycled),
+        DetachedVerdict::Refuse
+    );
+}
+
+#[test]
+fn the_detached_roots_file_counts_only_when_it_is_the_daemon_users_own_and_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_flock, dir) = bare("owner-detached-roots-file");
+    let roles = Roles::new(
+        &Env::default(),
+        Some(dir.join("roles.json")),
+        Some(dir.join("tokens.json")),
+        None,
+    )
+    .unwrap();
+    assert_eq!(roles.owner_detached_roots(), None, "missing file");
+    let path = dir.join(crate::roles::OWNER_DETACHED_ROOTS_FILE);
+    std::fs::write(&path, r#"{"enforce": true, "roots": []}"#).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(roles.owner_detached_roots().map(|r| r.enforce), Some(true));
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o620)).unwrap();
+    assert_eq!(
+        roles.owner_detached_roots(),
+        None,
+        "group-writable is ignored"
+    );
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(&path, "not json").unwrap();
+    assert_eq!(roles.owner_detached_roots(), None, "malformed is ignored");
+}
+
+#[test]
+fn the_unregistered_root_line_names_processes_never_tokens() {
+    use super::roles_gate::detached_refusal_line;
+    use crate::roles::DetachedVerdict;
+    let stat = |pid: i64, comm: &str, start: &str| crate::proc::ProcStat {
+        pid,
+        comm: comm.into(),
+        state: "S".into(),
+        ppid: 1,
+        session: 0,
+        start: start.into(),
+    };
+    let (caller, root) = (stat(900, "dunkingsheep", "5"), stat(700, "sh\nforged", "3"));
+    assert_eq!(
+        detached_refusal_line(DetachedVerdict::WouldRefuse, &caller, &root, "/usr/bin/sh"),
+        "owner token from a detached caller under an unregistered root: would refuse (dry run, \
+         accepted): caller=\"dunkingsheep\" pid=900 root=700:3 root_exe=\"/usr/bin/sh\""
+    );
+    assert!(
+        detached_refusal_line(DetachedVerdict::Refuse, &caller, &root, "?").contains(": refused: ")
+    );
+}
+
+/// Through the gate with this test's real process chain, which is detached on a CI runner
+/// (under a tmux server it is not, and only the pure checks above apply).
+#[test]
+fn a_detached_owner_token_call_is_checked_against_the_registered_roots() {
+    use std::os::unix::fs::PermissionsExt;
+    struct NoPanes;
+    impl PaneInfoEnv for NoPanes {
+        fn list_panes_grouped(&self) -> Vec<Value> {
+            vec![json!({"pane_id":"%unrelated","pane_pid":1})]
+        }
+        fn get_pane(&self, _: &str) -> Option<Value> {
+            None
+        }
+        fn try_authority_panes(&self) -> Result<Vec<Value>, crate::error::DunkError> {
+            Ok(self.list_panes_grouped())
+        }
+    }
+    let caller_pid = std::process::id() as i64;
+    let mut cursor = caller_pid;
+    for _ in 0..crate::proc::MAX_DEPTH {
+        let row = crate::proc::stat(cursor).unwrap();
+        if row.comm == "tmux: server" {
+            return;
+        }
+        if row.ppid <= 1 {
+            break;
+        }
+        cursor = row.ppid;
+    }
+    let root = (cursor, crate::proc::process_start(cursor).unwrap());
+    let (flock, dir) = bare("owner-detached-roots-gate");
+    let mut roles = Roles::new(
+        &Env::default(),
+        Some(dir.join("roles.json")),
+        Some(dir.join("tokens.json")),
+        None,
+    )
+    .unwrap();
+    let caller_start = crate::proc::process_start(caller_pid).unwrap();
+    roles
+        .register(
+            OWNER,
+            "owner",
+            Some(caller_pid),
+            Some(&caller_start),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    let token = roles.issue_token("owner", Some("test"), None).unwrap();
+    flock.attach_roles(roles, None);
+    let check = || {
+        flock.clear_caller();
+        flock.set_caller(Some(
+            json!({"pid":caller_pid,"start":caller_start,"source":"peer"}),
+        ));
+        flock.set_service_token(Some(&token));
+        flock.set_socket_peer(Some(true));
+        flock.with_caller(|state| state.socket_peer_uid = Some(nix::unistd::geteuid().as_raw()));
+        flock.caller_role(None, &NoPanes)
+    };
+    let path = dir.join(crate::roles::OWNER_DETACHED_ROOTS_FILE);
+    let write = |text: String| {
+        std::fs::write(&path, text).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    };
+    assert_eq!(check().unwrap(), "owner", "no file: today's behaviour");
+    write(r#"{"enforce": false, "roots": []}"#.into());
+    assert_eq!(
+        check().unwrap(),
+        "owner",
+        "dry run: unregistered root still accepted"
+    );
+    write(r#"{"enforce": true, "roots": []}"#.into());
+    let refused = check().unwrap_err().to_string();
+    assert!(
+        refused.contains("not one the owner registered"),
+        "{refused}"
+    );
+    write(format!(
+        r#"{{"enforce": true, "roots": [{{"pid": {}, "start": "{}"}}]}}"#,
+        root.0, root.1
+    ));
+    assert_eq!(
+        check().unwrap(),
+        "owner",
+        "registered root accepted under enforcement"
+    );
+    flock.clear_caller();
+}
+
 // ---- t4782: the system token is accepted only from where the daemon's services run ----
 
 #[test]

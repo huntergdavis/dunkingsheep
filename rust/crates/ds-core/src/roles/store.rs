@@ -39,6 +39,67 @@ pub fn system_token_panes_trusted(file_uid: u32, mode: u32, daemon_uid: u32) -> 
 
 /// t4782: the owner's list of panes a system token may be used from, by token label.
 pub const SYSTEM_TOKEN_PANES_FILE: &str = "system-token-panes.json";
+/// t4553: the owner's list of process roots a detached owner-token caller may run under.
+pub const OWNER_DETACHED_ROOTS_FILE: &str = "owner-detached-roots.json";
+
+/// t4553: the parsed `owner-detached-roots.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DetachedRoots {
+    /// Refuse a detached owner-token call whose root is not listed. Off: log it as
+    /// "would refuse" and accept it (the dry run).
+    pub enforce: bool,
+    /// `(pid, start)` of each registered root process.
+    pub roots: Vec<(i64, String)>,
+}
+
+impl DetachedRoots {
+    /// Strict: anything but the documented shape is `None`, so a typo never widens or
+    /// tightens access by accident.
+    pub fn parse(text: &str) -> Option<DetachedRoots> {
+        let value: Value = serde_json::from_str(text).ok()?;
+        let object = value.as_object()?;
+        if object.keys().any(|key| key != "enforce" && key != "roots") {
+            return None;
+        }
+        let enforce = match object.get("enforce") {
+            None => false,
+            Some(flag) => flag.as_bool()?,
+        };
+        let roots = object.get("roots").map_or(Some(Vec::new()), |roots| {
+            roots
+                .as_array()?
+                .iter()
+                .map(|root| {
+                    let pid = root.get("pid")?.as_i64().filter(|pid| *pid > 1)?;
+                    let start = root.get("start")?.as_str()?.trim();
+                    (!start.is_empty()).then(|| (pid, start.to_string()))
+                })
+                .collect()
+        })?;
+        Some(DetachedRoots { enforce, roots })
+    }
+}
+
+/// t4553: what to do with a detached owner-token call whose process chain ends at `root`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetachedVerdict {
+    /// No list (today's behaviour), or the root is listed.
+    Accept,
+    /// Not listed, enforcement off: accepted, logged as "would refuse".
+    WouldRefuse,
+    /// Not listed, enforcement on.
+    Refuse,
+}
+
+pub fn detached_verdict(roots: Option<&DetachedRoots>, root: &(i64, String)) -> DetachedVerdict {
+    match roots {
+        None => DetachedVerdict::Accept,
+        Some(listed) if listed.roots.contains(root) => DetachedVerdict::Accept,
+        Some(listed) if listed.enforce => DetachedVerdict::Refuse,
+        Some(_) => DetachedVerdict::WouldRefuse,
+    }
+}
+
 /// With no registry file at all (a fresh install, the test suite) a bound pane is a
 /// worker; the first registration writes the file with default "anonymous" (FLAT_FLEET 4.2).
 pub const UNCONFIGURED_DEFAULT: &str = "worker";
@@ -535,6 +596,39 @@ impl Roles {
             .filter_map(|pane| pane.as_str().map(str::trim).map(String::from))
             .filter(|pane| !pane.is_empty())
             .collect()
+    }
+
+    /// t4553: the owner's list of process roots a DETACHED owner-token caller may run under,
+    /// from `owner-detached-roots.json` beside the token file:
+    /// `{"enforce": false, "roots": [{"pid": 123, "start": "456"}]}`.
+    ///
+    /// `None` (today's behaviour: every detached caller accepted, audited) when the file is
+    /// missing, unreadable or malformed, or is not the daemon user's own or is writable by group
+    /// or others (one warning is logged for the last three). `enforce` defaults to false.
+    pub fn owner_detached_roots(&self) -> Option<DetachedRoots> {
+        let path = self.tokens_path.parent()?.join(OWNER_DETACHED_ROOTS_FILE);
+        let meta = std::fs::metadata(&path).ok()?;
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let warn = |why: &str| {
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!("WARNING {} is ignored: {why}", path.display());
+            }
+        };
+        {
+            use std::os::unix::fs::MetadataExt;
+            if !system_token_panes_trusted(meta.uid(), meta.mode(), nix::unistd::geteuid().as_raw())
+            {
+                warn("it must be owned by the daemon's user and not writable by group or others");
+                return None;
+            }
+        }
+        let parsed = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| DetachedRoots::parse(&text));
+        if parsed.is_none() {
+            warn("it is not {\"enforce\": bool, \"roots\": [{\"pid\": N, \"start\": \"S\"}]}");
+        }
+        parsed
     }
 
     /// Non-secret label for a currently valid owner token; never return its value or hash.

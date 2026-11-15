@@ -450,8 +450,9 @@ pub fn capped_result_text(result: &serde_json::Value) -> String {
 
 mod store;
 pub use store::{
-    hash_token, system_token_panes_trusted, Roles, DEFAULT_REVIEWER_PROVIDERS, DEFAULT_ROLE,
-    LANE_ROLES, ROLES, SYSTEM_TOKEN_PANES_FILE, TOKEN_ROLES, UNCONFIGURED_DEFAULT,
+    detached_verdict, hash_token, system_token_panes_trusted, DetachedRoots, DetachedVerdict,
+    Roles, DEFAULT_REVIEWER_PROVIDERS, DEFAULT_ROLE, LANE_ROLES, OWNER_DETACHED_ROOTS_FILE, ROLES,
+    SYSTEM_TOKEN_PANES_FILE, TOKEN_ROLES, UNCONFIGURED_DEFAULT,
 };
 
 #[cfg(test)]
