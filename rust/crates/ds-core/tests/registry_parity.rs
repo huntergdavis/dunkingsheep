@@ -24,6 +24,7 @@ fn every_python_command_is_present_and_no_extra_ones_are() {
         "owner_ingest_thread",
         "owner_delivered_thread",
         "pr_wait",
+        "pr_author_correct",
         "task_owner_answer",
         "task_owner_question",
         "owner_page",
@@ -362,4 +363,17 @@ fn task_paging_socket_arguments_are_explicit_and_absent_from_public_schema() {
     for key in ["paged", "page_size", "cursor", "page_group"] {
         assert!(grouped["properties"].get(key).is_none());
     }
+}
+
+#[test]
+fn pr_author_correction_stays_planner_only_and_socket_only() {
+    let command = registry::command("pr_author_correct").unwrap();
+    assert!(
+        !command.mcp,
+        "rare coordinator mutation must not expand MCP schemas"
+    );
+    assert_eq!(command.roles, &["planner"]);
+    assert!(!registry::GROUPS
+        .iter()
+        .any(|g| g.actions.iter().any(|(_, cmd)| *cmd == "pr_author_correct")));
 }

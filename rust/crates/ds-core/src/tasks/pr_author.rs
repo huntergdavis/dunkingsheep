@@ -1,11 +1,13 @@
 //! Guarded, durable declarations; an ordinary CI observer is never an author.
 use super::*;
+mod correction;
 
 type LeaseProof = (
     String,
     String,
     String,
     Option<String>,
+    Option<i64>,
     Option<i64>,
     Option<String>,
 );
@@ -15,6 +17,9 @@ pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS pr_authorship (
  head TEXT NOT NULL, pane TEXT NOT NULL, task_id TEXT NOT NULL, at REAL NOT NULL,
  UNIQUE(repo,pr,head,pane));
  CREATE INDEX IF NOT EXISTS pr_authorship_pr ON pr_authorship(repo,pr,id);
+ CREATE TABLE IF NOT EXISTS pr_author_exclusions(repo TEXT NOT NULL,pr INTEGER NOT NULL,pane TEXT NOT NULL,task_id TEXT NOT NULL,planner TEXT NOT NULL,reason TEXT NOT NULL,at REAL NOT NULL,PRIMARY KEY(repo,pr,pane,task_id));
+ CREATE TABLE IF NOT EXISTS pr_author_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL,pr INTEGER NOT NULL,head TEXT NOT NULL,pane TEXT NOT NULL,task_id TEXT NOT NULL,planner TEXT NOT NULL,prior_author TEXT NOT NULL,reason TEXT NOT NULL,at REAL NOT NULL);
+ CREATE INDEX IF NOT EXISTS pr_author_corrections_head ON pr_author_corrections(repo,pr,head,id);
  CREATE TABLE IF NOT EXISTS pr_author_notice_sent(repo TEXT NOT NULL,pr INTEGER NOT NULL,message_id TEXT NOT NULL,PRIMARY KEY(repo,pr));";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,6 +27,8 @@ pub struct Attribution {
     pub author: Option<String>,
     pub task: Option<String>,
     pub contributors: Vec<String>,
+    pub corrected_by: Option<String>,
+    pub correction_reason: Option<String>,
 }
 
 /// All declarations remain exclusions, including those attached to earlier heads.
@@ -30,7 +37,7 @@ pub(crate) fn contributors(
     repo: &str,
     pr: i64,
 ) -> rusqlite::Result<Vec<String>> {
-    conn.prepare("SELECT DISTINCT pane FROM pr_authorship WHERE repo=?1 AND pr=?2 ORDER BY pane")?
+    conn.prepare("SELECT pane FROM pr_authorship WHERE repo=?1 AND pr=?2 UNION SELECT pane FROM pr_author_exclusions WHERE repo=?1 AND pr=?2 ORDER BY pane")?
         .query_map(params![repo, pr], |r| r.get(0))?
         .collect()
 }
@@ -67,22 +74,26 @@ impl Tasks {
         self.writer.call(move |conn| {
             let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db::map_sqlite)?;
             let row: Option<LeaseProof> = tx.query_row(
-                "SELECT t.kind,t.status,t.assignees,t.repo,l.caller_pid,l.caller_start FROM tasks t JOIN task_leases l ON l.task_id=t.id WHERE t.id=?1 AND l.pane_id=?2 AND l.expires_at>?3",
-                params![task,pane,now], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))
+                "SELECT t.kind,t.status,t.assignees,t.repo,t.pr,l.caller_pid,l.caller_start FROM tasks t JOIN task_leases l ON l.task_id=t.id WHERE t.id=?1 AND l.pane_id=?2 AND l.expires_at>?3",
+                params![task,pane,now], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))
                 .optional().map_err(db::map_sqlite)?;
-            let Some((kind,status,assignees,bound_repo,pid,start))=row else {return Err(DunkError::Refused("author-task requires your live work-task lease".into()));};
+            let Some((kind,status,assignees,bound_repo,bound_pr,pid,start))=row else {return Err(DunkError::Refused("author-task requires your live work-task lease".into()));};
             if kind!="work" || status!="in_progress" || !decode_list(Some(&assignees)).contains(&pane)
-                || bound_repo.as_deref().is_some_and(|r|r!=repo)
                 || caller.pane_id.as_deref()!=Some(pane.as_str()) || caller.pid.is_none() || caller.start.is_none()
                 || pid!=caller.pid || start!=caller.start
                 || !crate::proc::process_alive(caller.pid.unwrap(),caller.start.as_deref()) {
                 return Err(DunkError::Refused("author-task requires your identity-bound live work-task lease".into()));
             }
-            // No updates: the first declaration on a head is its primary author. Later
+            if bound_repo.as_deref().is_some_and(|r|r!=repo) || bound_pr.is_some_and(|p|p!=pr) {
+                return Err(DunkError::Refused("author-task is bound to a different repository/PR; a planner correction is required".into()));
+            }
+            let binding_changed=bound_repo.as_deref()!=Some(repo.as_str()) || bound_pr!=Some(pr);
+            if binding_changed {tx.execute("UPDATE tasks SET repo=?1,pr=?2,updated_at=?3 WHERE id=?4",params![repo,pr,now,task]).map_err(db::map_sqlite)?;}
+            // The first declaration stays primary unless a planner records a correction. Later
             // co-authors (and authors of future heads) accumulate as exclusions forever.
             let inserted=tx.execute("INSERT OR IGNORE INTO pr_authorship(repo,pr,head,pane,task_id,at) VALUES (?1,?2,?3,?4,?5,?6)",params![repo,pr,head,pane,task,now]).map_err(db::map_sqlite)?;
-            if inserted>0 {
-                tx.execute("INSERT INTO task_events(task_id,event,at,actor,meta) VALUES (?1,'note',?2,?3,?4)",params![task,now,pane,json!({"kind":"evidence","reason":format!("Declared PR authorship: {repo}#{pr} @ {head}"),"pr_authorship":{"repo":repo,"pr":pr,"head":head,"pane":pane}}).to_string()]).map_err(db::map_sqlite)?;
+            if inserted>0 || binding_changed {
+                tx.execute("INSERT INTO task_events(task_id,event,at,actor,meta) VALUES (?1,'note',?2,?3,?4)",params![task,now,pane,json!({"kind":"evidence","reason":format!("Declared PR authorship: {repo}#{pr} @ {head}"),"pr_authorship":{"repo":repo,"pr":pr,"head":head,"pane":pane,"binding_before":{"repo":bound_repo,"pr":bound_pr},"binding_after":{"repo":repo,"pr":pr}}}).to_string()]).map_err(db::map_sqlite)?;
             }
             let result=attribution(&tx,&repo,pr,&head)?.expect("declaration exists");
             tx.commit().map_err(db::map_sqlite)?;
@@ -153,19 +164,30 @@ fn attribution(
     if contributors.is_empty() {
         return Ok(None);
     }
+    if let Some((author, task, planner, reason)) = correction::latest(conn, repo, pr, head)? {
+        return Ok(Some(Attribution {
+            author: Some(author),
+            task: Some(task),
+            contributors,
+            corrected_by: Some(planner),
+            correction_reason: Some(reason),
+        }));
+    }
     let primary:Option<(String,String)>=conn.query_row("SELECT pane,task_id FROM pr_authorship WHERE repo=?1 AND pr=?2 AND head=?3 ORDER BY id LIMIT 1",params![repo,pr,head],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(db::map_sqlite)?;
     let (author, task) = primary.map(|(a, t)| (Some(a), Some(t))).unwrap_or_default();
     Ok(Some(Attribution {
         author,
         task,
         contributors,
+        corrected_by: None,
+        correction_reason: None,
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    async fn work(tasks: &Tasks, pane: &str) -> (String, crate::proc::Caller) {
+    pub(super) async fn work(tasks: &Tasks, pane: &str) -> (String, crate::proc::Caller) {
         let task = tasks
             .add_with(
                 "global",
@@ -381,3 +403,6 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod tightening_tests;

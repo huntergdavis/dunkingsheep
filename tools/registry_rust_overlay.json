@@ -1218,6 +1218,61 @@
     "priority",
     "page_group"
    ]
+  },
+  "pr_author_correct": {
+   "new": true,
+   "description": "Planner-only audited correction of exact-head PR authorship and work-task binding. Keeps all old/new contributors excluded. Requires live process-bound planner grant for repository and work task; no GitHub writes.",
+   "params": [
+    [
+     "target",
+     {
+      "type": "string"
+     }
+    ],
+    [
+     "head",
+     {
+      "type": "string"
+     }
+    ],
+    [
+     "author_task",
+     {
+      "type": "string"
+     }
+    ],
+    [
+     "author",
+     {
+      "type": "string"
+     }
+    ],
+    [
+     "reason",
+     {
+      "type": "string"
+     }
+    ]
+   ],
+   "required": [
+    "target",
+    "head",
+    "author_task",
+    "author",
+    "reason"
+   ],
+   "mcp_required": [
+    "target",
+    "head",
+    "author_task",
+    "author",
+    "reason"
+   ],
+   "mcp": false,
+   "owner_only": false,
+   "roles": [
+    "planner"
+   ]
   }
  },
  "groups": {

@@ -410,7 +410,7 @@ pub fn pr_wait_command(ns: &Map<String, Value>, args: Map<String, Value>) -> Out
         Err(e) => return e,
     };
     if !confirmed_pr_author(&args, &result) {
-        return fail("daemon did not confirm authorship (the wait may be registered); use an attribution-aware daemon and repeat the same command".into(),2);
+        return fail("daemon did not confirm task-bound authorship (a wait/declaration may exist); use an updated daemon and repeat the same command".into(),2);
     }
     finish(ns, &result, &|v| {
         format!("{}\n", serde_json::to_string_pretty(v).unwrap())
@@ -421,7 +421,8 @@ fn confirmed_pr_author(args: &Map<String, Value>, result: &Value) -> bool {
         return true;
     };
     let a = &result["authorship"];
-    a["declaration_task"].as_str() == Some(task)
+    confirmed_task_binding(args, a)
+        && a["declaration_task"].as_str() == Some(task)
         && a["head"]
             .as_str()
             .zip(args.get("head").and_then(Value::as_str))
@@ -434,12 +435,56 @@ fn confirmed_pr_author(args: &Map<String, Value>, result: &Value) -> bool {
                     .is_some_and(|v| v.iter().any(|p| p.as_str() == Some(s)))
         })
 }
+fn confirmed_task_binding(args: &Map<String, Value>, a: &Value) -> bool {
+    let Some((repo, pr)) = args
+        .get("target")
+        .and_then(Value::as_str)
+        .and_then(|s| s.rsplit_once('#'))
+    else {
+        return false;
+    };
+    a["task_binding"]["repo"].as_str() == Some(repo)
+        && pr
+            .parse::<i64>()
+            .ok()
+            .is_some_and(|pr| a["task_binding"]["pr"].as_i64() == Some(pr))
+}
+/// A distinct verb makes an older daemon refuse before any declaration/write.
+pub fn pr_author_correct_command(ns: &Map<String, Value>, args: Map<String, Value>) -> Outcome {
+    let mut client = match connect(ns) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let result = match call(&mut client, "pr_author_correct", args.clone()) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let a = &result["authorship"];
+    if !confirmed_task_binding(&args, a)
+        || result["corrected"] != true
+        || a["author"] != args["author"]
+        || a["task"] != args["author_task"]
+        || !a["head"]
+            .as_str()
+            .zip(args.get("head").and_then(Value::as_str))
+            .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+        || !a["corrected_by"].as_str().is_some_and(|s| !s.is_empty())
+        || a["correction_reason"].as_str()
+            != args.get("reason").and_then(Value::as_str).map(str::trim)
+    {
+        return fail("daemon did not confirm the audited correction".into(), 2);
+    }
+    finish(ns, &result, &|v| {
+        format!("{}\n", serde_json::to_string_pretty(v).unwrap())
+    })
+}
+
 #[cfg(test)]
 mod pr_author_receipt_tests {
     use super::*;
     #[test]
     fn review_author_cli_requires_explicit_receipt_from_new_daemon() {
-        let args = json!({"head":"a".repeat(40),"author_task":"t1"})
+        let args = json!({"target":"o/r#7","head":"a".repeat(40),"author_task":"t1"})
             .as_object()
             .unwrap()
             .clone();
@@ -447,8 +492,17 @@ mod pr_author_receipt_tests {
             &args,
             &json!({"registered":true,"id":1})
         ));
-        let mut receipt = json!({"authorship":{"head":"a".repeat(40),"declaration_task":"t1","declared_by":"%2","author":"%1","contributors":["%1","%2"]}});
+        let mut receipt = json!({"authorship":{"head":"a".repeat(40),"declaration_task":"t1","declared_by":"%2","author":"%1","contributors":["%1","%2"],"task_binding":{"repo":"o/r","pr":7}}});
         assert!(confirmed_pr_author(&args, &receipt));
+        let mut unbound = receipt.clone();
+        unbound["authorship"]
+            .as_object_mut()
+            .unwrap()
+            .remove("task_binding");
+        assert!(
+            !confirmed_pr_author(&args, &unbound),
+            "old daemon cannot confirm new task-binding guarantee"
+        );
         receipt["authorship"]["head"] = json!("b".repeat(40));
         assert!(!confirmed_pr_author(&args, &receipt));
         assert!(confirmed_pr_author(

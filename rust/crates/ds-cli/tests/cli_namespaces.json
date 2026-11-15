@@ -16461,5 +16461,91 @@
    "socket": null,
    "target": null
   }
+ },
+ {
+  "argv": [
+   "pr",
+   "correct-author",
+   "x",
+   "--head",
+   "x",
+   "--author-task",
+   "x",
+   "--author",
+   "x",
+   "--reason",
+   "x"
+  ],
+  "namespace": {
+   "author": "x",
+   "author_task": "x",
+   "command": "pr",
+   "head": "x",
+   "json": false,
+   "no_start_daemon": false,
+   "pr_command": "correct-author",
+   "reason": "x",
+   "self_pane": null,
+   "socket": null,
+   "target": "x"
+  }
+ },
+ {
+  "argv": [
+   "pr",
+   "correct-author",
+   "x",
+   "--head",
+   "x",
+   "--author-task",
+   "x",
+   "--author",
+   "x",
+   "--reason",
+   "x",
+   "--json"
+  ],
+  "namespace": {
+   "author": "x",
+   "author_task": "x",
+   "command": "pr",
+   "head": "x",
+   "json": true,
+   "no_start_daemon": false,
+   "pr_command": "correct-author",
+   "reason": "x",
+   "self_pane": null,
+   "socket": null,
+   "target": "x"
+  }
+ },
+ {
+  "argv": [
+   "--json",
+   "pr",
+   "correct-author",
+   "x",
+   "--head",
+   "x",
+   "--author-task",
+   "x",
+   "--author",
+   "x",
+   "--reason",
+   "x"
+  ],
+  "namespace": {
+   "author": "x",
+   "author_task": "x",
+   "command": "pr",
+   "head": "x",
+   "json": true,
+   "no_start_daemon": false,
+   "pr_command": "correct-author",
+   "reason": "x",
+   "self_pane": null,
+   "socket": null,
+   "target": "x"
+  }
  }
 ]

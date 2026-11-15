@@ -2,7 +2,9 @@ usage: dunkingsheep pr [-h] <subcommand> ...
 
 positional arguments:
   <subcommand>
-    wait        register a PR wait, then end the turn
+    wait            register a PR wait, then end the turn
+    correct-author  planner-only audited author correction; does not register
+                    a wait
 
 options:
-  -h, --help    show this help message and exit
+  -h, --help        show this help message and exit

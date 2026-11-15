@@ -948,6 +948,7 @@ impl Dispatcher {
     /// Register only the T39 review synchronization and list handlers.
     pub fn register_review_sync_list(&mut self) {
         self.register("pr_wait", h_pr_wait);
+        self.register("pr_author_correct", review_author::correct);
         self.register("review_sync", h_review_sync);
         self.register("review_list", h_review_list);
     }
@@ -3181,7 +3182,7 @@ pub fn h_pr_wait(context: &HandlerContext<'_>, args: Args) -> Result<Value, Dunk
     };
     let mut result = store.pr_wait_register(repo, pr, mailbox, pane, head.as_deref())?;
     if let Some(a) = attribution {
-        result["authorship"] = json!({"author":a.author,"contributors":a.contributors,"source":"guarded author-task declaration","task":a.task,"head":head,"declaration_task":args.get("author_task"),"declared_by":pane});
+        result["authorship"] = json!({"author":a.author,"contributors":a.contributors,"source":if a.corrected_by.is_some(){"planner-corrected attribution"}else{"guarded author-task declaration"},"task":a.task,"head":head,"declaration_task":args.get("author_task"),"declared_by":pane,"task_binding":{"repo":repo,"pr":pr},"corrected_by":a.corrected_by,"correction_reason":a.correction_reason});
     }
     Ok(result)
 }

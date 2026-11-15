@@ -6511,3 +6511,30 @@ fn cli_inbox_read_no_ack_forwards_manual_consumption_without_changing_body_shape
     assert_eq!(result["messages"][0]["body"], "private fixture body");
     assert_eq!(result["messages"][0]["message_id"], "i1");
 }
+
+#[test]
+fn cli_route_planner_author_correction_uses_distinct_guarded_rpc() {
+    let head = "a".repeat(40);
+    let argv = [
+        "pr",
+        "correct-author",
+        "o/r#7",
+        "--head",
+        &head,
+        "--author-task",
+        "t1",
+        "--author",
+        "%2",
+        "--reason",
+        "verified writer",
+    ];
+    let args = json!({"target":"o/r#7","head":head,"author_task":"t1","author":"%2","reason":"verified writer"});
+    let receipt = json!({"corrected":true,"authorship":{"author":"%2","task":"t1","head":head,"corrected_by":"%9","correction_reason":"verified writer","task_binding":{"repo":"o/r","pr":7}}});
+    let output = run_daemon_cli(&argv, "pr_author_correct", args.clone(), receipt);
+    assert!(output.status.success());
+    let old = run_daemon_cli(&argv, "pr_author_correct", args, json!({"registered":true}));
+    assert_eq!(old.status.code(), Some(2));
+    assert!(String::from_utf8(old.stderr)
+        .unwrap()
+        .contains("did not confirm"));
+}

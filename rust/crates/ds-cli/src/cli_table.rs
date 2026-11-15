@@ -3308,6 +3308,26 @@ pub static ROOT: Cmd = Cmd {
                     subs: &[
                     ],
                 },
+                Cmd {
+                    name: "correct-author", aliases: &[],
+                    help: Some("planner-only audited author correction; does not register a wait"),
+                    raw: false,
+                    raw_text: false,
+                    about: None,
+                    epilog: None,
+                    args: &[
+                        Arg { id: "target", dest: "target", tri: false, default_int: false, flags: &[], positional: true, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: true, help: Some("owner/repo#PR"), hidden: false, metavar: None, version: None },
+                        Arg { id: "head", dest: "head", tri: false, default_int: false, flags: &["--head"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: true, help: Some("full head SHA"), hidden: false, metavar: None, version: None },
+                        Arg { id: "author_task", dest: "author_task", tri: false, default_int: false, flags: &["--author-task"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: true, help: Some("work task associated with the corrected writer"), hidden: false, metavar: None, version: None },
+                        Arg { id: "author", dest: "author", tri: false, default_int: false, flags: &["--author"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: true, help: Some("corrected author pane ID"), hidden: false, metavar: None, version: None },
+                        Arg { id: "reason", dest: "reason", tri: false, default_int: false, flags: &["--reason"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: true, help: Some("nonempty audited correction reason"), hidden: false, metavar: None, version: None },
+                        Arg { id: "json", dest: "json", tri: false, default_int: false, flags: &["--json"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: None, hidden: false, metavar: None, version: None },
+                    ],
+                    groups: &[],
+                    sub_dest: None, sub_metavar: None, sub_required: false,
+                    subs: &[
+                    ],
+                },
             ],
         },
     ],

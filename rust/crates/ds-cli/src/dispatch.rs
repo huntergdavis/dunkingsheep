@@ -3967,6 +3967,17 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         },
         "token" => token(ns),
         "pr" => {
+            if text(ns, "pr_command") == Some("correct-author") {
+                let args = ["target", "head", "author_task", "author", "reason"]
+                    .into_iter()
+                    .filter_map(|k| {
+                        ns.get(k)
+                            .filter(|v| !v.is_null())
+                            .map(|v| (k.to_owned(), v.clone()))
+                    })
+                    .collect();
+                return crate::daemon_cmd::pr_author_correct_command(ns, args);
+            }
             let args = ["target", "head", "list", "cancel", "author_task"]
                 .into_iter()
                 .filter_map(|key| {

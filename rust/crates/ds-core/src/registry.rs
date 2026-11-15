@@ -39,7 +39,7 @@ pub struct Group {
     pub actions: &'static [(&'static str, &'static str)],
 }
 
-/// Every command the daemon serves (139 at generation time).
+/// Every command the daemon serves (140 at generation time).
 pub static COMMANDS: &[Command] = &[
     Command {
         name: "add_dunk",
@@ -820,6 +820,16 @@ pub static COMMANDS: &[Command] = &[
         mcp: true,
         owner_only: true,
         roles: &["owner", "system", "web"],
+    },
+    Command {
+        name: "pr_author_correct",
+        description: "Planner-only audited correction of exact-head PR authorship and work-task binding. Keeps all old/new contributors excluded. Requires live process-bound planner grant for repository and work task; no GitHub writes.",
+        params: &[Param { name: "target", schema: "{\"type\":\"string\"}" }, Param { name: "head", schema: "{\"type\":\"string\"}" }, Param { name: "author_task", schema: "{\"type\":\"string\"}" }, Param { name: "author", schema: "{\"type\":\"string\"}" }, Param { name: "reason", schema: "{\"type\":\"string\"}" }],
+        dispatch_required: &["target", "head", "author_task", "author", "reason"],
+        required: &["target", "head", "author_task", "author", "reason"],
+        mcp: false,
+        owner_only: false,
+        roles: &["planner"],
     },
     Command {
         name: "pr_wait",

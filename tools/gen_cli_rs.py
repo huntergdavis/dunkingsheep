@@ -154,6 +154,14 @@ def load_parser():
     wait.add_argument("--list", action="store_true", help="list your waits and poll timestamps")
     wait.add_argument("--cancel", type=int, help="cancel your wait by ID")
     wait.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    correct = actions.add_parser("correct-author", help="planner-only audited author correction; does not register a wait")
+    correct.add_argument("target", help="owner/repo#PR")
+    correct.add_argument("--head", required=True, help="full head SHA")
+    correct.add_argument("--author-task", dest="author_task", required=True, help="work task associated with the corrected writer")
+    correct.add_argument("--author", required=True, help="corrected author pane ID")
+    correct.add_argument("--reason", required=True, help="nonempty audited correction reason")
+    correct.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+
     return parser
 
 
