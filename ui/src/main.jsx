@@ -7,6 +7,7 @@ import './dash.css';
 import './scrollbars.css';
 import { canonicalDashLocation, DASH_ROUTES, resolveDashRoute, viewForPath } from './dash-route.js';
 import { ThemeContext, validTheme, storedTheme, api, DashShell, Login } from './DeskShared';
+import ChunkErrorBoundary from './ChunkErrorBoundary';
 const OwnerInbox = lazy(() => import('./OwnerInbox'));
 const MailboxBrowser = lazy(() => import('./MailboxBrowser'));
 const TasksView = lazy(() => import('./TasksView'));
@@ -76,7 +77,7 @@ function App() {
   if (authorized === null) return <div className="splash">DUNKING SHEEP</div>;
   // Keep the owner on the conversations and boards in this desk.
   const content = authorized
-    ? <Suspense fallback={<div className="splash" role="status">Loading dashboard…</div>}><StandaloneDesk key={`${route.view}:${route.search}`} view={route.view} known={route.known} /></Suspense>
+    ? <ChunkErrorBoundary key={`${route.view}:${route.search}`}><Suspense fallback={<div className="splash" role="status">Loading dashboard…</div>}><StandaloneDesk view={route.view} known={route.known} /></Suspense></ChunkErrorBoundary>
     : <Login onSuccess={() => setAuthorized(true)} />;
   return <ThemeContext.Provider value={{ theme, chooseTheme, themeError }}>{updateAvailable && <div className="update-banner" role="status">A desk update is ready. Save any draft, then <button onClick={() => window.location.reload()}>Refresh now</button>.</div>}{content}</ThemeContext.Provider>;
 }
