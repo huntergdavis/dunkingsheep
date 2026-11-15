@@ -108,7 +108,11 @@ impl RequestRuntimeAdapter<'_> {
             .filter(|name| !name.is_empty())
             .map(str::to_owned)
             .unwrap_or_else(|| format!("pid {pid}"));
-        let sample = crate::load::sample(&[(name, pid, start)], now);
+        let sample = crate::load::sample_with_ppids(
+            &[(name, pid, start)],
+            now,
+            self.roster_ppids.get_or_init(crate::load::ppid_map),
+        );
         Ok(sample
             .get("callers")
             .and_then(Value::as_array)
@@ -183,6 +187,10 @@ impl crate::flock::roster::RosterEnv for RequestRuntimeAdapter<'_> {
 }
 
 #[cfg(test)]
+#[path = "roster_perf_fixture.rs"]
+mod perf_fixture;
+
+#[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
@@ -193,6 +201,66 @@ mod tests {
     use crate::terminal::{fakes::FakeTerminal, Terminal};
 
     use super::*;
+
+    #[test]
+    fn cpu_parent_snapshot_is_request_local_and_keeps_start_time_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let flock = Flock::new(
+            dir.path().join("launches.json"),
+            dir.path().join("lanes.json"),
+            false,
+        );
+        let request = RequestCtx::default();
+        let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
+        let adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal);
+        let pid = i64::from(std::process::id());
+        let start = crate::load::stat(pid).unwrap().starttime;
+        let caller = json!({"caller_pid":pid,"caller_start":start});
+        assert!(adapter.roster_ppids.get().is_none());
+        assert!(adapter
+            .helper_rosterenv_cpu_sample(&caller, 1.0)
+            .unwrap()
+            .is_some());
+
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let child = Child(
+            std::process::Command::new("/bin/sleep")
+                .arg("30")
+                .spawn()
+                .unwrap(),
+        );
+        let child_pid = i64::from(child.0.id());
+        assert!(!adapter.roster_ppids.get().unwrap().contains_key(&child_pid));
+        assert!(adapter
+            .helper_rosterenv_cpu_sample(&caller, 2.0)
+            .unwrap()
+            .is_some());
+        assert!(!adapter.roster_ppids.get().unwrap().contains_key(&child_pid));
+        assert_eq!(
+            adapter
+                .helper_rosterenv_cpu_sample(&json!({"caller_pid":pid,"caller_start":start+1}), 2.0)
+                .unwrap(),
+            None
+        );
+
+        let next = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal);
+        assert!(next.roster_ppids.get().is_none());
+        assert!(next
+            .helper_rosterenv_cpu_sample(&caller, 3.0)
+            .unwrap()
+            .is_some());
+        assert!(next.roster_ppids.get().unwrap().contains_key(&child_pid));
+    }
 
     #[test]
     fn production_env_roster_lanes_uses_concrete_services() {

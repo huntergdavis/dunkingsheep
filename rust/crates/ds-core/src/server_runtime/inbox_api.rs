@@ -26,6 +26,7 @@ impl RequestRuntimeAdapter<'_> {
             owner_push: self.owner_push,
             next_jobs: self.next_jobs,
             dunk_runtime: self.dunk_runtime,
+            roster_ppids: std::sync::OnceLock::new(),
         }
         .with_outbox(outbox)?;
         let view =
