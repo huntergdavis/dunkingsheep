@@ -54,7 +54,7 @@ test('the unrouted-process section carries its count, rows and the reason it is 
 
 test('Projects renders the mail column and the collapsed unrouted section', () => {
   const here = path.dirname(fileURLToPath(import.meta.url));
-  const source = readFileSync(path.join(here, 'main.jsx'), 'utf8');
+  const source = readFileSync(path.join(here, 'ProjectsView.jsx'), 'utf8');
   const start = source.indexOf('function Projects(');
   const projects = source.slice(start, source.indexOf('\nfunction ', start + 1));
   assert.match(projects, /api\('\/fleet'\)/, 'Projects reads the pane roster for the counts');

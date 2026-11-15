@@ -71,7 +71,7 @@ test('a lane the daemon lists without a detected agent is a recipient like any o
 
 test('Send and Cancel are on their own row after the text box, inside the dialog form', () => {
   const here = path.dirname(fileURLToPath(import.meta.url));
-  const source = readFileSync(path.join(here, 'main.jsx'), 'utf8');
+  const source = readFileSync(path.join(here, 'DeskShared.jsx'), 'utf8');
   const start = source.indexOf('function QuickMessage(');
   const dialog = source.slice(start, source.indexOf('\nfunction ', start + 1));
   const at = needle => { const index = dialog.indexOf(needle); assert.notEqual(index, -1, `missing ${needle}`); return index; };
