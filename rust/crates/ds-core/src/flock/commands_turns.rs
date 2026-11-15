@@ -504,7 +504,9 @@ impl Flock {
         }
         let is_claim = plan.get("action").and_then(Value::as_str) == Some("claim");
         let open_handoffs = env.open_handoffs(pane_id, !is_claim)?;
-        if is_claim || plan.get("action").and_then(Value::as_str) == Some("mail") || open_handoffs {
+        let mail_first = self.mail_hook_opted_in(pane_id)
+            && plan.get("action").and_then(Value::as_str) == Some("mail");
+        if is_claim || mail_first || open_handoffs {
             return Ok(with_delivered(plan));
         }
         {

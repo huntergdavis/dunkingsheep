@@ -452,6 +452,9 @@ pub struct NextJob<'a> {
     pub tasks: &'a [Value],
     /// `None` means the count could not be established; an unknown is a skip.
     pub unread: Option<i64>,
+    /// Runtime proof of an authenticated opt-in hook source, never a public RPC input.
+    /// Legacy callers keep the original skip response and held/unread_mail metric.
+    pub mail_hook: bool,
     pub pending_delivery: bool,
     pub last_nudge_at: Option<f64>,
     pub task_nudges: BTreeMap<String, f64>,
@@ -496,7 +499,9 @@ pub fn next_job_plan(input: &NextJob<'_>) -> Value {
         return plan;
     };
     if unread != 0 {
-        plan["action"] = json!("mail");
+        if input.mail_hook {
+            plan["action"] = json!("mail");
+        }
         plan["reason"] = json!("unread_mail");
         return plan;
     }

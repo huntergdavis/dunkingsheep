@@ -1209,3 +1209,132 @@ fn a_turn_start_and_a_valid_turn_end_each_renew_the_senders_leases_and_a_rejecte
     assert_eq!(json!(false), again["ended"]);
     assert_eq!(2, spy.renewals.lock().unwrap().len());
 }
+
+/// Golden response and metric from main b24f6409's authenticated unread turn end.
+/// Exercise the actual turn-end wrapper, not only the pure planner or a held nudge.
+struct MailDispatchHooks<'a> {
+    flock: &'a Flock,
+    env: &'a Env,
+}
+impl TurnHooks for MailDispatchHooks<'_> {
+    fn record(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: &str,
+        _: f64,
+        _: Option<i64>,
+    ) {
+    }
+    fn observe_turn(&self, _: &str, _: &TurnState) -> Result<(), crate::error::DunkError> {
+        Ok(())
+    }
+    fn dispatch_on_turn_end(&self, pane: &str) -> Result<Value, crate::error::DunkError> {
+        self.flock.dispatch_on_turn_end(pane, self.env)
+    }
+}
+
+#[test]
+fn legacy_unread_turn_end_is_byte_identical_to_main_and_records_held_metric() {
+    const MAIN_END: &str = r#"{"pane_id":"w1:p1","ended":true,"reason":"stop","dispatch":{"trigger":"turn.end","pane_id":"w1:p1","action":"skip","reason":"unread_mail","delivered":false}}"#;
+    for source in [
+        None,
+        Some("codex-hook"),
+        Some("claude-hook"),
+        Some("pi-extension"),
+        Some("opencode-plugin"),
+    ] {
+        // The second case also defends the final boundary against a misclassified plan.
+        for forced_mail_plan in [false, true] {
+            let f = flock();
+            f.set_caller(Some(as_caller(41, "100")));
+            let start = f
+                .turn_start(None, Some(60.0), source, Some(PANE), None, &NoHooks)
+                .unwrap();
+            let mut env = Env::ready();
+            env.unread = Ok(Some(2));
+            env.plan_skip = Some("unread_mail");
+            env.next_job = crate::dispatch::next_job_plan(&crate::dispatch::NextJob {
+                trigger: "turn.end",
+                pane_id: PANE,
+                unread: Some(2),
+                mail_hook: f.mail_hook_opted_in(PANE),
+                ..Default::default()
+            });
+            if forced_mail_plan {
+                env.next_job["action"] = json!("mail");
+            }
+            let hooks = MailDispatchHooks {
+                flock: &f,
+                env: &env,
+            };
+            let end = f
+                .turn_end(
+                    None,
+                    "stop",
+                    Some(PANE),
+                    start["turn_id"].as_str(),
+                    true,
+                    &hooks,
+                )
+                .unwrap();
+            assert_eq!(
+                serde_json::to_string(&end).unwrap(),
+                MAIN_END,
+                "source={source:?}, forced_mail={forced_mail_plan}"
+            );
+            assert_eq!(
+                *env.metrics.lock().unwrap(),
+                vec![
+                    "handoff_read".to_owned(),
+                    format!("{PANE} held Some(\"unread_mail\") false")
+                ]
+            );
+            assert!(env.sent.lock().unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
+fn only_opted_in_unread_turn_end_returns_mail_first() {
+    let f = flock();
+    f.set_caller(Some(as_caller(41, "100")));
+    let start = f
+        .turn_start(
+            None,
+            Some(60.0),
+            Some("codex-hook-mail-v1"),
+            Some(PANE),
+            None,
+            &NoHooks,
+        )
+        .unwrap();
+    let mut env = Env::ready();
+    env.unread = Ok(Some(2));
+    env.plan_skip = Some("unread_mail");
+    env.next_job = crate::dispatch::next_job_plan(&crate::dispatch::NextJob {
+        trigger: "turn.end",
+        pane_id: PANE,
+        unread: Some(2),
+        mail_hook: f.mail_hook_opted_in(PANE),
+        ..Default::default()
+    });
+    let end = f
+        .turn_end(
+            None,
+            "stop",
+            Some(PANE),
+            start["turn_id"].as_str(),
+            true,
+            &MailDispatchHooks {
+                flock: &f,
+                env: &env,
+            },
+        )
+        .unwrap();
+    assert_eq!(end["dispatch"]["action"], "mail");
+    assert!(!env.metric(&format!("{PANE} held Some(\"unread_mail\") false")));
+    assert!(env.sent.lock().unwrap().is_empty());
+}

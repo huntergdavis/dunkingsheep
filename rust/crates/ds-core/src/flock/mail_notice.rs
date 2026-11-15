@@ -26,6 +26,14 @@ pub(crate) fn hook_source(source: Option<&str>) -> bool {
 }
 
 impl Flock {
+    pub(crate) fn mail_hook_opted_in(&self, pane: &str) -> bool {
+        self.turn_states
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(pane)
+            .is_some_and(|turn| hook_source(turn.source.as_deref()))
+    }
+
     /// Called only after the normal turn authentication. A sender's notify=false /
     /// recipient suppression has no queued notice and cannot be bypassed by this path.
     pub(crate) fn offer_mail_notice(

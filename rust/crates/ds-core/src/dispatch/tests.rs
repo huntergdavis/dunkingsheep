@@ -982,7 +982,13 @@ fn test_completed_or_cancelled_work_is_not_eligible() {
 
 #[test]
 fn test_unread_mail_is_handed_off_instead_of_claiming_another_task() {
-    let plan = nj_plan(&[nj("t1")], |i| i.unread = Some(2));
+    let legacy = nj_plan(&[nj("t1")], |i| i.unread = Some(2));
+    assert_eq!(legacy["action"], "skip");
+    assert_eq!(reason(&legacy), Some("unread_mail"));
+    let plan = nj_plan(&[nj("t1")], |i| {
+        i.unread = Some(2);
+        i.mail_hook = true;
+    });
     assert_eq!(plan["action"], "mail");
     assert_eq!(reason(&plan), Some("unread_mail"));
     assert!(plan["task_id"].is_null());

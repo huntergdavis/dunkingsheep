@@ -344,7 +344,9 @@ Mail is stored before any notice. A model-context offer is neither a read nor
 handling, and never sets the typed-notice delivery receipt. The native Codex
 adapter opts in with turn source `codex-hook-mail-v1`; legacy producers retain
 ordinary queued delivery. No installed hook, trust configuration or live pane
-changes as part of this source PR. Activation needs the coordinator's separate GO.
+changes as part of this source PR. Activation is agent-lane only and needs the
+coordinator's separate GO; do not install the continuation adapter on a human-driven
+Codex session.
 
 | Harness | Turn edges already wired | Model-context route | Evidence / activation |
 |---|---|---|---|
@@ -371,8 +373,10 @@ the turn result and daemon log explicitly select guarded fallback. A newer
 unread batch can supply a new offer. A real read makes the obsolete offered wake
 cancellable, so that its queue entry does not block the next task.
 
-Next-job decisions with unread mail return action `mail` rather than a silent
-skip and do not claim another task. While an opted-in turn is active, the notice
+Next-job decisions with unread mail return action `mail` only for an authenticated
+opt-in hook-mail source and do not claim another task. Legacy sources retain the
+exact prior `skip` response and `turn.end.dispatch` held/unread_mail metric;
+merely upgrading the daemon does not change the 24 h legacy baseline. While an opted-in turn is active, the notice
 worker performs no terminal reads, recovery or typing. On idle it waits 120 s,
 then uses the same durable queue, recipient guards, draft/dialog protections and
 submit verification as ordinary delivery. Duplicate hooks do not add wakes;
