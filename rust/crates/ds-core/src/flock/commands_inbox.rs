@@ -162,8 +162,8 @@ pub struct SendArgs<'a> {
     pub agent_only: bool,
     /// The sender to record when the caller has no pane and names no system sender:
     /// `mailbox::OWNER_DESK` for the web desk's service token (t4644), so its mail does not arrive
-    /// "from unknown" and a reply to the sender reaches the owner mailbox. Chosen
-    /// by the daemon from the authenticated role; it is not a wire argument.
+    /// "from unknown", or the registered label of an owner-role service token (VP agent).
+    /// Chosen by the daemon from authenticated identity; it is not a wire argument.
     pub role_sender: Option<&'a str>,
     /// Notify the recipient even when `DUNKINGSHEEP_INBOX_SILENT_MAILBOXES` lists it. Only the
     /// daemon's own Telegram owner-lane nudge sets this (t4645); it is not a wire argument.
@@ -805,7 +805,7 @@ impl Flock {
             use crate::inbox_store::{ThreadKind, ThreadRoute, ThreadSender, ThreadWrite};
             let actor = if args.human_origin {
                 ThreadSender::Human
-            } else if self_pane.is_some() {
+            } else if self_pane.is_some() || (role == "owner" && args.role_sender.is_some()) {
                 ThreadSender::Agent
             } else {
                 ThreadSender::System
