@@ -226,6 +226,9 @@ impl Store {
             connection
                 .execute_batch(mailbox_status::SCHEMA)
                 .map_err(map_sqlite)?;
+            connection
+                .execute_batch(mailbox_status::AUDIT_SCHEMA)
+                .map_err(map_sqlite)?;
             Ok(())
         })?;
         let readers = ReadPool::open_context(path, DEFAULT_READ_POOL, context)?;

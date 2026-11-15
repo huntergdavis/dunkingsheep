@@ -113,11 +113,24 @@ pub fn h_inbox_retire(context: &HandlerContext<'_>, args: Args) -> Result<Value,
         .to_string();
     let (candidates, refused) = apply_selection(&report, &named);
     let by = context.self_pane_id().unwrap_or("owner").to_string();
-    let outcome = if candidates.is_empty() {
-        crate::inbox_store::mailbox_status::RetireOutcome::default()
-    } else {
-        store.retire_mailboxes(&candidates, &reason, &by, context.env.now_s())?
-    };
+    // Every named mailbox goes into the append-only audit: the refused ones with their class
+    // now, and the store adds each retired or kept-at-re-check one, all in one transaction.
+    let refused_classes: Vec<(String, String)> = refused
+        .iter()
+        .map(|entry| {
+            (
+                entry["mailbox"].as_str().unwrap_or_default().to_string(),
+                entry["class"].as_str().unwrap_or("unknown").to_string(),
+            )
+        })
+        .collect();
+    let outcome = store.retire_mailboxes_audited(
+        &candidates,
+        &refused_classes,
+        &reason,
+        &by,
+        context.env.now_s(),
+    )?;
     Ok(json!({
         "applied": true,
         "reason": reason,

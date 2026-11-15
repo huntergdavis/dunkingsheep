@@ -27,6 +27,41 @@ pub const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mailbox_status (
     reopen_count   INTEGER NOT NULL DEFAULT 0
 )";
 
+/// t5014: every retire decision and every reopen, append-only. Rows are never updated or
+/// deleted: the triggers refuse it. An older daemon ignores this table (additive; rollback-safe).
+pub const AUDIT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mailbox_retire_audit (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    at       REAL NOT NULL,
+    actor    TEXT NOT NULL,
+    mailbox  TEXT NOT NULL,
+    class    TEXT,
+    reason   TEXT,
+    outcome  TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS mailbox_retire_audit_no_update BEFORE UPDATE ON mailbox_retire_audit
+BEGIN SELECT RAISE(ABORT, 'mailbox_retire_audit is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS mailbox_retire_audit_no_delete BEFORE DELETE ON mailbox_retire_audit
+BEGIN SELECT RAISE(ABORT, 'mailbox_retire_audit is append-only'); END;";
+
+fn audit(
+    connection: &Connection,
+    at: f64,
+    actor: &str,
+    mailbox: &str,
+    class: Option<&str>,
+    reason: &str,
+    outcome: &str,
+) -> Result<(), DunkError> {
+    connection
+        .execute(
+            "INSERT INTO mailbox_retire_audit (at, actor, mailbox, class, reason, outcome) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+            params![at, actor, mailbox, class, reason, outcome],
+        )
+        .map_err(map_sqlite)?;
+    Ok(())
+}
+
 /// The SQL condition that leaves out retired mailboxes, for queries over `messages`.
 pub const NOT_RETIRED: &str =
     "mailbox NOT IN (SELECT mailbox FROM mailbox_status WHERE status = 'retired')";
@@ -41,7 +76,7 @@ pub(crate) fn reopen_on_mail(
     mailbox: &str,
     now: f64,
 ) -> Result<(), DunkError> {
-    connection
+    let reopened = connection
         .execute(
             "UPDATE mailbox_status SET status = 'active', changed_at = ?, reason = 'late mail', \
              changed_by = 'inbox', reopen_count = reopen_count + 1 \
@@ -49,6 +84,17 @@ pub(crate) fn reopen_on_mail(
             params![now, mailbox],
         )
         .map_err(map_sqlite)?;
+    if reopened > 0 {
+        audit(
+            connection,
+            now,
+            "inbox",
+            mailbox,
+            None,
+            "late mail",
+            "reopened",
+        )?;
+    }
     Ok(())
 }
 
@@ -146,12 +192,31 @@ impl Store {
         by: &str,
         now: f64,
     ) -> Result<RetireOutcome, DunkError> {
+        self.retire_mailboxes_audited(mailboxes, &[], reason, by, now)
+    }
+
+    /// `retire_mailboxes`, recording in the append-only audit, in the same transaction, every
+    /// mailbox the caller refused before asking (`refused`: name and class at apply time) as
+    /// well as each one retired or kept at the re-check.
+    pub fn retire_mailboxes_audited(
+        &self,
+        mailboxes: &[String],
+        refused: &[(String, String)],
+        reason: &str,
+        by: &str,
+        now: f64,
+    ) -> Result<RetireOutcome, DunkError> {
         let mailboxes = mailboxes.to_vec();
+        let refused = refused.to_vec();
         let (reason, by) = (reason.to_string(), by.to_string());
         self.writer.call(move |connection| {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(map_sqlite)?;
+            for (mailbox, class) in &refused {
+                let outcome = if class == "not found" { "not found" } else { "refused" };
+                audit(&transaction, now, &by, mailbox, Some(class), &reason, outcome)?;
+            }
             let mut outcome = RetireOutcome::default();
             for mailbox in mailboxes {
                 let (messages, queued, newest): (i64, i64, Option<f64>) = transaction
@@ -181,6 +246,7 @@ impl Store {
                     None
                 };
                 if let Some(why) = keep {
+                    audit(&transaction, now, &by, &mailbox, Some("retired"), &reason, &format!("kept at re-check: {why}"))?;
                     outcome.kept.push((mailbox, why));
                     continue;
                 }
@@ -195,6 +261,7 @@ impl Store {
                         params![mailbox, now, reason, by, messages, newest],
                     )
                     .map_err(map_sqlite)?;
+                audit(&transaction, now, &by, &mailbox, Some("retired"), &reason, "retired")?;
                 outcome.retired.push(mailbox);
             }
             transaction.commit().map_err(map_sqlite)?;
@@ -310,6 +377,60 @@ mod tests {
             .retire_mailboxes(&names(&["quiet"]), "test", "%308", crate::clock::now_s())
             .unwrap();
         assert_eq!(again.retired, ["quiet"]);
+    }
+
+    /// t5014: every apply appends; nothing in the audit can be changed or removed.
+    #[test]
+    fn the_retire_audit_is_append_only_and_two_applies_leave_two_rows_each() {
+        let (_dir, store) = store();
+        let rows = |store: &Store| -> Vec<(String, String, String)> {
+            store
+                .writer
+                .call(|connection| {
+                    let mut statement = connection
+                        .prepare(
+                            "SELECT mailbox, outcome, actor FROM mailbox_retire_audit ORDER BY id",
+                        )
+                        .map_err(map_sqlite)?;
+                    let found = statement
+                        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                        .map_err(map_sqlite)?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(map_sqlite)?;
+                    Ok(found)
+                })
+                .unwrap()
+        };
+        let refused = vec![
+            ("poolrad-vp".to_string(), "vp".to_string()),
+            ("ghost".to_string(), "not found".to_string()),
+        ];
+        let names = |list: &[&str]| list.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        store
+            .retire_mailboxes_audited(&names(&["empty-one"]), &refused, "first", "%1", 10.0)
+            .unwrap();
+        store
+            .retire_mailboxes_audited(&names(&["empty-one"]), &refused, "second", "%1", 20.0)
+            .unwrap();
+        let audit = rows(&store);
+        assert_eq!(audit.len(), 6, "{audit:?}");
+        assert_eq!(
+            audit[0],
+            ("poolrad-vp".into(), "refused".into(), "%1".into())
+        );
+        assert_eq!(audit[1].1, "not found");
+        assert!(audit[2].1.starts_with("kept at re-check"), "{audit:?}");
+        // Append-only: an update or a delete is refused by the database.
+        let tamper = |sql: &'static str| {
+            store
+                .writer
+                .call(move |connection| connection.execute(sql, []).map_err(map_sqlite))
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(tamper("UPDATE mailbox_retire_audit SET outcome = 'x'").contains("append-only"));
+        assert!(tamper("DELETE FROM mailbox_retire_audit").contains("append-only"));
+        assert_eq!(rows(&store).len(), 6);
     }
 
     #[test]
