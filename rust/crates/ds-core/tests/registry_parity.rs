@@ -347,19 +347,25 @@ fn private_human_producers_are_not_mcp_actions_or_lane_grants() {
 }
 
 #[test]
-fn task_paging_socket_arguments_are_explicit_and_absent_from_public_schema() {
+fn paging_socket_arguments_are_explicit_and_absent_from_public_schema() {
     assert_eq!(
         registry::socket_only_params("task_list"),
         &["paged", "page_size", "cursor", "priority", "page_group"]
     );
+    assert_eq!(
+        registry::socket_only_params("owner_conversation"),
+        &["thread_mode", "thread_cursor", "root_id"]
+    );
     for command in registry::COMMANDS {
-        if command.name != "task_list" {
+        if !matches!(command.name, "task_list" | "owner_conversation") {
             assert!(registry::socket_only_params(command.name).is_empty());
         }
     }
-    let schema = registry::input_schema("task_list").unwrap();
-    for key in registry::socket_only_params("task_list") {
-        assert!(schema["properties"].get(key).is_none());
+    for name in ["task_list", "owner_conversation"] {
+        let schema = registry::input_schema(name).unwrap();
+        for key in registry::socket_only_params(name) {
+            assert!(schema["properties"].get(key).is_none());
+        }
     }
     let grouped = registry::grouped_input_schema("task").unwrap();
     for key in ["paged", "page_size", "cursor", "page_group"] {

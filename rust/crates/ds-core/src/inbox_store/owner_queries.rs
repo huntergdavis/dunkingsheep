@@ -40,7 +40,7 @@ fn raw_value(value: ValueRef<'_>) -> Value {
     }
 }
 
-fn raw_row(row: &Row<'_>) -> rusqlite::Result<Value> {
+pub(super) fn raw_row(row: &Row<'_>) -> rusqlite::Result<Value> {
     let statement = row.as_ref();
     let mut object = Map::new();
     for index in 0..statement.column_count() {

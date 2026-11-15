@@ -320,6 +320,11 @@
       "description": "Legacy audience opt-in; new thread views require false (default)."
      }
     ]
+   ],
+   "socket_only_params": [
+    "thread_mode",
+    "thread_cursor",
+    "root_id"
    ]
   },
   "owner_handoff": {
