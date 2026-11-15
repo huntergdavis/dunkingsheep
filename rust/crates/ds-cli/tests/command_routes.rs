@@ -156,8 +156,24 @@ fn assert_matches_python(args: &[&str]) {
         .unwrap();
         let rust_guide = std::str::from_utf8(&rust.stdout).unwrap();
         let mut recovery_changes = 0;
+        let mut author_changes = 0;
         for entry in overlay["replacements"].as_array().unwrap() {
             let old = entry["old"].as_str().unwrap();
+            if old == "cleared with `task unblock`.\n" {
+                let new = entry["new"].as_str().unwrap();
+                assert_eq!(
+                    text.matches(old).count(),
+                    1,
+                    "archived task-wait guidance changed"
+                );
+                assert!(
+                    rust_guide.contains(new),
+                    "writer authorship command/rollback guidance missing"
+                );
+                text = text.replacen(old, new, 1);
+                author_changes += 1;
+                continue;
+            }
             if old.starts_with("Since 2.70.32 a batch")
                 || old == "dunkingsheep inbox ack"
                 || old.starts_with("Recover follows the read rule")
@@ -177,6 +193,7 @@ fn assert_matches_python(args: &[&str]) {
             }
         }
         assert_eq!(recovery_changes, 3);
+        assert_eq!(author_changes, 1);
         text.into_bytes()
     } else {
         python.stdout

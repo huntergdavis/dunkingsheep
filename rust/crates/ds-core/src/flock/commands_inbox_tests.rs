@@ -1105,3 +1105,33 @@ fn status_requires_a_pane_for_an_ordinary_caller() {
         );
     }
 }
+
+#[test]
+fn review_author_notices_are_atomic_pr_keyed_and_do_not_renotify_on_retry() {
+    let (e, d) = (env("worker"), tempfile::tempdir().unwrap());
+    let f = flock(&d);
+    let mut args = send("w1:p2", Some("w1:p1"));
+    args.subject = Some("Review author unknown: o/r#7");
+    let first = f
+        .inbox_review_notice(&e, &args, "author-unknown:o/r#7")
+        .unwrap();
+    let second = f
+        .inbox_review_notice(&e, &args, "author-unknown:o/r#7")
+        .unwrap();
+    assert_eq!(first.message_id, second.message_id);
+    assert!(!second.notified);
+    assert_eq!(1, e.nudges.lock().unwrap().len());
+    args.body = "a later head still has no author";
+    assert_eq!(
+        first.message_id,
+        f.inbox_review_notice(&e, &args, "author-unknown:o/r#7")
+            .unwrap()
+            .message_id
+    );
+    assert_ne!(
+        first.message_id,
+        f.inbox_review_notice(&e, &args, "author-unknown:o/r#8")
+            .unwrap()
+            .message_id
+    );
+}

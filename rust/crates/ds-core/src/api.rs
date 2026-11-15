@@ -11,6 +11,7 @@
 
 mod context_mutations;
 pub mod health_state;
+pub(crate) mod review_author;
 pub use context_mutations::{h_context_add, h_context_promote, h_memory_backfill};
 pub mod inbox_messages;
 pub use health_state::{h_health, h_state_capture, h_state_latest};
@@ -3039,6 +3040,9 @@ pub fn h_review_sync(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         dry_run,
     ))?;
     if !dry_run {
+        if let Err(error) = review_author::notify_unknown(context) {
+            eprintln!("review author notice: {error}");
+        }
         if let Some(store) = context.flock.stores().inbox {
             if let Some(tasks) = context.flock.stores().tasks {
                 match context.block_on(tasks.list_review_rows_visible())? {
@@ -3099,6 +3103,14 @@ pub fn h_pr_wait(context: &HandlerContext<'_>, args: Args) -> Result<Value, Dunk
         .stores()
         .inbox
         .ok_or_else(|| DunkError::Refused("inbox unavailable".into()))?;
+    if args.get("author_task").is_some_and(|v| !v.is_null())
+        && (args.get("list").and_then(Value::as_bool) == Some(true)
+            || args.get("cancel").is_some_and(|v| !v.is_null()))
+    {
+        return Err(DunkError::Refused(
+            "author-task cannot mix with list or cancel".into(),
+        ));
+    }
     if args.get("list").and_then(Value::as_bool) == Some(true) {
         return store.pr_wait_list(mailbox, None);
     }
@@ -3137,7 +3149,41 @@ pub fn h_pr_wait(context: &HandlerContext<'_>, args: Args) -> Result<Value, Dunk
         ));
     }
     let head = head.map(str::to_ascii_lowercase);
-    store.pr_wait_register(repo, pr, mailbox, pane, head.as_deref())
+    let attribution = if let Some(task) = args.get("author_task").and_then(Value::as_str) {
+        let head = head
+            .as_deref()
+            .ok_or_else(|| DunkError::Refused("author-task requires --head FULL".into()))?;
+        if context.request.identity_bound != Some(true) {
+            return Err(DunkError::Refused(
+                "authorship requires a bound caller identity".into(),
+            ));
+        }
+        let caller =
+            context.request.caller.as_ref().ok_or_else(|| {
+                DunkError::Refused("authorship requires a caller identity".into())
+            })?;
+        let tasks = context
+            .flock
+            .stores()
+            .tasks
+            .ok_or_else(|| DunkError::Refused("task store unavailable".into()))?;
+        Some(context.block_on(tasks.declare_pr_author(
+            task,
+            repo,
+            pr,
+            head,
+            pane,
+            caller,
+            context.env.now_s(),
+        ))??)
+    } else {
+        None
+    };
+    let mut result = store.pr_wait_register(repo, pr, mailbox, pane, head.as_deref())?;
+    if let Some(a) = attribution {
+        result["authorship"] = json!({"author":a.author,"contributors":a.contributors,"source":"guarded author-task declaration","task":a.task,"head":head,"declaration_task":args.get("author_task"),"declared_by":pane});
+    }
+    Ok(result)
 }
 
 /// `dunk_api.h_review` list action through the attached Tasks actor.

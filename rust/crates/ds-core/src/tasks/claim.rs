@@ -383,6 +383,9 @@ struct Row {
     kind: String,
     author: Option<String>,
     repo: Option<String>,
+    pr: Option<i64>,
+    declared_contributor: bool,
+    unknown_author_review: bool,
 }
 
 impl Tasks {
@@ -462,10 +465,10 @@ pub(super) fn claim_next_in(
     }
     let mine_only = target == "mine";
     let (sql, bind): (&str, Vec<String>) = if mine_only {
-        ("SELECT id, scope, priority, created_at, status, kind, author, assignees, multi_assignee, repo FROM tasks WHERE scope IN (?, ?) AND status IN ('open', 'in_progress') ORDER BY created_at, id",
+        ("SELECT id, scope, priority, created_at, status, kind, author, assignees, multi_assignee, repo, pr, (created_by IS 'review-sync' AND (author IS NULL OR author='')) FROM tasks WHERE scope IN (?, ?) AND status IN ('open', 'in_progress') ORDER BY created_at, id",
      vec!["global".into(), pane.to_string()])
     } else {
-        ("SELECT id, scope, priority, created_at, status, kind, author, assignees, multi_assignee, repo FROM tasks WHERE scope = ? AND status IN ('open', 'in_progress') ORDER BY created_at, id",
+        ("SELECT id, scope, priority, created_at, status, kind, author, assignees, multi_assignee, repo, pr, (created_by IS 'review-sync' AND (author IS NULL OR author='')) FROM tasks WHERE scope = ? AND status IN ('open', 'in_progress') ORDER BY created_at, id",
      vec![target.to_string()])
     };
     let mut rows: Vec<Row> = Vec::new();
@@ -488,6 +491,9 @@ pub(super) fn claim_next_in(
                     kind: row.get(5)?,
                     author: row.get(6)?,
                     repo: row.get(9)?,
+                    pr: row.get(10)?,
+                    declared_contributor: false,
+                    unknown_author_review: row.get(11)?,
                 })
             })
             .map_err(db::map_sqlite)?;
@@ -500,6 +506,18 @@ pub(super) fn claim_next_in(
     }
     for row in rows.iter_mut() {
         let id = row.candidate.id.clone();
+        if row.kind == "review" {
+            if let (Some(repo), Some(pr), Some(who)) = (
+                row.repo.as_deref(),
+                row.pr,
+                options.exclude_author.as_deref(),
+            ) {
+                row.declared_contributor = super::pr_author::contributors(tx, repo, pr)
+                    .map_err(db::map_sqlite)?
+                    .iter()
+                    .any(|p| p == who);
+            }
+        }
         let mut stmt = tx
             .prepare("SELECT pane_id FROM task_leases WHERE task_id = ? AND expires_at > ?")
             .map_err(db::map_sqlite)?;
@@ -569,6 +587,11 @@ pub(super) fn claim_next_in(
                         || kinds.contains(&row.kind)
                         || row.candidate.assignees.iter().any(|who| who == pane)
                 })
+            && !(row.kind == "review"
+                && row.unknown_author_review
+                && row.candidate.assignees.is_empty()
+                && options.exclude_author.is_some())
+            && !row.declared_contributor
             && !options
                 .exclude_author
                 .as_ref()

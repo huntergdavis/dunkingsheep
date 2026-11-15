@@ -320,8 +320,8 @@ fn advance_in(
             if let Some(verdict) = &options.verdict {
                 let verdict = super::validate_verdict(verdict)?;
                 let changed = tx.execute(
-                    "UPDATE tasks SET verdict=?, updated_at=? WHERE id=? AND (?=0 OR author IS NULL OR author='' OR author!=?)",
-                    params![verdict, now, id, options.guard_author, pane]).map_err(db::map_sqlite)?;
+                    "UPDATE tasks SET verdict=?, updated_at=? WHERE id=? AND (?=0 OR ((author IS NULL OR author='' OR author!=?) AND NOT EXISTS(SELECT 1 FROM pr_authorship a WHERE a.repo=tasks.repo AND a.pr=tasks.pr AND a.pane=?)))",
+                    params![verdict, now, id, options.guard_author, pane, pane]).map_err(db::map_sqlite)?;
                 if changed == 0 {
                     return refuse(format!("review author changed or no task with id {id:?}"));
                 }

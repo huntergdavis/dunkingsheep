@@ -48,6 +48,7 @@ pub mod next_job_runtime;
 pub(crate) mod owner_handoff;
 pub mod page;
 mod pane_view;
+pub mod pr_author;
 pub mod pr_wait;
 pub mod wire;
 pub use claim::{
@@ -230,6 +231,8 @@ impl Tasks {
         writer
             .call(|conn| {
                 conn.execute_batch(SCHEMA).map_err(db::map_sqlite)?;
+                conn.execute_batch(pr_author::SCHEMA)
+                    .map_err(db::map_sqlite)?;
                 migrate(conn)
             })
             .await?;
@@ -1397,6 +1400,8 @@ impl Tasks {
                     // Use the same related-work evidence as authors_of, within this
                     // transaction, so a planner cannot route review to a known worker.
                     if let (Some(repo), Some(pr)) = (repo.as_deref(), pr) {
+                        let declared = pr_author::contributors(&tx,repo,pr).map_err(db::map_sqlite)?;
+                        if incoming.iter().any(|pane| declared.contains(pane)) { return Err(DunkError::Refused("a planner cannot assign a review to a declared PR contributor".into())); }
                         let mut stmt = tx.prepare("SELECT assignees, completed_by, author FROM tasks WHERE repo = ? AND pr = ? AND kind != 'review'").map_err(db::map_sqlite)?;
                         let rows = stmt.query_map(params![repo, pr], |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?))).map_err(db::map_sqlite)?;
                         for row in rows {
@@ -2092,6 +2097,7 @@ impl Tasks {
                         panes.insert(who);
                     }
                 }
+                panes.extend(pr_author::contributors(conn, &repo, pr).map_err(db::map_sqlite)?);
                 Ok(panes.into_iter().collect())
             })
             .await
@@ -2107,7 +2113,7 @@ impl Tasks {
         let (id, head, author) = (id.to_owned(), head.to_owned(), author.to_owned());
         self.writer.call(move |conn| {
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db::map_sqlite)?;
-            let changed = tx.execute("UPDATE tasks SET author=?3, body=replace(body, 'author lane: unknown (not attributable; say so in the verdict)', 'author lane: ' || ?3), updated_at=?4 WHERE id=?1 AND head=?2 AND kind='review' AND status IN ('open','in_progress','blocked') AND (author IS NULL OR author='') AND (verdict IS NULL OR verdict='')", params![id, head, author, crate::clock::now_s()]).map_err(db::map_sqlite)?;
+            let changed = tx.execute("UPDATE tasks SET author=?3, body=replace(body, 'author lane: unknown (not attributable; say so in the verdict)', 'author lane: ' || ?3) || char(10) || 'Author provenance: current-head explicit work evidence; see author refresh note', updated_at=?4 WHERE id=?1 AND head=?2 AND kind='review' AND status IN ('open','in_progress','blocked') AND (author IS NULL OR author='') AND (verdict IS NULL OR verdict='')", params![id, head, author, crate::clock::now_s()]).map_err(db::map_sqlite)?;
             if changed > 0 {
                 let raw: String = tx.query_row("SELECT assignees FROM tasks WHERE id=?1", [&id], |row| row.get(0)).map_err(db::map_sqlite)?;
                 let leased: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM task_leases WHERE task_id=?1 AND pane_id=?2)", params![id, author], |row| row.get(0)).map_err(db::map_sqlite)?;
@@ -2223,8 +2229,8 @@ impl Tasks {
             .call(move |conn| {
                 let changed = conn
                     .execute(
-                        "UPDATE tasks SET verdict = ?, updated_at = ? WHERE id = ? AND (? = 0 OR author IS NULL OR author = '' OR author != ?)",
-                        params![verdict, now, id, guard_author, by],
+                        "UPDATE tasks SET verdict = ?, updated_at = ? WHERE id = ? AND (? = 0 OR ((author IS NULL OR author = '' OR author != ?) AND NOT EXISTS(SELECT 1 FROM pr_authorship a WHERE a.repo=tasks.repo AND a.pr=tasks.pr AND a.pane=?)))",
+                        params![verdict, now, id, guard_author, by, by],
                     )
                     .map_err(db::map_sqlite)?;
                 if changed == 0 {

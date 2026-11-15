@@ -3967,7 +3967,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         },
         "token" => token(ns),
         "pr" => {
-            let args = ["target", "head", "list", "cancel"]
+            let args = ["target", "head", "list", "cancel", "author_task"]
                 .into_iter()
                 .filter_map(|key| {
                     ns.get(key)
@@ -3975,9 +3975,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                         .map(|v| (key.to_owned(), v.clone()))
                 })
                 .collect();
-            crate::daemon_cmd::run_command(ns, "pr_wait", args, |v| {
-                format!("{}\n", serde_json::to_string_pretty(v).unwrap())
-            })
+            crate::daemon_cmd::pr_wait_command(ns, args)
         }
         "review" => review(ns),
         "state" => state(ns),

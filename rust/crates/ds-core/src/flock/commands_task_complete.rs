@@ -365,6 +365,15 @@ impl Flock {
                 })
                 .await;
             result.insert("github".into(), github);
+            match crate::api::review_author::notify_verdict(context, &original_task, verdict) {
+                Ok(Some(notice)) => {
+                    result.insert("author_notice".into(), notice);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("review verdict author notice: {error}");
+                }
+            }
         }
         Ok(Value::Object(result))
     }
