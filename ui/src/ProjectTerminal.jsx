@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
+import { terminalReconnect } from './terminal-reconnect.js';
 import { fencedResize } from './resize-fence.js';
 import { fitFont, sizeMessage, wantedSize, FONT_MAX, FONT_MIN } from './terminal-fit.js';
 
@@ -17,7 +18,8 @@ export default function ProjectTerminal({ target, onClose }) {
     const term = new Terminal({ cursorBlink: true, scrollback: 5000, convertEol: false, fontSize: FONT_MAX });
     term.open(host.current);
     host.current.scrollIntoView({ block: 'nearest' });
-    let socket, timer, fitFrame, resizeTimer, readyTimer, frame, disposed = false, attempt = 0;
+    let socket, timer, fitFrame, resizeTimer, readyTimer, frame, disposed = false;
+    const reconnect = terminalReconnect();
     let paneSize = null, resizing = false, resizeReady = false, askedFor = '';
     const resizeKey = `ds-terminal-resize-unconfirmed:${target.pane_id}`;
     let resizeDisabled = true;
@@ -98,15 +100,16 @@ export default function ProjectTerminal({ target, onClose }) {
     const observer = new ResizeObserver(boxChanged); observer.observe(host.current);
     const connect = () => {
       if (disposed) return;
-      setStatus(attempt ? 'Reconnecting…' : 'Connecting…');
+      setStatus(reconnect.retrying ? 'Reconnecting…' : 'Connecting…');
       const url = new URL(`${path}/stream`, window.location.href);
       url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
       url.searchParams.set('expected_pane', target.pane_id);
       socket = new WebSocket(url); socket.binaryType = 'arraybuffer';
-      socket.onopen = () => { attempt = 0; resizeReady = false; setStatus('Connected'); term.focus(); };
+      socket.onopen = () => { reconnect.opened(); resizeReady = false; setStatus('Connected'); term.focus(); };
       socket.onmessage = event => {
         if (disposed) return;
-        if (typeof event.data !== 'string') { term.write(new Uint8Array(event.data)); return; }
+        // A screen counts as recovery only after the connection stays up.
+        if (typeof event.data !== 'string') { reconnect.received(); term.write(new Uint8Array(event.data)); return; }
         // Text frames are control messages, never screen text.
         const size = sizeMessage(event.data);
         if (!size) return;
@@ -120,7 +123,8 @@ export default function ProjectTerminal({ target, onClose }) {
         if (disposed) return;
         resizeReady = false; clearTimeout(readyTimer);
         setStatus('Reconnecting…');
-        timer = setTimeout(connect, Math.min(1000 * (2 ** Math.min(attempt++, 4)), 15000));
+        // Recover a working stream promptly; repeated failures still back off.
+        timer = setTimeout(connect, reconnect.closed());
       };
       socket.onerror = () => socket.close();
     };
