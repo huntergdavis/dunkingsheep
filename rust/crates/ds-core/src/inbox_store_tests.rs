@@ -1462,7 +1462,30 @@ fn thread_sidecar_is_additive_and_preserves_legacy_schema_and_sql() {
     let store = Store::open(&path, dir.path().join("blobs")).unwrap();
     let after = schema(&db);
     for row in &before {
-        assert!(after.contains(row), "legacy DDL changed: {}", row.0);
+        if row.0 == "messages" {
+            // The approved t5152 migration adds exactly one column. Thread sidecars
+            // still must preserve every other part of the legacy DDL verbatim.
+            let expected = rusqlite::Connection::open_in_memory().unwrap();
+            expected.execute_batch(&row.1).unwrap();
+            expected
+                .execute_batch(
+                    "ALTER TABLE messages ADD COLUMN implicit_ack INTEGER NOT NULL DEFAULT 0",
+                )
+                .unwrap();
+            let sql: String = expected
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE name='messages'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                after.contains(&(row.0.clone(), sql)),
+                "unexpected messages DDL change"
+            );
+        } else {
+            assert!(after.contains(row), "legacy DDL changed: {}", row.0);
+        }
     }
     for name in [
         "message_threads",

@@ -2281,7 +2281,13 @@ fn threaded_lane_read_then_reply_records_explicit_handling() {
         ..Default::default()
     };
     let dispatcher = services.dispatcher(handlers());
-    let sent = dispatcher.dispatch("inbox_send", &json!({"to":"w1:p1", "body":"human web question", "human_origin":true, "notify":false}), &web).unwrap();
+    let sent = dispatcher
+        .dispatch(
+            "inbox_send_human",
+            &json!({"to":"w1:p1", "body":"human web question", "notify":false}),
+            &web,
+        )
+        .unwrap();
     let id = sent["message_id"].as_str().unwrap();
     let worker = request("w1:p1");
     dispatcher
