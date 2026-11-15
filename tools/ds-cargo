@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # CI-matched DS toolchain; locking shared with other projects via proj-cargo.
 set -euo pipefail
-toolchain=/home/hunter/.local/share/dunkingsheep/toolchains/rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin
+toolchain=${DS_CARGO_TOOLCHAIN:-/home/hunter/.local/share/dunkingsheep/toolchains/rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin}
 if [[ ! -x $toolchain/cargo || ! -x $toolchain/rustc ]]; then
     echo 'CI-matched Rust1.99.1 is not ready; use exact-head CI and record local NOT RUN.' >&2
     exit 75
@@ -11,4 +11,14 @@ export RUSTC="$toolchain/rustc"
 export RUSTDOC="$toolchain/rustdoc"
 export RUSTFLAGS=${RUSTFLAGS:--D warnings}
 export PROJ_CARGO_TIMEOUT_SECONDS=${DS_CARGO_TIMEOUT_SECONDS:-3600}
+# t3912: test and build-script temp files go under this checkout's Cargo target (workspace
+# disk, cleaned with the build cache), not the small shared /tmp. A TMPDIR the caller set to
+# anything but /tmp is kept. Outside a git checkout nothing changes.
+if [[ -z ${TMPDIR:-} || ${TMPDIR%/} == /tmp ]] && top=$(git rev-parse --show-toplevel 2>/dev/null); then
+    target=${CARGO_TARGET_DIR:-$top/rust/target}
+    [[ $target == /* ]] || target=$PWD/$target
+    if mkdir -p -m 700 -- "$target/tmp" 2>/dev/null; then
+        export TMPDIR=$target/tmp
+    fi
+fi
 exec "$(dirname -- "$(readlink -f -- "$0")")/proj-cargo" dunkingsheep "$@"

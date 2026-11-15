@@ -106,4 +106,25 @@ wait_start maintenance
 expect_exit 75 env PATH="$install_path" bash "$installer" --apply --bin-dir "$fixture/install/bin" --expected-ds-sha "$new_baseline" --backup-dir "$fixture/install/maintenance-backup" 2> "$fixture/install-maintenance.log"
 [[ ! -e $fixture/install/maintenance-backup ]]
 touch "$RELEASE/maintenance"; wait "$maintenance"
+# t3912: ds-cargo puts TMPDIR under the checkout's Cargo target; a fake toolchain and a fake
+# proj-cargo beside a copy of ds-cargo report what it exports.
+mkdir -p "$fixture/dscargo/bin" "$fixture/dscargo/toolchain" "$fixture/dscargo/repo/rust"
+cp "$repo/tools/ds-cargo" "$fixture/dscargo/bin/ds-cargo"
+printf '#!/usr/bin/env bash\necho "TMPDIR=${TMPDIR:-unset}"\n' > "$fixture/dscargo/bin/proj-cargo"
+printf '#!/bin/sh\nexit 0\n' > "$fixture/dscargo/toolchain/cargo"
+cp "$fixture/dscargo/toolchain/cargo" "$fixture/dscargo/toolchain/rustc"
+chmod +x "$fixture/dscargo/bin/ds-cargo" "$fixture/dscargo/bin/proj-cargo" "$fixture/dscargo/toolchain/cargo" "$fixture/dscargo/toolchain/rustc"
+git init -q "$fixture/dscargo/repo"
+ds() { (cd "$1" && env -u CARGO_TARGET_DIR DS_CARGO_TOOLCHAIN="$fixture/dscargo/toolchain" "${@:2}" "$fixture/dscargo/bin/ds-cargo" test); }
+repo_real=$(cd "$fixture/dscargo/repo" && pwd -P)
+got=$(ds "$fixture/dscargo/repo/rust" TMPDIR=/tmp)
+[[ $got == "TMPDIR=$repo_real/rust/target/tmp" ]] || { echo "default TMPDIR: $got" >&2; exit 1; }
+[[ $(stat -c %a "$repo_real/rust/target/tmp") == 700 ]] || { echo "scratch is not 0700" >&2; exit 1; }
+got=$(ds "$fixture/dscargo/repo/rust" TMPDIR=/tmp CARGO_TARGET_DIR="$fixture/dscargo/other")
+[[ $got == "TMPDIR=$fixture/dscargo/other/tmp" ]] || { echo "CARGO_TARGET_DIR: $got" >&2; exit 1; }
+got=$(ds "$fixture/dscargo/repo/rust" TMPDIR="$fixture/dscargo/mine")
+[[ $got == "TMPDIR=$fixture/dscargo/mine" ]] || { echo "an explicit TMPDIR was replaced: $got" >&2; exit 1; }
+# The fixture may itself sit inside a checkout: stop git looking above it.
+got=$(ds "$fixture/dscargo" TMPDIR=/tmp GIT_CEILING_DIRECTORIES="$fixture")
+[[ $got == "TMPDIR=/tmp" ]] || { echo "outside a checkout: $got" >&2; exit 1; }
 echo "project Cargo locking PASS; evidence: $fixture"
