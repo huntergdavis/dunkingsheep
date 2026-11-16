@@ -921,10 +921,12 @@ fn configure_desk_channel(fleet: OwnerFleetConfig, channels: &[Value]) -> OwnerF
 /// Paths the desk keeps itself (Python `_desk_keeps`): the bare prefixes, and anything below
 /// `/api/`, `/dash/` or `/assets/`.
 fn desk_keeps(path: &str) -> bool {
-    matches!(path, "/api" | "/dash" | "/assets")
-        || ["/api/", "/dash/", "/assets/"]
-            .iter()
-            .any(|prefix| path.starts_with(prefix))
+    matches!(
+        path,
+        "/api" | "/dash" | "/assets" | "/webmail" | "/.well-known/jmap"
+    ) || ["/api/", "/dash/", "/assets/", "/webmail/"]
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
 }
 
 /// The dashboard view a retired bookmark lands on (Python `LEGACY_DASH_ALIASES`). Everything not
