@@ -1882,3 +1882,24 @@ fn registered_api_handlers_are_admitted_by_the_production_path_gate() {
     assert_eq!(server.shutdown(), Ok(()));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// JMAP discovery is outside /api, so also exercise it at the production boundary.
+#[test]
+fn jmap_discovery_is_admitted_by_the_production_path_gate() {
+    let (_root, config) = fixture();
+    let server = Server::start(config);
+    let anonymous = request(server.addr, "GET", "/.well-known/jmap", &[], None);
+    assert_eq!(anonymous.status, 401);
+    let cookie = format!("vp_session={}", login(server.addr));
+    let signed_in = request(
+        server.addr,
+        "GET",
+        "/.well-known/jmap",
+        &[("Cookie", cookie.as_str())],
+        None,
+    );
+    assert_eq!(signed_in.status, 200);
+    let session: serde_json::Value = serde_json::from_str(&signed_in.text()).unwrap();
+    assert_eq!(session["apiUrl"], "/api/jmap");
+    assert_eq!(server.shutdown(), Ok(()));
+}

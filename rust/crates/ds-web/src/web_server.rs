@@ -534,6 +534,7 @@ where
                 && matches!(
                     decoded.as_str(),
                     "/api/session"
+                        | "/.well-known/jmap"
                         | "/api/projects"
                         | "/api/mailboxes"
                         | "/api/mailbox-messages"
@@ -549,6 +550,7 @@ where
                     .is_some_and(|name| !name.is_empty() && !name.contains('/')))
             || (request.method() == Method::POST && decoded == "/api/ops-board/question")
             || (request.method() == Method::POST && decoded == "/api/pane-inbox")
+            || (request.method() == Method::POST && decoded == "/api/jmap")
             || (self.terminal_stream && is_terminal_route(&decoded))
         {
             if let Some(routed) = routed_uri(request.uri(), &decoded) {
