@@ -59,7 +59,9 @@ jobs:
 
   build-and-test:
     name: cargo build + test
-    runs-on: ubuntu-latest
+    # Process-name fixtures and Python-oracle wording are validated on 24.04.
+    # ubuntu-latest moved to 26.04 on 2026-11-16; keep this boundary explicit.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Restore pinned Python test oracle
