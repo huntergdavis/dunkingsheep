@@ -31,6 +31,7 @@ export default function OwnerInbox({ api }) {
   return <div className="owner-inbox">
     <header className="owner-inbox-heading">
       <div><h1>{view.label}</h1><p>{view.description}</p></div>
+      <a href="/dash/cos?panel=webmail">Open mail interface</a>
       <a href="/dash/cos?panel=mailboxes">Browse all mailboxes</a>
       <a href="/dash/cos?panel=conversation">Open conversation / send a message</a>
     </header>

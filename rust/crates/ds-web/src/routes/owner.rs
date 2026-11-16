@@ -6,6 +6,8 @@
 
 use super::response_error::WebResponseError;
 
+#[path = "owner_jmap.rs"]
+pub mod jmap;
 #[path = "owner_thread_pages.rs"]
 mod thread_pages;
 
@@ -129,6 +131,8 @@ pub fn router() -> Router {
 /// existing authentication backend's same-origin rule.
 pub fn router_with_scheme(scheme: RequestScheme) -> Router {
     Router::new()
+        .route("/.well-known/jmap", get(jmap::session))
+        .route("/api/jmap", post(jmap::api))
         .route("/api/capability", get(api_capability))
         .route("/api/owner-send", post(api_owner_send))
         .route("/api/owner-thread", get(api_owner_thread))
@@ -2659,5 +2663,156 @@ mod tests {
             "prior_version"
         );
         assert_eq!(body["threads"][0]["latest"]["ambiguous_owner_reply"], true);
+    }
+    #[tokio::test]
+    async fn jmap_session_and_archive_are_owner_scoped_and_do_not_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeOwner::new());
+        let mut row = human_thread("i1", None, "i1");
+        row["id"] = json!("i1");
+        row["mailbox"] = json!("owner");
+        row["audience"] = Value::Null;
+        row["sender"] = json!("owner:web");
+        row["body"] = json!("Hello");
+        row["created_at"] = json!(100.0);
+        backend.reply("owner_conversation",json!({"messages":[row],"source_filter":"human_threads","include_internal":false,"view_revision":1}));
+        let router = app(authorized(), backend.clone())
+            .layer(Extension(jmap::MailStore(dir.path().join("mail.sqlite3"))));
+        let response = router
+            .clone()
+            .oneshot(request("GET", "/.well-known/jmap", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response=router.oneshot(request("POST","/api/jmap",Some(json!({"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"],"methodCalls":[["Email/set",{"accountId":"owner","update":{"i1":{"mailboxIds":{"archive":true}}}},"a"]]}).to_string()))).await.unwrap();
+        let (_, body, _) = response_json(response);
+        assert!(
+            body["methodResponses"][0][1]["updated"].get("i1").is_some(),
+            "{body}"
+        );
+        assert_eq!(backend.methods(), vec!["owner_conversation"]);
+    }
+    #[tokio::test]
+    async fn jmap_refuses_api_identity_and_cross_origin_without_rpc() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeOwner::new());
+        let router = app(
+            Arc::new(FakeAuth::accepting(Identity::Api)),
+            backend.clone(),
+        )
+        .layer(Extension(jmap::MailStore(dir.path().join("mail.sqlite3"))));
+        let response = router
+            .oneshot(request("POST", "/api/jmap", Some("{}".into())))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let router = app(authorized(), backend.clone())
+            .layer(Extension(jmap::MailStore(dir.path().join("mail.sqlite3"))));
+        let mut req = request("POST", "/api/jmap", Some("{}".into()));
+        req.headers_mut()
+            .insert(header::ORIGIN, "https://elsewhere.invalid".parse().unwrap());
+        req.headers_mut()
+            .insert(header::HOST, "localhost".parse().unwrap());
+        assert_eq!(
+            router.oneshot(req).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        assert!(backend.methods().is_empty());
+    }
+    /// Run explicitly with DS_MAIL_BUILD_DIR pointing to the built pinned client.
+    #[tokio::test]
+    #[ignore = "requires the pinned webmail build and Chromium"]
+    async fn jmap_real_adapter_browser() {
+        let build = std::env::var("DS_MAIL_BUILD_DIR").expect("DS_MAIL_BUILD_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeOwner::new());
+        let mut row = human_thread("i1", None, "i1");
+        row["id"] = json!("i1");
+        row["mailbox"] = json!("owner");
+        row["audience"] = Value::Null;
+        row["sender_kind"] = json!("agent");
+        row["sender"] = json!("Front Desk");
+        row["body"] = json!("Archive acceptance fixture\nPreserve delivery state");
+        row["created_at"] = json!(1794830400.0);
+        for _ in 0..500 {
+            backend.reply("owner_conversation",json!({"messages":[row],"source_filter":"human_threads","include_internal":false,"view_revision":1}));
+        }
+        let router = app(authorized(), backend.clone())
+            .layer(Extension(jmap::MailStore(dir.path().join("mail.sqlite3"))));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../integrations/webmail/browser-smoke.mjs");
+        let result = tokio::process::Command::new("node")
+            .arg(script)
+            .env("DS_MAIL_BUILD_DIR", build)
+            .env("DS_MAIL_API", format!("http://{address}"))
+            .output()
+            .await
+            .unwrap();
+        server.abort();
+        assert!(
+            result.status.success(),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(backend.methods().iter().all(|m| m == "owner_conversation"));
+    }
+
+    #[tokio::test]
+    async fn jmap_internal_send_is_retry_safe_preserves_subject_and_refuses_external_mail() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fake = FakeOwner::new();
+        fake.channel = None;
+        let backend = Arc::new(fake);
+        backend.reply("owner_ingest_thread",json!({"thread":human_thread("i7",None,"i7"),"message":{"message_id":"i7"},"duplicate":false}));
+        backend.reply("list_panes", json!({"panes":[]}));
+        let router = app(authorized(), backend.clone())
+            .layer(Extension(jmap::MailStore(dir.path().join("mail.sqlite3"))));
+        let email = json!({"to":[{"email":"desk@dunkingsheep.invalid"}],"subject":"Subject preserved","textBody":[{"partId":"text","type":"text/plain"}],"bodyValues":{"text":{"value":"Body preserved"}},"keywords":{"$draft":true}});
+        let calls = json!({"methodCalls":[["Email/set",{"accountId":"owner","create":{"draft":email}},"create"],["EmailSubmission/set",{"accountId":"owner","create":{"send":{"emailId":"#draft","identityId":"owner"}},"onSuccessUpdateEmail":{"#send":{"mailboxIds":{"sent":true},"keywords/$draft":null}}},"submit"]]});
+        let response = router
+            .clone()
+            .oneshot(request("POST", "/api/jmap", Some(calls.to_string())))
+            .await
+            .unwrap();
+        let (_, body, _) = response_json(response);
+        assert_eq!(
+            body["methodResponses"][1][1]["created"]["send"]["id"], "s1",
+            "{body}"
+        );
+        let retry = json!({"methodCalls":[["EmailSubmission/set",{"accountId":"owner","create":{"again":{"emailId":"d1","identityId":"owner"}}},"retry"]]});
+        let response = router
+            .clone()
+            .oneshot(request("POST", "/api/jmap", Some(retry.to_string())))
+            .await
+            .unwrap();
+        let (_, body, _) = response_json(response);
+        assert_eq!(
+            body["methodResponses"][0][1]["created"]["again"]["id"], "s1",
+            "{body}"
+        );
+        assert_eq!(backend.methods(), vec!["owner_ingest_thread", "list_panes"]);
+        assert_eq!(
+            backend.calls.lock().unwrap()[0].1["body"],
+            "Subject: Subject preserved\n\nBody preserved"
+        );
+        let mut external = email;
+        external["to"] = json!([{"email":"someone@example.com"}]);
+        let calls = json!({"methodCalls":[["Email/set",{"accountId":"owner","create":{"draft":external}},"create"],["EmailSubmission/set",{"accountId":"owner","create":{"send":{"emailId":"#draft","identityId":"owner"}}},"submit"]]});
+        let response = router
+            .oneshot(request("POST", "/api/jmap", Some(calls.to_string())))
+            .await
+            .unwrap();
+        let (_, body, _) = response_json(response);
+        assert_eq!(
+            body["methodResponses"][1][1]["notCreated"]["send"]["type"], "forbiddenToSend",
+            "{body}"
+        );
+        assert_eq!(backend.methods(), vec!["owner_ingest_thread", "list_panes"]);
     }
 }

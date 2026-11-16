@@ -47,3 +47,6 @@ owner-credentials
 
 # Rust build artefacts (T00): the workspace is built by every task.
 rust/target/
+
+# Generated pinned webmail build
+ui/public/webmail/
