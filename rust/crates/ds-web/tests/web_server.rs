@@ -399,7 +399,10 @@ fn dash_routes_apply_the_session_gate_and_the_shell_redirects() {
 
     let poolrad = request(addr, "GET", "/dash/poolrad", &session, None);
     assert_eq!(poolrad.status, 307);
-    assert_eq!(poolrad.header("location"), Some("/dash/projects?project=poolrad"));
+    assert_eq!(
+        poolrad.header("location"),
+        Some("/dash/projects?project=poolrad")
+    );
 
     let logout = request(addr, "POST", "/api/logout", &session, None);
     assert_eq!(logout.status, 200);
