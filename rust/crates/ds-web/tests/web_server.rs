@@ -1901,11 +1901,8 @@ fn jmap_discovery_is_admitted_by_the_production_path_gate() {
         &[],
         None,
     );
-    assert_eq!(mail.status, 200);
-    assert_eq!(mail.text(), "mail-shell");
-    assert!(mail
-        .header("content-security-policy")
-        .unwrap()
-        .contains("connect-src 'self'"));
+    // JMAP remains available, but even a stale client shell must redirect to native Inbox.
+    assert_eq!(mail.status, 307);
+    assert_eq!(mail.header("location"), Some("/dash/cos"));
     assert_eq!(server.shutdown(), Ok(()));
 }
