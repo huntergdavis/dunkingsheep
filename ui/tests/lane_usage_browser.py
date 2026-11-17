@@ -33,7 +33,7 @@ budget = {'state': 'ok', 'providers': [
 def api(route):
     path = urlsplit(route.request.url).path
     if path == '/api/projects': value = {'lanes': lanes}
-    elif path == '/api/ops-board':
+    elif path == '/api/project-resources':
         # Ages are relative to the moment of the request, so a slow run cannot move 4 min to 5.
         budget['providers'][0]['measured_at'] = iso(4)
         budget['providers'][2]['measured_at'] = iso(1)

@@ -350,7 +350,14 @@ fn private_human_producers_are_not_mcp_actions_or_lane_grants() {
 fn paging_socket_arguments_are_explicit_and_absent_from_public_schema() {
     assert_eq!(
         registry::socket_only_params("task_list"),
-        &["paged", "page_size", "cursor", "priority", "page_group"]
+        &[
+            "paged",
+            "page_size",
+            "cursor",
+            "priority",
+            "page_group",
+            "project"
+        ]
     );
     assert_eq!(
         registry::socket_only_params("owner_conversation"),

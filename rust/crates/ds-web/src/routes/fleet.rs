@@ -1962,7 +1962,29 @@ mod tests {
         assert!(f.calls().is_empty());
     }
     #[test]
-    fn task_pages_forward_filters_and_strip_bodies_and_unknown_fields() {
+    fn project_task_pages_require_daemon_filter_acknowledgment() {
+        let f = Fake::setup();
+        f.reply("task_list", task_page_fixture());
+        assert_eq!(
+            http(owner_app(f.clone()), "/api/tasks?project=alpha", None).0,
+            502
+        );
+        let mut page = task_page_fixture();
+        page["project"] = json!("alpha");
+        f.reply("task_list", page);
+        assert_eq!(
+            http(owner_app(f.clone()), "/api/tasks?project=alpha", None).0,
+            200
+        );
+        assert!(f
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, args)| args["project"] == "alpha"));
+    }
+    #[test]
+    fn task_pages_forward_filters_and_strip_unknown_fields() {
         let f = Fake::setup();
         f.reply("task_list", task_page_fixture());
         let (status,page)=http(owner_app(f.clone()),"/api/tasks?view=active&status=blocked&priority=high&assignee=%254&cursor=fixture-prior",None);
@@ -1970,8 +1992,8 @@ mod tests {
         assert_eq!(page["total"], 101);
         assert_eq!(page["next_cursor"], "fixture-next");
         assert_eq!(page["legacy_limited"], false);
-        assert!(page["tasks"][0].get("body").is_none());
-        assert!(!page.to_string().contains("private body"));
+        assert_eq!(page["tasks"][0]["body"], "private body omitted");
+        assert!(page["tasks"][0].get("scope").is_none());
         let calls = f.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         let (method, args) = &calls[0];

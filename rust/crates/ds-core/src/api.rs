@@ -4597,6 +4597,7 @@ pub fn h_task_list(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
             ));
         }
         let options = crate::tasks::page::TaskPageOptions {
+            project: task_string_arg(&args, "project", "task_list")?.map(str::to_owned),
             scope: task_string_arg(&args, "scope", "task_list")?.map(str::to_owned),
             status: status.or_else(|| group.map(str::to_owned)),
             priority: task_string_arg(&args, "priority", "task_list")?.map(str::to_owned),

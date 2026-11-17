@@ -3,10 +3,9 @@
 // is the order of the navigation links.
 export const DASH_ROUTES = {
   projects: { eyebrow: 'PROJECTS', title: 'Projects', subtitle: 'Live lanes by explicit project membership' },
-  databases: { eyebrow: 'DATABASES', title: 'Databases', subtitle: 'Each project\'s information store and the global store' },
+  knowledge: { eyebrow: 'KNOWLEDGE', title: 'Knowledge', subtitle: 'Each project\'s information store and the global store' },
   cos: { eyebrow: 'INBOX', title: 'Inbox', subtitle: 'Browse Your inbox and VP history' },
   tasks: { eyebrow: 'TASKS', title: 'Tasks', subtitle: 'Current work and closed tasks' },
-  operations: { eyebrow: 'OPERATIONS', title: 'Operations board', subtitle: 'Tasks, progress, and service health' },
   play: { eyebrow: 'LIVE GAME', title: 'Play Pool of Radiance', subtitle: 'Private DOS run · save states' },
 };
 
@@ -16,7 +15,7 @@ export const DASH_HOME = `/dash/${DEFAULT_DASH_VIEW}`;
 // Retired dashboards and where their bookmarks land (t4646). The separate Terminals view is
 // gone: lane terminals and messages live in Projects. The query string is kept, so
 // /dash/fleet?pane=%7 opens that lane's terminal in Projects.
-export const DASH_REDIRECTS = { fleet: 'projects' };
+export const DASH_REDIRECTS = { fleet: 'projects', operations: 'projects', databases: 'knowledge' };
 
 // `standalone` is false only outside /dash (the bare '/' entry), where the default view is shown.
 export function resolveDashRoute(path) {

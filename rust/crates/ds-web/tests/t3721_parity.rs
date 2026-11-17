@@ -1,4 +1,5 @@
-//! t3721 (t1702 leaf): viewport, password, ops-board answer and ops-metrics refresh parity.
+//! t3721 (t1702 leaf): viewport, password, owner-answer and report-refresh payload parity.
+//! Decision/refresh probes use the relocated Projects endpoints; historical fixture bodies stay unchanged.
 //!
 //! The oracle is `fixtures/t3721_parity_oracle.json`, recorded by
 //! `fixtures/generate_t3721_parity_oracle.py` against the Python desk's FastAPI routes (the
@@ -309,7 +310,6 @@ fn config(dir: &Path) -> DeskConfig {
         usage_refresh_s: 1800,
         usage_backoff_s: vec![300, 600, 1800],
         usage_max_age_s: 3600,
-        board_interval_s: 3600,
         gh_program: dir.join("missing-gh"),
         tmux_program: dir.join("missing-tmux"),
         proc_root: dir.join("proc"),
@@ -785,7 +785,7 @@ fn the_composed_desk_matches_the_python_desk_for_viewport_password_answer_and_re
 
         // Ops-board answer, from the owner session (the cookie kept by the password change).
         let answer = |body: Body, cookie: Option<&str>| {
-            let mut builder = request(Method::POST, "/api/ops-board/answer").header(header::CONTENT_TYPE, "application/json");
+            let mut builder = request(Method::POST, "/api/tasks/answer").header(header::CONTENT_TYPE, "application/json");
             if let Some(cookie) = cookie {
                 builder = builder.header(header::COOKIE, cookie);
             }
@@ -807,7 +807,7 @@ fn the_composed_desk_matches_the_python_desk_for_viewport_password_answer_and_re
         check("answer_no_daemon", &send(&router, b, body).await);
 
         // Ops-metrics refresh: the auth gate only (the owner path calls gh and reads host state).
-        let refresh = send(&router, request(Method::POST, "/api/ops-metrics/refresh"), Body::empty()).await;
+        let refresh = send(&router, request(Method::POST, "/api/projects/poolrad/refresh"), Body::empty()).await;
         check("metrics_refresh_no_cookie", &refresh);
 
         // Correct-password BOM body (t3725, owner i50493). It changes the password, so it runs last; the

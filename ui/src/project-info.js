@@ -70,5 +70,5 @@ export function storeSearch(selected) {
 
 // The Databases address for a project's information (the link in Projects).
 export function informationHref(project) {
-  return `/dash/databases${storeSearch(`project:${project}`)}`;
+  return `/dash/knowledge${storeSearch(`project:${project}`)}`;
 }

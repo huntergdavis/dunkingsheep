@@ -15,7 +15,7 @@ use axum::{
 };
 use serde_json::{json, Value};
 
-use super::auth::{AuthBackend, RequestScheme};
+use super::auth::{AuthBackend, Identity, RequestScheme};
 use super::messages_write::authenticate;
 use super::response_error::WebResponseError;
 
@@ -140,6 +140,20 @@ pub enum OpsBoardError {
 }
 
 /// Mount the deferral and refresh routes with injected authentication and board services.
+pub fn decisions_router(
+    backend: Arc<dyn OpsBoardBackend>,
+    auth: Arc<dyn AuthBackend>,
+    scheme: RequestScheme,
+) -> Router {
+    Router::new()
+        .route("/api/tasks/not-now", post(not_now_owner_question))
+        .route("/api/tasks/question", post(owner_question))
+        .route("/api/tasks/answer", post(owner_answer))
+        .layer(Extension(backend))
+        .layer(Extension(auth))
+        .layer(Extension(scheme))
+}
+
 pub fn router(
     backend: Arc<dyn OpsBoardBackend>,
     auth_backend: Arc<dyn AuthBackend>,
@@ -168,8 +182,10 @@ async fn owner_request(
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
-    if let Err(response) = authenticate(auth.as_ref(), &headers, scheme).await {
-        return response.into_response();
+    match authenticate(auth.as_ref(), &headers, scheme).await {
+        Ok(Identity::Owner) => {}
+        Ok(_) => return detail_response(StatusCode::FORBIDDEN, "Owner session required"),
+        Err(response) => return response.into_response(),
     }
     let payload = match payload {
         Some(RequestPayload::Json(Value::Object(v))) => v,
@@ -254,8 +270,10 @@ async fn not_now_owner_question(
         Ok(payload) => payload,
         Err(response) => return response.into_response(),
     };
-    if let Err(response) = authenticate(auth_backend.as_ref(), &headers, request_scheme).await {
-        return response.into_response();
+    match authenticate(auth_backend.as_ref(), &headers, request_scheme).await {
+        Ok(Identity::Owner) => {}
+        Ok(_) => return detail_response(StatusCode::FORBIDDEN, "Owner session required"),
+        Err(response) => return response.into_response(),
     }
     let payload = match payload {
         None => return body_validation("missing", "Field required", Value::Null),
@@ -465,6 +483,8 @@ mod tests {
             *self.seen.cookie.lock().unwrap() = cookie.map(str::to_owned);
             let result = if self.fail_identity {
                 Err(AuthError::SignInRequired)
+            } else if bearer == Some("api-token") {
+                Ok(Identity::Api)
             } else {
                 Ok(Identity::Owner)
             };
@@ -562,6 +582,34 @@ mod tests {
             seen: Arc::default(),
         });
         router(board, auth, RequestScheme::Http)
+    }
+
+    #[tokio::test]
+    async fn task_decisions_reject_api_identity() {
+        let board = Arc::new(FakeBoard::default());
+        let auth: Arc<dyn AuthBackend> = Arc::new(FakeAuth {
+            fail_identity: false,
+            identity_calls: Arc::new(AtomicUsize::new(0)),
+            seen: Arc::default(),
+        });
+        for action in ["question", "answer", "not-now"] {
+            let request = Request::builder()
+                .method("POST")
+                .uri(format!("/api/tasks/{action}"))
+                .header(header::AUTHORIZATION, "Bearer api-token")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"task_id":"t9","version":"42","reply":"yes"}"#,
+                ))
+                .unwrap();
+            let response = decisions_router(board.clone(), auth.clone(), RequestScheme::Http)
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+        assert!(board.answers.lock().unwrap().is_empty());
+        assert!(board.deferred.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

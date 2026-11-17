@@ -82,6 +82,20 @@ pub fn router_with_scheme(scheme: RequestScheme) -> Router {
         .layer(Extension(scheme))
 }
 
+// Poolrad history remains available on demand; no board aggregation or refresh timer.
+pub fn project_router(scheme: RequestScheme) -> Router {
+    Router::new()
+        .route(
+            "/api/projects/poolrad/history",
+            get(operations_metrics_history),
+        )
+        .route(
+            "/api/projects/poolrad/refresh",
+            post(refresh_operations_metrics),
+        )
+        .layer(Extension(scheme))
+}
+
 async fn operations_metrics_history(
     Extension(backend): Extension<Arc<dyn OpsMetricsBackend>>,
     Extension(auth): Extension<Arc<dyn AuthBackend>>,

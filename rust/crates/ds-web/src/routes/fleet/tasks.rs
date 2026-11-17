@@ -8,6 +8,9 @@ const PAGE_SIZE: usize = 50;
 #[serde(deny_unknown_fields)]
 struct TaskQuery {
     view: Option<String>,
+    project: Option<String>,
+    kind: Option<String>,
+    needs_owner: Option<bool>,
     status: Option<String>,
     priority: Option<String>,
     assignee: Option<String>,
@@ -18,6 +21,10 @@ struct TaskQuery {
 struct Summary {
     id: String,
     title: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    kind: String,
     status: String,
     priority: String,
     assignees: Vec<String>,
@@ -76,9 +83,17 @@ pub(super) async fn task_page(
         _ => return detail(StatusCode::BAD_REQUEST, "Invalid task view"),
     };
     if query
-        .status
-        .as_deref()
-        .is_some_and(|v| !statuses.contains(&v))
+        .project
+        .as_ref()
+        .is_some_and(|v| v.is_empty() || v.len() > 256 || v.chars().any(char::is_control))
+        || query
+            .kind
+            .as_deref()
+            .is_some_and(|v| !["work", "review", "verify", "report"].contains(&v))
+        || query
+            .status
+            .as_deref()
+            .is_some_and(|v| !statuses.contains(&v))
         || query
             .priority
             .as_deref()
@@ -95,6 +110,15 @@ pub(super) async fn task_page(
         return detail(StatusCode::BAD_REQUEST, "Invalid task filters");
     }
     let mut args = json!({"scope":"global", "paged":true,"page_size":PAGE_SIZE,"limit":PAGE_SIZE,"include_done":view=="closed"});
+    if let Some(project) = &query.project {
+        args["project"] = json!(project);
+    }
+    if let Some(kind) = &query.kind {
+        args["kind"] = json!(kind);
+    }
+    if query.needs_owner == Some(true) {
+        args["needs_owner"] = json!(true);
+    }
     if let Some(status) = &query.status {
         args["status"] = json!(status);
     } else {
@@ -120,9 +144,20 @@ pub(super) async fn task_page(
     {
         return unavailable();
     }
+    if query.project.as_ref().is_some_and(|project| {
+        raw.as_ref()
+            .is_none_or(|value| value["project"].as_str() != Some(project.as_str()))
+    }) {
+        return unavailable();
+    }
     let legacy = raw
         .as_ref()
         .is_none_or(|raw| raw.get("paging_version").is_none());
+    if legacy
+        && (query.project.is_some() || query.kind.is_some() || query.needs_owner == Some(true))
+    {
+        return unavailable();
+    }
     let (candidates, total, next_cursor, checked_at) = if legacy {
         if query.cursor.is_some() {
             return detail(
@@ -224,7 +259,13 @@ pub(super) async fn task_page(
         let Ok(row) = serde_json::from_value::<Summary>(value) else {
             return unavailable();
         };
-        if row.scope != "global"
+        if query.kind.as_ref().is_some_and(|kind| kind != &row.kind)
+            || (query.needs_owner == Some(true)
+                && !row
+                    .block_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with("needs-owner:")))
+            || row.scope != "global"
             || !statuses.contains(&row.status.as_str())
             || query
                 .status

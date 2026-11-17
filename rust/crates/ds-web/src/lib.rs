@@ -6,7 +6,6 @@ pub mod auth_backend;
 pub mod dashboard_activity_backend;
 pub mod http_adapter;
 pub mod messages_backend;
-pub mod ops_board_runtime;
 pub mod ops_collector;
 pub mod ops_history;
 pub mod ops_summary;
@@ -47,3 +46,7 @@ mod tests {
         let _router = super::router_with_scheme(super::RequestScheme::Https);
     }
 }
+
+pub mod project_reporting;
+pub mod project_resources;
+pub mod usage_runtime;

@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 #[derive(Default)]
 pub struct TaskPageOptions {
     pub scope: Option<String>,
+    pub project: Option<String>,
     pub status: Option<String>,
     pub priority: Option<String>,
     pub assignee: Option<String>,
@@ -24,6 +25,8 @@ pub struct TaskPageOptions {
 #[serde(deny_unknown_fields)]
 struct Filter {
     scopes: Vec<String>,
+    #[serde(default)]
+    project: Option<String>,
     pane: Option<String>,
     statuses: Vec<String>,
     priority: Option<String>,
@@ -65,6 +68,7 @@ impl Tasks {
         };
         let filter = Filter {
             scopes: visible_scopes(options.scope.as_deref(), pane)?,
+            project: options.project,
             pane: pane.map(str::to_owned),
             statuses,
             priority: options
@@ -122,6 +126,10 @@ impl Tasks {
                         binds.push(value.clone());
                     }
                 }
+                if let Some(project) = &filter.project {
+                    sql.push_str(" AND id IN (SELECT task_id FROM planner_task_projects WHERE project=?)");
+                    binds.push(project.clone());
+                }
                 if filter.needs_owner {
                     sql.push_str(" AND status='blocked' AND block_reason LIKE 'needs-owner:%'");
                 }
@@ -173,7 +181,7 @@ impl Tasks {
                 }
                 Ok(
                     json!({"paging_version":1,"order":"id_asc","tasks":tasks,"total":total,
-                "page_size":filter.page_size,"next_cursor":next_cursor,"checked_at":now}),
+                "project":filter.project,"page_size":filter.page_size,"next_cursor":next_cursor,"checked_at":now}),
                 )
             })
             .await
@@ -190,6 +198,36 @@ mod tests {
             status: Some("closed".into()),
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn project_filter_is_applied_before_paging_and_bound_to_cursor() {
+        let tasks = crate::tasks::wire::tests::fixture().await;
+        tasks.writer.call(|conn| {
+            for (id, project) in [("t800", "alpha"), ("t801", "beta"), ("t802", "alpha")] {
+                conn.execute("INSERT INTO tasks(id,scope,title,status,priority,created_at,updated_at) VALUES(?,'global','scoped','open','high',10,11)", [id]).map_err(map_sqlite)?;
+                conn.execute("INSERT INTO planner_task_projects(task_id,project) VALUES(?,?)", [id,project]).map_err(map_sqlite)?;
+            }
+            Ok(())
+        }).await.unwrap();
+        let query = || TaskPageOptions {
+            scope: Some("global".into()),
+            project: Some("alpha".into()),
+            page_size: 1,
+            ..Default::default()
+        };
+        let first = tasks.list_page(query(), Some("%4")).await.unwrap();
+        assert_eq!(first["total"], 2);
+        assert_eq!(first["tasks"][0]["id"], "t800");
+        let mut next = query();
+        next.cursor = first["next_cursor"].as_str().map(str::to_owned);
+        let second = tasks.list_page(next, Some("%4")).await.unwrap();
+        assert_eq!(second["tasks"][0]["id"], "t802");
+        assert!(second["next_cursor"].is_null());
+        let mut wrong = query();
+        wrong.project = Some("beta".into());
+        wrong.cursor = first["next_cursor"].as_str().map(str::to_owned);
+        assert!(tasks.list_page(wrong, Some("%4")).await.is_err());
     }
 
     #[tokio::test]

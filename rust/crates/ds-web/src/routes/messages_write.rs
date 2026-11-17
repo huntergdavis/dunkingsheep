@@ -550,7 +550,7 @@ fn python_json_error(error: &serde_json::Error) -> String {
     }
 }
 
-pub(super) async fn authenticate(
+pub(crate) async fn authenticate(
     auth: &dyn AuthBackend,
     headers: &HeaderMap,
     scheme: RequestScheme,

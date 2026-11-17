@@ -2,6 +2,8 @@ import Timestamp from './Timestamp';
 import React, { useEffect, useState } from 'react';
 import { taskAge, taskQuery, taskPage, metricNumber } from './tasks-model.js';
 import './tasks.css';
+import MessageBody from './MessageBody';
+import TaskDecision from './TaskDecision';
 
 function TaskMetrics({ api, revision }) {
   const [data, setData] = useState(null);
@@ -23,6 +25,17 @@ function TaskMetrics({ api, revision }) {
       <small>Current counts cover the fleet queue. Activity: <Timestamp value={data.window.since} seconds /> – <Timestamp value={data.window.until} seconds />.</small>
     </>}
   </section>;
+}
+
+function TaskDetails({ api, task }) {
+  const [opened, setOpened] = useState(false);
+  return <details onToggle={event => { if (event.currentTarget.open) setOpened(true); }}>
+    <summary><strong>{task.id}</strong> <span>{task.title}</span></summary>
+    {opened && <>
+      <p>{task.kind || 'work'}</p><MessageBody body={task.body || 'No description recorded.'} frontDesk />
+      {task.block_reason?.startsWith('needs-owner:') && <TaskDecision api={api} task={task} />}
+    </>}
+  </details>;
 }
 
 function TaskResults({ api, filters }) {
@@ -54,7 +67,7 @@ function TaskResults({ api, filters }) {
       <caption className="tasks-sr">{filters.view === 'closed' ? 'Closed' : 'Active'} fleet tasks</caption>
       <thead><tr><th>Task</th><th>Status</th><th>Priority</th><th>Owner</th><th>Age</th><th>Blocked reason</th></tr></thead>
       <tbody>{page.tasks.map(task => <tr key={task.id}>
-        <td data-label="Task"><strong>{task.id}</strong><span>{task.title}</span></td>
+        <td data-label="Task"><TaskDetails api={api} task={task} /></td>
         <td data-label="Status">{task.status.replaceAll('_', ' ')}</td>
         <td data-label="Priority">{task.priority}</td>
         <td data-label="Owner">{task.assignees.length ? task.assignees.join(', ') : 'Leader (unassigned)'}</td>
@@ -66,8 +79,8 @@ function TaskResults({ api, filters }) {
   </section>;
 }
 
-export default function TasksView({ api }) {
-  const [filters, setFilters] = useState({ view: 'active', status: '', priority: '', assignee: '' });
+export default function TasksView({ api, project = null, embedded = false }) {
+  const [filters, setFilters] = useState(() => { const needs = !embedded && new URLSearchParams(window.location.search).get('needs_owner') === 'true'; return { view: 'active', status: needs ? 'blocked' : '', priority: '', assignee: '', project: project || '', kind: '', needs_owner: needs ? 'true' : '' }; });
   const [assignee, setAssignee] = useState('');
   const [revision, setRevision] = useState(0);
   const statuses = ['active', 'open', 'in_progress', 'blocked', 'closed', 'done', 'cancelled'];
@@ -78,10 +91,12 @@ export default function TasksView({ api }) {
     status: ['active', 'closed'].includes(status) ? '' : status,
   }));
   return <div className="tasks-view">
-    <header className="tasks-heading"><div><h1>Tasks</h1><p>Current work and closed tasks. Read-only.</p></div><button onClick={() => setRevision(value => value + 1)}>Refresh</button></header>
-    <TaskMetrics api={api} revision={revision} />
+    <header className="tasks-heading"><div><h2>{project ? `${project} work` : 'Tasks'}</h2><p>Work, reviews, and decisions.</p></div><button onClick={() => setRevision(value => value + 1)}>Refresh</button></header>
+    {!embedded && <TaskMetrics api={api} revision={revision} />}
     <form className="tasks-filters" onSubmit={event => { event.preventDefault(); change('assignee', assignee.trim()); }}>
       <label>Status<select aria-label="Status" value={filters.status || filters.view} onChange={event => changeStatus(event.target.value)}>{statuses.map(status => <option key={status} value={status}>{['active', 'closed'].includes(status) ? `All ${status}` : status.replaceAll('_', ' ')}</option>)}</select></label>
+      <label>Work type<select value={filters.kind} onChange={event => change('kind', event.target.value)}><option value="">All types</option>{['work','review','verify','report'].map(kind => <option key={kind}>{kind}</option>)}</select></label>
+      <label><input type="checkbox" checked={!!filters.needs_owner} onChange={event => setFilters(previous => ({...previous, view:'active', status:event.target.checked ? 'blocked' : '', needs_owner:event.target.checked ? 'true' : ''}))} />Needs my decision</label>
       <label>Priority<select aria-label="Priority" value={filters.priority} onChange={event => change('priority', event.target.value)}><option value="">All priorities</option>{['urgent', 'high', 'medium', 'low'].map(priority => <option key={priority} value={priority}>{priority}</option>)}</select></label>
       <label>Assignee<input aria-label="Assignee" value={assignee} maxLength={256} placeholder="Pane ID, e.g. %311" onChange={event => setAssignee(event.target.value)} /></label><button type="submit">Apply assignee</button>
       {filters.assignee && <button type="button" onClick={() => { setAssignee(''); change('assignee', ''); }}>Clear assignee</button>}

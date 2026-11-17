@@ -1,0 +1,10 @@
+.project-resources { display: flex; flex-wrap: wrap; gap: .75rem 1.5rem; padding: 1rem; margin-bottom: 1rem; border: 1px solid var(--dash-border, #52616b); border-radius: .5rem; }
+.project-resources small { flex-basis: 100%; }
+.project-panel-tabs { display: flex; flex-wrap: wrap; gap: .5rem; margin: 1rem 0; }
+.project-panel-tabs button[aria-pressed="true"] { outline: 2px solid currentColor; outline-offset: 2px; }
+.project-panels { min-width: 0; }
+.project-information .markdown { overflow-wrap: anywhere; }
+.project-information .markdown pre { overflow-x: auto; }
+.project-panels .tasks-view { padding: .5rem 0; }
+.tasks-table details { max-width: 65ch; overflow-wrap: anywhere; }
+.tasks-table summary { cursor: pointer; }

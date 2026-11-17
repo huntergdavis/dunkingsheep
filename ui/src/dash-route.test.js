@@ -15,7 +15,7 @@ test('the bare desk, /dash and /dash/ open Projects', () => {
 });
 
 test('every dashboard keeps its own route, Inbox included, and Projects is first in the nav', () => {
-  assert.deepEqual(Object.keys(DASH_ROUTES), ['projects', 'databases', 'cos', 'tasks', 'operations', 'play']);
+  assert.deepEqual(Object.keys(DASH_ROUTES), ['projects', 'knowledge', 'cos', 'tasks', 'play']);
   for (const key of Object.keys(DASH_ROUTES)) {
     assert.deepEqual(viewForPath(`/dash/${key}`), { view: key, known: true });
     assert.deepEqual(resolveDashRoute(`/dash/${key}/`), { standalone: true, view: key, known: true });
@@ -28,7 +28,7 @@ test('every dashboard keeps its own route, Inbox included, and Projects is first
 // t4646: the Terminals view is retired; its bookmarks land on Projects with the lane kept.
 test('the retired Terminals path opens Projects and keeps the pane deep link', () => {
   assert.equal(Object.hasOwn(DASH_ROUTES, 'fleet'), false);
-  assert.deepEqual(DASH_REDIRECTS, { fleet: 'projects' });
+  assert.deepEqual(DASH_REDIRECTS, { fleet: 'projects', operations: 'projects', databases: 'knowledge' });
   assert.deepEqual(viewForPath('/dash/fleet'), { view: 'projects', known: true });
   assert.deepEqual(resolveDashRoute('/dash/fleet/'), { standalone: true, view: 'projects', known: true });
   assert.equal(canonicalDashLocation('/dash/fleet', '?pane=%257'), '/dash/projects?pane=%257');
