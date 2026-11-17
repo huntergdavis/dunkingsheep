@@ -725,9 +725,8 @@ impl Terminal for TmuxBackend {
     }
 
     fn start_agent(&mut self, spec: &AgentSpec) -> Result<Pane, TerminalError> {
-        let kind = spec
-            .argv
-            .first()
+        let kind = crate::flock::launched_program_index(&spec.argv)
+            .and_then(|index| spec.argv.get(index))
             .and_then(|p| Path::new(p).file_name())
             .and_then(|p| p.to_str())
             .ok_or_else(|| TerminalError::refused("command is required"))?;
@@ -862,9 +861,8 @@ impl Terminal for TmuxBackend {
     }
     fn start_agent_raw(&mut self, spec: &AgentSpec, focus: bool) -> super::RawCreateResult<Pane> {
         raw_create_result(|| {
-            let kind = spec
-                .argv
-                .first()
+            let kind = crate::flock::launched_program_index(&spec.argv)
+                .and_then(|index| spec.argv.get(index))
                 .and_then(|p| p.rsplit('/').next())
                 .ok_or_else(|| TerminalError::refused("command is required"))?;
             if !super::parse::AGENT_KINDS.contains(&kind) {

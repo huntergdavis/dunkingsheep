@@ -41,6 +41,59 @@ fn spec(tab: bool) -> AgentSpec {
         ..Default::default()
     }
 }
+
+#[test]
+fn env_prefixed_agent_keeps_tmpdir_argv_and_registry_kind() {
+    for raw in [false, true] {
+        let (dir, mut backend) = fixture();
+        let mut spec = spec(false);
+        let mut argv = vec!["env".into(), "TMPDIR=/private scratch".into()];
+        argv.extend(spec.argv);
+        spec.argv = argv;
+        let pane = if raw {
+            backend.start_agent_raw(&spec, false).unwrap().unwrap()
+        } else {
+            backend.start_agent(&spec).unwrap()
+        };
+        assert_eq!(pane.command, "codex");
+        let saved: Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("registry.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved["panes"]["%2"]["agent_kind"], "codex");
+        let calls = std::fs::read_to_string(dir.path().join("calls")).unwrap();
+        let command = crate::flock::commands_layout::shlex_join(&spec.argv);
+        assert!(
+            calls.contains(&super::tmux::agent_launch(&command)),
+            "{calls}"
+        );
+    }
+}
+
+#[test]
+fn unknown_program_after_env_is_refused_before_tmux_mutation() {
+    for raw in [false, true] {
+        let (dir, mut backend) = fixture();
+        let mut spec = spec(false);
+        spec.argv = vec![
+            "env".into(),
+            "TMPDIR=/private".into(),
+            "not-an-agent".into(),
+        ];
+        let error = if raw {
+            backend
+                .start_agent_raw(&spec, false)
+                .unwrap()
+                .unwrap_err()
+                .message
+        } else {
+            backend.start_agent(&spec).unwrap_err().message
+        };
+        assert!(error.contains("unsupported agent kind"), "{error}");
+        assert!(error.contains("not-an-agent"), "{error}");
+        assert!(!dir.path().join("calls").exists());
+        assert!(!dir.path().join("registry.json").exists());
+    }
+}
 #[test]
 fn raw_agent_terminal_launch_registry_and_focus_match_python() {
     for (tab, focus) in [(false, false), (false, true), (true, false), (true, true)] {
