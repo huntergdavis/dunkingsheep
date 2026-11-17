@@ -511,8 +511,7 @@ fn obj(value: &Value) -> Result<&Obj, PyError> {
     }
 }
 
-/// Python `(x or {})` followed by `.get`: a falsy value is an empty mapping.
-
+/// Python truthiness for the JSON values returned by usage providers.
 fn truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
@@ -525,7 +524,6 @@ fn truthy(value: &Value) -> bool {
 }
 
 /// Python `x or default`.
-
 fn or_else(value: &Value, default: Value) -> Value {
     if truthy(value) {
         value.clone()
@@ -534,9 +532,7 @@ fn or_else(value: &Value, default: Value) -> Value {
     }
 }
 
-/// Python `list(x or [])` and the loops over such a value. Strings iterate characters and
-/// mappings iterate keys. Any other truthy value is not iterable.
-
+/// Accept finite JSON numbers only.
 fn number_of(value: &Value) -> Option<f64> {
     match value {
         Value::Number(number) => number.as_f64().filter(|float| float.is_finite()),
@@ -545,7 +541,6 @@ fn number_of(value: &Value) -> Option<f64> {
 }
 
 /// The original number for output (Python keeps an int as an int and a float as a float).
-
 fn num_value(value: &Value) -> Value {
     if number_of(value).is_some() {
         value.clone()
@@ -554,20 +549,17 @@ fn num_value(value: &Value) -> Value {
     }
 }
 
-/// Python `int(x)` for the shapes the board reads.
-
+/// Match Python whitespace trimming, including its extra control separators.
 fn py_strip(text: &str) -> &str {
     text.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
 }
 
 /// A Python float, spelled as Python spells it, as a JSON number.
-
 fn float_value(value: f64) -> Value {
     serde_json::from_str(&py_float_repr(value)).unwrap_or(Value::Null)
 }
 
-/// Seconds since the Unix epoch, to microseconds, as Python's `time.time()`.
-
+/// UTC ISO timestamp with microseconds only when present.
 fn iso_micro(value: DateTime<Utc>) -> String {
     if value.timestamp_subsec_micros() == 0 {
         value.format("%Y-%m-%dT%H:%M:%SZ").to_string()
@@ -577,7 +569,6 @@ fn iso_micro(value: DateTime<Utc>) -> String {
 }
 
 /// Python `_time` and `_age_seconds`' parse: a number is a Unix time, text is ISO-8601.
-
 fn moment_of(value: &Value) -> Option<DateTime<Utc>> {
     match value {
         Value::Number(_) => fromtimestamp_utc(number_of(value)?).ok(),
@@ -603,7 +594,6 @@ fn parse_moment(text: &str) -> Option<DateTime<Utc>> {
 }
 
 /// Python `max(0, int((now - moment).total_seconds()))`.
-
 fn age_between(now: DateTime<Utc>, moment: DateTime<Utc>) -> Option<i64> {
     let micros = (now - moment).num_microseconds()?;
     Some((micros / 1_000_000).max(0))
