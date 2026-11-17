@@ -24,6 +24,8 @@ replace('lib/jmap/client.ts','function withJmapCredentials(init: RequestInit | u
   return { ...init, headers, credentials: 'same-origin' };
 }
 function unusedUpstreamCredentials(init: RequestInit | undefined): RequestInit {`);
+// t5484: the adapter delivers only to the desk, so a new message starts addressed to it.
+replace('components/email/email-composer.tsx',"if (mode !== 'reply' && mode !== 'replyAll') return [];","if (mode !== 'reply' && mode !== 'replyAll') return [{ name: 'Front Desk', email: 'desk@dunkingsheep.invalid' }];");
 replace('components/mail/mail-app.tsx','import { useEffect,',`import { connectDunkingSheep } from '@/lib/dunkingsheep';\nimport { useEffect,`);
 replace('components/mail/mail-app.tsx','checkAuth().finally(() => {','connectDunkingSheep().finally(() => {');
 writeFileSync(resolve(scratch,'lib/dunkingsheep.ts'), `

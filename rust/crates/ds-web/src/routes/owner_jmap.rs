@@ -707,19 +707,11 @@ async fn submit(
         };
         let email: Value =
             serde_json::from_str(&email_json).map_err(|_| json!({"type":"serverFail"}))?;
-        let recipients = email["to"].as_array();
-        let valid = recipients
-            .is_some_and(|a| a.len() == 1 && a[0]["email"] == "desk@dunkingsheep.invalid")
-            && !["cc", "bcc"]
-                .iter()
-                .any(|k| email[*k].as_array().is_some_and(|a| !a.is_empty()))
-            && submission["identityId"] == "owner"
-            && submission.get("sendAt").is_none()
-            && submission["envelope"]["rcptTo"]
-                .as_array()
-                .is_none_or(|a| a.len() == 1 && a[0]["email"] == "desk@dunkingsheep.invalid");
-        if !valid {
-            refused.insert(key.clone(),json!({"type":"forbiddenToSend","description":"Only immediate internal delivery to desk@dunkingsheep.invalid is supported"}));
+        if let Some(reason) = submission_refusal(&email, &submission) {
+            refused.insert(
+                key.clone(),
+                json!({"type":"forbiddenToSend","description":reason}),
+            );
             continue;
         }
         let part = email["textBody"][0]["partId"].as_str().unwrap_or("text");
@@ -910,5 +902,95 @@ mod submission_tests {
         append_drafts(&store, &mut rows).unwrap();
         assert_eq!(rows[0]["mailboxIds"], json!({"sent":true}));
         assert!(rows[0]["keywords"].get("$draft").is_none());
+    }
+}
+
+/// Why a submission cannot be delivered internally, or `None` when it can. Only immediate
+/// delivery from the owner identity to exactly one recipient, the desk, is supported; the reason
+/// names what the owner has to change.
+pub(crate) fn submission_refusal(email: &Value, submission: &Value) -> Option<String> {
+    const DESK: &str = "desk@dunkingsheep.invalid";
+    let to: Vec<&str> = email["to"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|r| r["email"].as_str().unwrap_or(""))
+                .collect()
+        })
+        .unwrap_or_default();
+    if to.is_empty() {
+        return Some(format!("Add the recipient: messages can only go to {DESK}"));
+    }
+    if to != [DESK] {
+        return Some(format!(
+            "Messages can only go to {DESK}, not to {}",
+            to.join(", ")
+        ));
+    }
+    if ["cc", "bcc"]
+        .iter()
+        .any(|k| email[*k].as_array().is_some_and(|a| !a.is_empty()))
+    {
+        return Some(format!("Remove Cc and Bcc: messages can only go to {DESK}"));
+    }
+    if submission["identityId"] != "owner" {
+        return Some("Send from your own identity (owner)".to_owned());
+    }
+    if submission.get("sendAt").is_some() {
+        return Some("Scheduled sending is not supported; send now".to_owned());
+    }
+    if submission["envelope"]["rcptTo"]
+        .as_array()
+        .is_some_and(|a| a.len() != 1 || a[0]["email"] != DESK)
+    {
+        return Some(format!("The envelope can only name {DESK}"));
+    }
+    None
+}
+
+#[cfg(test)]
+mod submission_refusal_tests {
+    use super::submission_refusal;
+    use serde_json::json;
+
+    #[test]
+    fn each_refusal_names_what_to_change() {
+        let ok = json!({"to":[{"email":"desk@dunkingsheep.invalid"}]});
+        let owner = json!({"identityId":"owner"});
+        assert_eq!(submission_refusal(&ok, &owner), None);
+        let cases = [
+            (json!({"to":[]}), owner.clone(), "Add the recipient"),
+            (json!({}), owner.clone(), "Add the recipient"),
+            (
+                json!({"to":[{"email":"a@example.com"}]}),
+                owner.clone(),
+                "not to a@example.com",
+            ),
+            (
+                json!({"to":[{"email":"desk@dunkingsheep.invalid"},{"email":"b@example.com"}]}),
+                owner.clone(),
+                "b@example.com",
+            ),
+            (
+                json!({"to":[{"email":"desk@dunkingsheep.invalid"}],"cc":[{"email":"c@example.com"}]}),
+                owner.clone(),
+                "Remove Cc",
+            ),
+            (ok.clone(), json!({"identityId":"x"}), "own identity"),
+            (
+                ok.clone(),
+                json!({"identityId":"owner","sendAt":"2026-01-01T00:00:00Z"}),
+                "Scheduled",
+            ),
+            (
+                ok.clone(),
+                json!({"identityId":"owner","envelope":{"rcptTo":[{"email":"a@example.com"}]}}),
+                "envelope",
+            ),
+        ];
+        for (email, submission, expected) in cases {
+            let reason = submission_refusal(&email, &submission).expect("refused");
+            assert!(reason.contains(expected), "{reason} lacks {expected}");
+        }
     }
 }
