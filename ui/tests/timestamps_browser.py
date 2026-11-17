@@ -40,7 +40,7 @@ def api(route):
     elif path == '/api/projects':
         value = {'lanes': [{'pane_id': '%21', 'name': 'Fixture', 'harness': 'claude',
                            'membership': {'scope': 'project', 'project': 'alpha'}}]}
-    elif path == '/api/ops-board':
+    elif path == '/api/project-resources':
         value = {'budget': {'providers': [{'provider': 'claude', 'state': 'ok', 'age_s': 0,
                   'windows': [{'name': 'session', 'percent_used': 30, 'resets_at': ISO}]}]}}
     elif path == '/api/terminals':
@@ -81,7 +81,7 @@ try:
         for path, selector in [('/dash/projects', '.lane-usage-label'),
                                ('/dash/cos', '.owner-inbox-row time'),
                                ('/dash/tasks', '.tasks-checked time'),
-                               ('/dash/databases?project=alpha', '.info-provenance')]:
+                               ('/dash/knowledge?project=alpha', '.info-provenance')]:
             page = context.new_page()
             page.route('**/api/**', api)
             page.goto(base + path, wait_until='domcontentloaded')

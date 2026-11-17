@@ -140,7 +140,6 @@ fn make_config(root: &Path) -> Result<DeskConfig, Box<dyn Error>> {
         usage_refresh_s: refresh,
         usage_backoff_s: backoff,
         usage_max_age_s: refresh.saturating_mul(2),
-        board_interval_s: positive("VP_OPS_BOARD_INTERVAL_S", 30, 10)? as u64,
         gh_program: PathBuf::from("gh"),
         tmux_program: PathBuf::from("tmux"),
         proc_root: PathBuf::from("/proc"),

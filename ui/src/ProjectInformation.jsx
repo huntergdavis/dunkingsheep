@@ -1,5 +1,6 @@
 import { useServerTimeZone } from './Timestamp';
 import { timestampIso } from './timestamps.js';
+import MessageBody from './MessageBody';
 import React, { useEffect, useState } from 'react';
 import { CLASS_LABELS, provenance, requestedStore, splitEntries, standing, storeSearch, viewStateText } from './project-info.js';
 
@@ -12,16 +13,16 @@ function Entry({ entry }) {
     <h4>{entry.subject || entry.slug} <small>{CLASS_LABELS[entry.class] || entry.class || 'Unclassified'}</small></h4>
     {provenance(entry, timeZone) && <p className="info-provenance" title={timestampIso(entry.stated) || undefined}>{provenance(entry, timeZone)}</p>}
     {marks.length > 0 && <p className="info-standing" role="note">{marks.join(' · ')}</p>}
-    <details><summary>Show text</summary><pre className="info-body">{entry.body}{entry.body_truncated ? '\n… (truncated)' : ''}</pre></details>
+    <details><summary>Show text</summary><MessageBody body={entry.body || ""} frontDesk />{entry.body_truncated && <p>… (truncated)</p>}</details>
   </article>;
 }
 
 // t5241: the Databases tab. The chosen store is in the address (?project=<name> or
 // ?project=global), so a project's Information link opens it and a reload keeps it.
-export default function ProjectInformation({ api }) {
+export default function ProjectInformation({ api, project = null }) {
   const [list, setList] = useState(null);
   const [listError, setListError] = useState('');
-  const [selected, setSelectedState] = useState(() => requestedStore(window.location.search));
+  const [selected, setSelectedState] = useState(() => project ? `project:${project}` : requestedStore(window.location.search));
   const setSelected = value => {
     setSelectedState(value);
     const url = `${window.location.pathname}${storeSearch(value)}${window.location.hash}`;
@@ -49,18 +50,18 @@ export default function ProjectInformation({ api }) {
   }, [selected, query]);
   const split = splitEntries(view?.entries);
   return <section className="project-group project-information" aria-label="Project information">
-    <h2>Information</h2>
+    <h2>Knowledge</h2>
     {listError && <p role="alert">Information is unavailable: {listError}</p>}
     {list?.map?.state === 'invalid' && <p role="alert">The project map cannot be used: {list.map.reason}</p>}
     {list?.map?.state === 'absent' && <p className="dash-muted">No project map is configured; only the global store can be shown.</p>}
     {list && <div className="info-controls">
-      <label>Store <select aria-label="Information store" value={selected} onChange={e => setSelected(e.target.value)}>
+      {!project && <label>Store <select aria-label="Information store" value={selected} onChange={e => setSelected(e.target.value)}>
         <option value="">Choose a project</option>
         <option value="global">Global (all projects)</option>
         {(list.projects || []).map(project => <option key={project.name} value={`project:${project.name}`}>
           {project.name}{project.state === 'ok' ? '' : ' (mapping invalid)'}
         </option>)}
-      </select></label>
+      </select></label>}
       <label>Search <input aria-label="Search information" type="search" value={query} onChange={e => setQuery(e.target.value)} disabled={!selected} /></label>
     </div>}
     {selected && <>

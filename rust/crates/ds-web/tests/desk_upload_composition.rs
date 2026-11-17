@@ -75,7 +75,6 @@ fn config(dir: &Path) -> DeskConfig {
         usage_refresh_s: 1800,
         usage_backoff_s: vec![300, 600, 1800],
         usage_max_age_s: 3600,
-        board_interval_s: 3600,
         gh_program: dir.join("missing-gh"),
         tmux_program: dir.join("missing-tmux"),
         proc_root: dir.join("proc"),

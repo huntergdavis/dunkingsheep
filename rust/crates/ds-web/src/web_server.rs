@@ -5,9 +5,8 @@
 //! executable step captures the configuration and tests pass temporary paths. The startup order
 //! follows `web/app.py`: the owner auth store first, then the daemon-backed panes store (which
 //! needs the auth store's session columns), the messages store, the owner/fleet adapter (which
-//! needs the messages database), the activity and dashboard readers, and last the operations
-//! board runtime. Startup warms the provider usage cache and starts the board timer. Shutdown
-//! stops the timer and joins the usage workers.
+//! needs the messages database), the activity/dashboard readers and on-demand project resources.
+//! Startup starts only the delivery watcher. Shutdown joins it and any usage workers.
 //!
 //! Routing follows Starlette. The path is decoded before routing, so `/%61pi/health` is
 //! `/api/health`. A request that a registered Python route claims for its method goes to that
@@ -32,7 +31,7 @@
 //! - The P1 game routes are not in the route table. Python answers them, but here a POST gets the
 //!   mount's 405 (Allow `GET, HEAD`) and a GET gets a 404. The 405 wrongly implies the path takes only
 //!   GET and HEAD. This is documented rather than fixed.
-//! - `POST /api/ops-board/question` is a Rust desk extension: the current UI needs it to obtain
+//! - `POST /api/tasks/question` is a Rust desk extension: the current UI needs it to obtain
 //!   the version and options for owner answers. Python has no equivalent route.
 //! - `POST /api/pane-inbox` is a Rust desk extension (t4644): the quick-message dialog stores an inbox
 //!   message for a live lane through the daemon's inbox send. Python has no equivalent route.
@@ -85,13 +84,10 @@ use crate::{
     messages_backend::{
         ChannelConfig, MessagesBackend, MessagesBackendConfig, UnixDaemonConnector,
     },
-    ops_board_runtime::{
-        owner_board_backend, BoardRuntime, BoardRuntimeConfig, CoreUsageReader, Dispatch, OpenDb,
-        SharedDaemon, SystemClock as BoardClock,
-    },
     ops_collector::{CollectorConfig, GhCli, COMMAND_TIMEOUT},
     owner_fleet_backend::{OwnerFleetBackend, OwnerFleetConfig},
     panes_backend::DaemonPanesBackend,
+    project_reporting::{OpenDb, ReportingConfig, SharedDaemon},
     routes::{
         activity_poolrad::{self, ActivityPoolradBackend as ActivityRoutes},
         auth::{AuthBackend, RequestScheme},
@@ -105,6 +101,7 @@ use crate::{
         search_attachments,
         system::{self, SystemConfig},
     },
+    usage_runtime::{CoreUsageReader, Dispatch},
 };
 
 /// Every input the desk needs. The executable fills it from the captured environment; tests pass
@@ -152,8 +149,6 @@ pub struct DeskConfig {
     pub usage_backoff_s: Vec<i64>,
     /// Maximum provider reading age before it is `stale` (`2 * VP_USAGE_REFRESH_S`).
     pub usage_max_age_s: i64,
-    /// Operations board refresh cadence in seconds (`VP_OPS_BOARD_INTERVAL_S`).
-    pub board_interval_s: u64,
     /// The `gh` executable used by the metrics collector.
     pub gh_program: PathBuf,
     /// The `tmux` executable used by the fleet lane scan.
@@ -210,7 +205,8 @@ pub struct Desk {
     fleet: Arc<OwnerFleetBackend>,
     activity: Arc<DashboardActivity<UnixTransport>>,
     dash: Arc<DashboardShell>,
-    board: BoardRuntime,
+    reporting: crate::project_reporting::ProjectReporting,
+    resources: Arc<crate::project_resources::ProjectResources>,
     system: SystemConfig,
     ui_dist: PathBuf,
     time_zone: Option<String>,
@@ -272,9 +268,8 @@ impl Desk {
             Arc::new(DashboardClock::new()),
         ));
         let dash = Arc::new(DashboardShell::new(config.ui_dist.clone()));
-        let board = BoardRuntime::new(
-            BoardRuntimeConfig {
-                interval_s: config.board_interval_s,
+        let reporting = crate::project_reporting::ProjectReporting {
+            config: ReportingConfig {
                 ops_db: config.operations_db.clone(),
                 host_watch_state: config.host_watch_state.clone(),
                 opencode_db: config.opencode_db.clone(),
@@ -287,20 +282,30 @@ impl Desk {
                     repo_dir: config.poolrad_repo.clone(),
                     timeout: COMMAND_TIMEOUT,
                 },
-                usage_refresh_s: config.usage_refresh_s,
-                usage_backoff_s: config.usage_backoff_s.clone(),
-                usage_max_age_s: config.usage_max_age_s,
-                timer_period: Duration::from_secs(config.board_interval_s),
             },
-            SharedDaemon::new(daemon_client(&config, "web-desk-board", token.clone())),
-            config.open_operations_db,
-            Arc::new(BoardClock),
-            Arc::new(CoreUsageReader {
-                config_path: config.usage_config.clone(),
-                max_age_s: config.usage_max_age_s,
-            }),
-            Dispatch::Threads,
-        );
+            daemon: SharedDaemon::new(daemon_client(
+                &config,
+                "web-desk-project-reporting",
+                token.clone(),
+            )),
+            open_db: config.open_operations_db,
+        };
+        let resources = Arc::new(crate::project_resources::ProjectResources {
+            usage: crate::usage_runtime::UsageCache::new(
+                config.usage_refresh_s,
+                config.usage_backoff_s.clone(),
+                Arc::new(CoreUsageReader {
+                    config_path: config.usage_config.clone(),
+                    max_age_s: config.usage_max_age_s,
+                }),
+                Arc::new(|| chrono::Utc::now().timestamp() as f64),
+                Dispatch::Threads,
+            ),
+            max_age_s: config.usage_max_age_s,
+            proc_root: config.proc_root.clone(),
+            host_watch: config.host_watch_state.clone(),
+            cpu_sample: Mutex::new(None),
+        });
         let system = SystemConfig::new(
             config.herdr_webui_url.clone(),
             config.herdr_webui_label.clone(),
@@ -315,7 +320,8 @@ impl Desk {
             fleet,
             activity,
             dash,
-            board,
+            reporting,
+            resources,
             system,
             ui_dist: config.ui_dist,
             time_zone: config.time_zone,
@@ -334,17 +340,13 @@ impl Desk {
         })
     }
 
-    /// Starts the receipt watcher and the board's background work once.
+    /// Starts the receipt watcher once.
     pub fn start(&self) -> std::io::Result<()> {
         let _lifecycle = self
             .lifecycle
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         self.start_delivery_watcher()?;
-        if let Err(error) = self.board.start() {
-            self.stop_delivery_watcher();
-            return Err(error);
-        }
         Ok(())
     }
 
@@ -396,14 +398,14 @@ impl Desk {
         let _ = worker.handle.join();
     }
 
-    /// Stops the receipt and board timers and joins the usage workers.
+    /// Stops the receipt watcher and joins the usage workers.
     pub fn stop(&self) {
         let _lifecycle = self
             .lifecycle
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         self.stop_delivery_watcher();
-        self.board.stop();
+        self.resources.usage.stop();
     }
 
     /// Mounts every P0 route against the owned backends, then the legacy redirect middleware
@@ -435,14 +437,19 @@ impl Desk {
             self.panes.clone() as Arc<dyn PanesWebBackend>,
             self.fleet.clone() as Arc<dyn FleetSources>,
         ));
-        let metrics: Arc<dyn OpsMetricsBackend> = Arc::new(self.board.clone());
-        let board: Arc<dyn OpsBoardBackend> = Arc::new(owner_board_backend(&self.board));
+        let metrics: Arc<dyn OpsMetricsBackend> = Arc::new(self.reporting.clone());
+        let board: Arc<dyn OpsBoardBackend> = Arc::new(self.reporting.clone());
         let activity: Arc<dyn ActivityRoutes> = self.activity.clone();
         let dash: Arc<dyn DashRoutes> = self.dash.clone();
         let ui_dist = self.ui_dist.clone();
 
         let router = Router::new()
             .merge(system::router(self.system.clone(), auth.clone(), scheme))
+            .merge(crate::project_resources::router(
+                self.resources.clone(),
+                auth.clone(),
+                scheme,
+            ))
             .merge(
                 crate::routes::auth::router_with_time_zone(scheme, self.time_zone.clone())
                     .layer(Extension(auth.clone())),
@@ -481,11 +488,11 @@ impl Desk {
             ))
             .merge(activity_poolrad::router(activity, auth.clone(), scheme))
             .merge(
-                ops_metrics::router_with_scheme(scheme)
+                ops_metrics::project_router(scheme)
                     .layer(Extension(metrics))
                     .layer(Extension(auth.clone())),
             )
-            .merge(ops_board::router(board, auth.clone(), scheme))
+            .merge(ops_board::decisions_router(board, auth.clone(), scheme))
             .merge(terminal_stream)
             .merge(crate::routes::project_context::router(
                 self.project_context.clone(),
@@ -536,6 +543,8 @@ where
                     "/api/session"
                         | "/.well-known/jmap"
                         | "/api/projects"
+                        | "/api/project-resources"
+                        | "/api/projects/poolrad/history"
                         | "/api/mailboxes"
                         | "/api/mailbox-messages"
                         | "/api/mailbox-message"
@@ -548,7 +557,14 @@ where
                 && decoded
                     .strip_prefix("/api/project-context/project/")
                     .is_some_and(|name| !name.is_empty() && !name.contains('/')))
-            || (request.method() == Method::POST && decoded == "/api/ops-board/question")
+            || (request.method() == Method::POST
+                && matches!(
+                    decoded.as_str(),
+                    "/api/tasks/question"
+                        | "/api/tasks/answer"
+                        | "/api/tasks/not-now"
+                        | "/api/projects/poolrad/refresh"
+                ))
             || (request.method() == Method::POST && decoded == "/api/pane-inbox")
             || (request.method() == Method::POST && decoded == "/api/jmap")
             || (self.terminal_stream && is_terminal_route(&decoded))
@@ -602,12 +618,6 @@ pub const PYTHON_ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/messages"),
     ("POST", "/api/messages/{message_id}/send-now"),
     ("POST", "/api/brief"),
-    ("POST", "/api/ops-board/not-now"),
-    ("POST", "/api/ops-board/answer"),
-    ("POST", "/api/ops-board/refresh"),
-    ("GET", "/api/ops-board"),
-    ("GET", "/api/ops-metrics/history"),
-    ("POST", "/api/ops-metrics/refresh"),
     ("GET", "/api/capability"),
     ("POST", "/api/owner-send"),
     ("GET", "/api/owner-thread"),
@@ -693,7 +703,7 @@ pub async fn serve(
         .port();
     let desk = Desk::open(config)?;
     desk.start()
-        .map_err(|error| DeskError::Startup(format!("board: {error}")))?;
+        .map_err(|error| DeskError::Startup(format!("delivery watcher: {error}")))?;
     let (app, terminal_stream) = desk.router_and_terminal_stream(bound_port);
     let served = axum::serve(
         listener,

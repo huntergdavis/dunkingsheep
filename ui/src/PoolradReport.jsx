@@ -1,17 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { api } from './DeskShared';
 import { coverageEconomics, milestoneScenarios } from './coverage-economics.js';
-import { leaderLine } from './leader-line.js';
-import { laneStatus } from './lane-status.js';
-import { laneDisplayName } from './lane-label.js';
-import { sendOutcomeText } from './quick-message.js';
-import { api, DashHeader, DashShell } from './DeskShared';
-import { usePoolradProgress, PoolradReference } from './PoolradProgress';
-
-function LaneStatus({ row }) {
-  const value = laneStatus(row);
-  return <span data-lane-status={row.pane_id}>{value.status}<small>{value.provenance}</small></span>;
-}
-
 function LineTrend({ title, points, color, unit, note, step = false }) {
   const rows = points.filter(point => Number.isFinite(point.value) && Number.isFinite(Date.parse(point.at)));
   if (!rows.length) return <div className="ops-chart"><h3>{title}</h3><p className="muted">No observations in this window</p><small>{note}</small></div>;
@@ -137,7 +126,7 @@ function CoverageEconomics({ snapshot, history }) {
   return <section className="ops-executive" aria-label="C coverage economics and outlook">
     <div className="ops-executive-head"><div><span className="ops-kicker">POOLRAD / EXECUTIVE OUTLOOK</span><h2>C coverage economics</h2><p>Measured credit, fixed commitment, and a changeable planning scenario.</p></div><span className="ops-evidence-pill">PM-REVIEWED CREDIT</span></div>
     <div className="ops-executive-cards">
-      <div><span className="ops-kicker">CREDITED FUNCTIONS</span><strong>{model.current ?? '—'} <em>/ {model.ceiling ?? '—'}</em></strong><small>{model.remaining ?? '—'} remain to the working ceiling. This is source coverage, not playable progress.</small></div>
+      <div><span className="ops-kicker">CREDITED FUNCTIONS</span><strong>{model.current ?? '—'} <em>/ {model.ceiling ?? '—'}</em></strong><small>{model.remaining ?? '—'} remain to the working CEILING. This is source coverage, not playable progress.</small></div>
       <div><span className="ops-kicker">LAST 24 HOURS</span><strong>{model.credits24h == null ? 'Unknown' : `+${model.credits24h}`}</strong><small>{model.credits24h == null ? 'No comparable verified checkpoint.' : 'Net new PM-reviewed strict C functions; candidate work earns no credit.'}</small></div>
       <div><span className="ops-kicker">FIXED POOL / CALENDAR HOUR</span><strong>{model.fixedHourly == null ? 'Unknown' : money(model.fixedHourly) + '/hr'}</strong><small>{snapshot.monthly_fixed_usd == null ? 'Owner cost source unavailable.' : `${money(snapshot.monthly_fixed_usd)}/month ÷ ${snapshot.calendar_hours_in_month} calendar hours.`} Excludes metered usage.</small></div>
       <div className="ops-unavailable"><span className="ops-kicker">ACTUAL C SPEND / HOUR</span><strong>Unavailable</strong><small>No measured C lane-hours, provider billing allocation, or metered usage series. Quota percentages are not dollars.</small></div>
@@ -159,7 +148,7 @@ function CoverageEconomics({ snapshot, history }) {
   </section>;
 }
 
-function OpsSummary({ auto = true }) {
+export default function PoolradReport({ auto = true }) {
   const [snapshot, setSnapshot] = useState(null);
   const [history, setHistory] = useState(null);
   const [weekHistory, setWeekHistory] = useState(null);
@@ -168,8 +157,8 @@ function OpsSummary({ auto = true }) {
   async function refresh() {
     setBusy(true); setError('');
     try {
-      setSnapshot(await api('/ops-metrics/refresh', { method: 'POST' }));
-      const [day, week] = await Promise.all([api('/ops-metrics/history'), api('/ops-metrics/history?hours=168')]);
+      setSnapshot(await api('/projects/poolrad/refresh', { method: 'POST' }));
+      const [day, week] = await Promise.all([api('/projects/poolrad/history'), api('/projects/poolrad/history?hours=168')]);
       setHistory(day); setWeekHistory(week);
     }
     catch (exc) { setError(exc.message); }
@@ -178,7 +167,7 @@ function OpsSummary({ auto = true }) {
   useEffect(() => {
     if (!auto) return undefined;
     let active = true;
-    const load = () => Promise.all([api('/ops-metrics'), api('/ops-metrics/history'), api('/ops-metrics/history?hours=168')])
+    const load = () => Promise.all([api('/ops-metrics'), api('/projects/poolrad/history'), api('/projects/poolrad/history?hours=168')])
       .then(([data, timeline, week]) => { if (active) { setSnapshot(data); setHistory(timeline); setWeekHistory(week); setError(''); } })
       .catch(exc => { if (active) setError(exc.message); });
     load();
@@ -199,13 +188,13 @@ function OpsSummary({ auto = true }) {
   const strictSeries = (history?.goal_observations || []).filter(row => row.goal_key === 'strict_fullc').map(row => ({ at: row.observed_at, value: Number(row.value) }));
   const identitySeries = (history?.goal_observations || []).filter(row => row.goal_key === 'verified_game_identities').map(row => ({ at: row.observed_at, value: Number(row.value) }));
   const coderSeries = (history?.coder_samples || []).map(row => ({ at: row.observed_at, value: row.working }));
-  return <section className="dashboard-view ops-view" aria-label="Private operations dashboard">
-    <div className="dashboard-tools"><span>Private sourced observations · scheduled sample every minute</span><button onClick={refresh} disabled={busy}>{busy ? 'Refreshing…' : 'Refresh data'}</button></div>
+  return <section className="dashboard-view ops-view" aria-label="Poolrad reporting">
+    <div className="dashboard-tools"><span>Poolrad observations · refresh to collect a new sample</span><button onClick={refresh} disabled={busy}>{busy ? 'Refreshing…' : 'Refresh data'}</button></div>
     {error && <div className="dashboard-error" role="alert">{error} <button onClick={refresh}>Try again</button></div>}
-    <div className="ops-metrics"><div className="ops-heading"><strong>OPERATIONS METRICS</strong><small>{snapshot?.latest_sample_at ? 'Sample ' + new Date(snapshot.latest_sample_at).toLocaleTimeString() : 'Loading…'}</small></div>
+    <div className="ops-metrics"><div className="ops-heading"><strong>POOLRAD REPORT</strong><small>{snapshot?.latest_sample_at ? 'Sample ' + new Date(snapshot.latest_sample_at).toLocaleTimeString() : 'Loading…'}</small></div>
     {snapshot && weekHistory && <RecreationLab snapshot={snapshot} history={weekHistory} />}
     {snapshot && weekHistory && <section className="ops-reference"><h2>Reviewed credit history and fixed-cost planning reference</h2><CoverageEconomics snapshot={snapshot} history={weekHistory} /></section>}
-    {progress && <p className="ops-source-line">Published main {progress.commit_oid.slice(0, 8)} · checkpoint {new Date(progress.observed_at).toLocaleString()} · {progress.verified_game_identities} verified identities / {progress.ceiling} working ceiling; identity is separate from strict C credit.</p>}
+    {progress && <p className="ops-source-line">Published main {progress.commit_oid.slice(0, 8)} · checkpoint {new Date(progress.observed_at).toLocaleString()} · {progress.verified_game_identities} verified identities / {progress.ceiling} working CEILING; identity is separate from strict C credit.</p>}
     {history && <><div className="ops-section-head"><h2>Engineering flow · last 24 hours</h2><small>Recorded events and observations; no values are inferred between samples.</small></div>
       <div className="ops-charts">
         <LineTrend title="Reviewed strict C" points={strictSeries} color="#a9db7d" unit="functions" step note="Dated verified credit events; no credit from PR count or candidate rows." />
@@ -224,350 +213,3 @@ function OpsSummary({ auto = true }) {
     </div>}</div>
   </section>;
 }
-
-function Fleet({ standalone = false }) {
-  const [fleet, setFleet] = useState(null);
-  const [error, setError] = useState('');
-  const [selected, setSelected] = useState(null);
-  const [requestedPane] = useState(() => new URLSearchParams(window.location.search).get('pane'));
-  const [paneText, setPaneText] = useState(null);
-  const [draft, setDraft] = useState('');
-  const [sent, setSent] = useState('');
-  const [sendError, setSendError] = useState('');
-  const [sendBusy, setSendBusy] = useState(false);
-  const sendingRef = useRef(false);
-  const terminalRef = useRef(null);
-  useEffect(() => { terminalRef.current?.scrollIntoView({ block: 'start' }); }, [selected]);
-
-  async function load() {
-    try {
-      const data = await api('/fleet');
-      if (data.state === 'unavailable') {
-        setFleet(null); setSelected(null); setError(`Fleet unavailable: ${data.error || 'unknown reason'}`);
-      } else {
-        setFleet(data); setError('');
-        if (requestedPane && data.rows?.some(row => row.pane_id === requestedPane)) {
-          setSelected(current => current || requestedPane);
-        }
-      }
-    } catch (e) { setFleet(null); setSelected(null); setError(`Fleet unavailable: ${e.message}`); }
-  }
-  useEffect(() => {
-    load();
-    const timer = setInterval(load, 10000);
-    return () => clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
-    if (!selected) { setPaneText(null); return undefined; }
-    let alive = true;
-    async function loadText() {
-      try {
-        const data = await api(`/pane-text?pane=${encodeURIComponent(selected)}&lines=40`);
-        if (alive) setPaneText(data);
-      } catch (e) { if (alive) setPaneText({ pane: selected, text: '', reason: e.message }); }
-    }
-    loadText();
-    const timer = setInterval(loadText, 3000);
-    return () => { alive = false; clearInterval(timer); };
-  }, [selected]);
-
-  const projects = (fleet?.rows || []).reduce((groups, row) => { const project = row.project || 'Unassigned'; (groups[project] ||= []).push(row); return groups; }, {});
-  const age = value => {
-    if (value === null || value === undefined) return 'no activity recorded';
-    if (value < 90) return `${value}s ago`;
-    if (value < 5400) return `${Math.round(value / 60)}m ago`;
-    return `${(value / 3600).toFixed(1)}h ago`;
-  };
-
-  async function send(event) {
-    event.preventDefault();
-    setSent(''); setSendError('');
-    if (!draft.trim() || sendingRef.current) return;
-    sendingRef.current = true; setSendBusy(true);
-    try {
-      const data = await api('/pane-send', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pane: selected, text: draft }),
-      });
-      setDraft(current => current === draft ? '' : current);
-      // The server performed the transport; it gets to describe it. Prefix the outcome so
-      // 'stored' and 'unconfirmed' cannot be read as 'delivered'.
-      setSent(sendOutcomeText(data));
-    } catch (e) { setSendError(e.message); }
-    finally { sendingRef.current = false; setSendBusy(false); }
-  }
-
-  return <DashShell standalone={standalone} view="fleet">
-    <div className="dash-body fleet-body">
-    <p className="dash-lead">Choose an agent to view or message.</p>
-    {error && <p className="dash-error" role="alert">{error}</p>}
-    {!fleet && !error && <p className="dash-empty">Loading agents…</p>}
-    {fleet && !fleet.rows.length && <p className="dash-empty">No active agents right now.</p>}
-    {Object.entries(projects).sort(([a], [b]) => a.localeCompare(b)).map(([project, rows]) =>
-      <section key={project} className="fleet-project">
-        <h2>{project} <span className="dash-muted">· {rows.length} lanes</span></h2>
-        <div className="fleet-lanes">{rows.map(row => <button key={row.pane_id}
-          aria-pressed={selected === row.pane_id} onClick={() => setSelected(row.pane_id)}>
-          {laneDisplayName(row)} <small>{row.agent} · {age(row.last_activity_s)}</small>
-          {(row.pending_state === 'unknown' || row.pending == null) && <small>Pending: UNKNOWN</small>}
-        </button>)}</div>
-      </section>)}
-    <section className="dash-terminal" aria-label="Unrouted agent processes">
-      <h2>Agent processes without a desk route</h2>
-      {fleet?.unrouted?.state !== 'ok'
-        ? <p className="dash-muted">{fleet?.unrouted?.reason || 'Process inventory unavailable'}</p>
-        : <>
-          <p className="dash-muted">{fleet.unrouted.note}</p>
-          {!fleet.unrouted.rows.length && <p>No unrouted agent processes detected.</p>}
-          {fleet.unrouted.rows.map(row => <p key={row.pid}>
-            <strong>{row.project}</strong> · {row.agent} · PID {row.pid}
-            <br />{row.reason} · Session write: {age(row.last_session_write_s)}
-            {row.session_age_reason ? ' · ' + row.session_age_reason : ''}
-          </p>)}
-        </>}
-    </section>
-    {selected && <section ref={terminalRef} className="dash-terminal" data-testid="pane-text">
-      <h2>{laneDisplayName((fleet?.rows || []).find(row => row.pane_id === selected))} · Terminal</h2>
-      {(() => {
-        const lane = (fleet?.rows || []).find(r => r.pane_id === selected);
-        if (!lane) return null;
-        return <p className="dash-muted" role="status" data-testid="pending-status">
-          {lane.pending_state === 'unknown' || lane.pending == null
-            ? 'Pending: UNKNOWN — message receipt counts could not be read.'
-            : `${lane.pending} message(s) awaiting receipt.`}
-        </p>;
-      })()}
-      {(() => {
-        const lane = (fleet?.rows || []).find(r => r.pane_id === selected);
-        if (!lane || lane.send !== 'guarded' || lane.can_type) return null;
-        return <p className="dash-error" role="status">
-          Messaging is unavailable for this agent. Ask the desk to restore it.
-        </p>;
-      })()}
-      <form onSubmit={send}>
-        <label htmlFor="lane-draft">Message this agent</label>
-        <textarea id="lane-draft" rows={3} value={draft}
-          onChange={event => setDraft(event.target.value)}
-          placeholder="Write a message" />
-        {(() => {
-          const lane = (fleet?.rows || []).find(r => r.pane_id === selected);
-          const needsToken = lane && lane.send !== 'owner_push';
-          const blocked = needsToken && !lane.can_type;
-          return <button type="submit" disabled={sendBusy || !draft.trim() || blocked}
-            title={blocked
-              ? 'Messaging is unavailable for this agent'
-              : 'Send message'}>{sendBusy ? 'Sending…' : 'Send'}</button>;
-        })()}
-        {sent && <p className="dash-muted" role="status">{sent}</p>}
-        {sendError && <p className="dash-error">{sendError}</p>}
-      </form>
-      <p className="dash-muted">Current screen only. Full-screen app history is not captured.</p>
-      {paneText && paneText.reason && <p className="dash-error">{paneText.reason}</p>}
-      {paneText && !paneText.reason && <pre className="dash-terminal-text" tabIndex={0} aria-label="Current terminal screen">{paneText.text}</pre>}
-      {!paneText && <p className="dash-empty">Loading terminal…</p>}
-    </section>}
-    </div>
-  </DashShell>;
-}
-
-function Budget({ data }) {
-  const percent = value => value == null ? 'unknown' : `${value.toFixed(1)}%`;
-  const time = value => value ? new Date(value).toLocaleString() : 'unknown';
-  const age = provider => {
-    if (!provider.measured_at) return 'reading age unknown';
-    const seconds = Math.max(0, provider.age_s || 0, Math.floor((Date.now() - new Date(provider.measured_at).getTime()) / 1000));
-    const elapsed = seconds < 60 ? seconds : Math.floor(seconds / 60);
-    return (provider.state === 'error' && !provider.last_good ? 'checked ' : 'read ') + elapsed + (seconds < 60 ? ' sec ago' : ' min ago');
-  };
-  return <section className="ops-budget" data-ops-section="budget">
-    <h2>Provider budgets</h2>
-    {data.error && <p className="dash-error">Budget source unavailable: {data.error}</p>}
-    {data.subscription_error && <p>{data.subscription_error}</p>}
-    {data.providers.map(provider => <div className="budget-provider" key={provider.provider}>
-      <div className="budget-provider-head"><strong>{provider.provider}</strong>
-        <span>{provider.subscription ? `$${provider.subscription.monthly_usd.toFixed(2)}/month subscription` : 'Subscription cost unknown'}</span>
-      </div>
-      <small title={`${provider.source} · generated ${data.generated_at}`}>
-        {provider.state === 'not_read_yet' ? 'not read yet' : provider.state} · {age(provider)} · measured {time(provider.measured_at)}
-        {provider.reason ? ` · ${provider.reason}` : ''}
-        {provider.failed_at ? ' · failed ' + time(provider.failed_at) : ''}
-      </small>
-      {provider.subscription && <small>Subscription source: {provider.subscription.source} · observed {time(provider.subscription.observed_at)}</small>}
-      {provider.meaning === 'local_session_estimate'
-        ? <p>Local session estimate: {provider.local_estimate?.session_cost_usd == null ? 'unknown' : `$${provider.local_estimate.session_cost_usd.toFixed(4)}`} · {provider.local_estimate?.last_context_tokens?.toLocaleString() ?? 'unknown'} context tokens · {provider.local_estimate?.session_messages_with_usage?.toLocaleString() ?? 'unknown'} messages. Not plan quota or a bill.</p>
-        : provider.windows.length
-          ? <ul>{provider.windows.map((window, i) => <li key={i}>
-              <b>{provider.last_good ? 'Last reading · ' : ''}{window.name}</b>: <strong>{percent(window.percent_remaining)} left</strong> · {percent(window.percent_used)} used
-              · resets {time(window.resets_at)}{window.state !== 'ok' ? ` · ${window.state}` : ''}
-            </li>)}</ul>
-          : <p>No window data — remaining allowance unknown.</p>}
-      {provider.extra_usage && <p>Extra usage: {provider.extra_usage.used_credits ?? 'unknown'} / {provider.extra_usage.monthly_limit ?? 'unknown'} credits used
-        · utilization {percent(provider.extra_usage.utilization)}
-        · spend_limit_reached: {String(provider.extra_usage.spend_limit_reached ?? 'unknown')}</p>}
-    </div>)}
-    <p className="dash-muted">{data.dollars_reason}</p>
-  </section>;
-}
-
-function NeedsOwner({ rows, asks, onAnswer, onNotNow, busy, revision }) {
-  // DESK_DESIGN 4.1 (t997): the questions the owner owes an answer to, at the top of the
-  // desk. Each row shows the LANE'S QUESTION VERBATIM (the board carries it, the desk does
-  // not paraphrase), its age and what an answer unblocks. Collapses to one line when there
-  // is nothing waiting, because an empty panel that still takes a screen is a lie about
-  // how much there is to do.
-  const [reply, setReply] = useState({});
-  const [questions, setQuestions] = useState({});
-  const rowIds = rows.map(row => row.id).join(',');
-  useEffect(() => {
-    let active = true;
-    Promise.all(rows.map(async row => {
-      try {
-        const q = await api('/ops-board/question', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task_id: row.id }) });
-        return [row.id, q];
-      } catch (error) { return [row.id, { error: error.message }]; }
-    })).then(entries => { if (active) setQuestions(Object.fromEntries(entries)); });
-    return () => { active = false; };
-  }, [rowIds, revision]);
-  const age = seconds => seconds == null ? 'unknown' : seconds < 3600
-    ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
-  if (!rows.length) return <p className="ops-owner-empty" data-ops-section="needs-owner">Nothing needs your decision.</p>;
-  return <section className="ops-owner" data-ops-section="needs-owner" aria-label="Decisions you owe">
-    <h2>Decisions you owe <span className="ops-owner-count">{rows.length}</span></h2>
-    <ul>
-      {rows.map(row => <li key={row.id}>
-        <div className="ops-owner-line">
-          <code>{row.id}</code>
-          <span className="ops-owner-question">{questions[row.id]?.question || row.needs_owner_question}</span>
-          <span className="ops-owner-age" title={`waiting ${age(row.age_s)}`}>{age(row.age_s)}</span>
-        </div>
-        {row.blocks?.length > 0 && <p className="ops-owner-blocks">
-          unblocks {row.blocks.map(id => <code key={id}>{id}</code>)}
-        </p>}
-        <div className="ops-owner-reply">
-          {questions[row.id]?.error && <span role="alert">{questions[row.id].error}</span>}
-          {questions[row.id] && !questions[row.id].error && (questions[row.id].options?.length > 0
-            ? questions[row.id].options.map(option => <button key={option.number} disabled={busy}
-                onClick={() => onAnswer(row.id, { version: questions[row.id].version, option_number: option.number })}>{option.number}: {option.label}</button>)
-            : <><input aria-label={`Answer ${row.id}`} placeholder="Answer the lane…"
-                 value={reply[row.id] || ''} onChange={event => setReply(state => ({ ...state, [row.id]: event.target.value }))} />
-              <button disabled={busy || !(reply[row.id] || '').trim()} onClick={() => onAnswer(row.id, { version: questions[row.id].version, reply: reply[row.id] })}>Answer</button></>)}
-          <button className="ops-owner-notnow" disabled={busy} onClick={() => onNotNow(row.id)}>Not now</button>
-        </div>
-      </li>)}
-    </ul>
-    {asks?.length > 0 && <div className="ops-owner-asks">
-      <h3>What I asked for <span className="dash-meta">last 24h</span></h3>
-      <ul>{asks.map(ask => <li key={ask.id}>
-        <code>{ask.id}</code> <span className={`ops-chip ops-chip-${ask.status}`}>{ask.status}</span>
-        <span className="ops-owner-question">{ask.title}</span>
-        <span className="ops-owner-age">{age(ask.age_s)}</span>
-      </li>)}</ul>
-    </div>}
-  </section>;
-}
-
-function OpsBoard({ standalone = false }) {
-  const poolrad = usePoolradProgress();
-  const [board, setBoard] = useState(null);
-  const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [acting, setActing] = useState(false);
-  async function answer(taskId, decision) {
-    setActing(true);
-    try { await api('/ops-board/answer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task_id: taskId, ...decision }) }); await load(true); }
-    catch (e) { setError(e.message); } finally { setActing(false); }
-  }
-  async function notNow(taskId) {
-    setActing(true);
-    try { await api('/ops-board/not-now', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task_id: taskId }) }); await load(true); }
-    catch (e) { setError(e.message); } finally { setActing(false); }
-  }
-  async function load(force = false) {
-    setBusy(true);
-    try {
-      setBoard(await api(force ? '/ops-board/refresh' : '/ops-board', force ? { method: 'POST' } : {}));
-      setError('');
-    } catch (e) { setError(e.message); } finally { setBusy(false); }
-  }
-  useEffect(() => { load(); const timer = setInterval(load, 15000); return () => clearInterval(timer); }, []);
-  const taskRank = row => row.status === 'blocked' ? 0 : row.assignees.includes('owner') ? 1 : row.status === 'in_progress' ? 2 : 3;
-  const taskRows = [...(board?.reference.tasks.items || [])].sort((a, b) => taskRank(a) - taskRank(b));
-  const taskAge = seconds => seconds == null ? 'unknown' : seconds < 3600 ? Math.floor(seconds / 60) + 'm' : Math.floor(seconds / 3600) + 'h';
-  const tasks = board?.brief.tasks;
-  const lanes = board?.brief.lanes;
-  const alarms = board?.attention.alarms || [];
-  const owner = board?.attention.owner;
-  const evidence = source => source ? `${source.source}: ${source.state} · generated ${source.generated_at}` : '';
-  const number = (source, key) => source?.state === 'ok' ? source[key] ?? 'unknown' : 'unavailable';
-  return <DashShell standalone={standalone} view="operations">
-    <DashHeader title="Operations" view="operations" standalone={standalone} side={<>
-      <span className="dash-meta">{board ? `generated ${new Date(board.generated_at).toLocaleString()}` : 'Loading…'}</span>
-      <button onClick={() => { load(true); poolrad.load(); }} disabled={busy}>Refresh</button>
-    </>} />
-    <div className="dash-body ops-body">
-      {error && <p className="dash-error" role="alert">{error}</p>}
-      {board?.refresh_error && <p className="dash-error" role="alert">Refresh failed; showing the last snapshot.</p>}
-      {board && <>
-        <NeedsOwner rows={(board.reference?.tasks?.items || []).filter(row => row.needs_owner_question)}
-                    asks={board.reference?.asks?.asks || []}
-                    onAnswer={answer} onNotNow={notNow} busy={acting} revision={board.generated_at} />
-        <section className="ops-brief" data-ops-section="brief">
-          <strong>{alarms.length ? `${alarms.length} alarms` : 'Alarms: none'}</strong>
-          <p title={evidence(tasks)}>{number(tasks, 'open')} open tasks · {number(tasks, 'owner')} assigned to you</p>
-          <p title={evidence(tasks)}>{leaderLine(tasks, taskAge)} · the leader's carried global work (unowned or assigned to the leader)</p>
-          <p title={evidence(lanes)}>{number(lanes, 'working')} lanes working · {number(lanes, 'idle')} idle{lanes?.unknown ? ` · ${lanes.unknown} not reporting` : ''}</p>
-        </section>
-        <p id="poolrad" className="ops-poolrad">
-          <b>Poolrad:</b> {poolrad.data
-            ? <>{poolrad.data.strict_full_c ?? 'unknown'}/{poolrad.data.ceiling ?? 'unknown'} credited strict C ({poolrad.data.strict_percent ?? 'unknown'}%) · {poolrad.data.identities ?? 'unknown'}/{poolrad.data.ceiling ?? 'unknown'} identities ({poolrad.data.identity_percent ?? 'unknown'}%) · CEILING {poolrad.data.ceiling ?? 'unknown'} ({String(poolrad.data.bound_kind || 'unknown').replaceAll('_', ' ')}) · {poolrad.data.replacements?.count ?? 'unknown'} recorded replacements · not whole-game completion. </>
-            : poolrad.error ? 'Source unavailable. ' : 'Loading checkpoint… '}
-          {poolrad.error && poolrad.data && <span>Refresh failed; showing previous checkpoint. </span>}
-          <a href="#poolrad-details">Evidence and timestamps</a>
-        </p>
-        <section data-ops-section="attention" className="ops-attention">
-          {alarms.slice(0, 3).map((alarm, i) => <p key={i} title={evidence(alarm)}>{alarm.source}: {alarm.text}</p>)}
-          {alarms.length > 3 && <p>More alarms in the reference below.</p>}
-          {owner?.items.slice(0, 3).map(task => <p key={task.id} title={evidence(owner)}><b>{task.id}</b> {task.title}</p>)}
-          {owner?.state !== 'ok' && <p>Owner task assignments unavailable.</p>}
-          {owner?.state === 'ok' && !owner.items.length && <p className="dash-muted">No tasks explicitly assigned to you.</p>}
-        </section>
-        {board.poolrad_progress && <section className="ops-poolrad-tile" data-ops-section="poolrad" title={evidence(board.poolrad_progress)}>
-          <h2>Poolrad progress</h2>
-          {board.poolrad_progress.state === 'ok'
-            ? <p>{board.poolrad_progress.credited ?? 'unknown'} credited / {board.poolrad_progress.identities ?? 'unknown'} identities · CEILING {board.poolrad_progress.ceiling ?? 'unknown'} <small>{board.poolrad_progress.ceiling_note}</small></p>
-            : <p>{board.poolrad_progress.error || 'Unavailable'}</p>}
-        </section>}
-        {board.budget && <Budget data={board.budget} />}
-        {board.reports && <section className="ops-reports" data-ops-section="reports" title={evidence(board.reports)}>
-          <h2>Reports</h2>
-          {board.reports.state !== 'ok' ? <p>{board.reports.error || 'Unavailable'}</p>
-            : board.reports.items.map(r => <details key={r.name} open={r.open}>
-              <summary>{r.name} <small>{new Date(r.at * 1000).toLocaleString()}</small></summary>
-              <p className="dash-muted">{r.size} bytes · body is not served over the daemon socket yet</p>
-            </details>)}
-        </section>}
-        <section className="ops-reference" data-ops-section="reference">
-          <h2>Reference</h2>
-          <PoolradReference data={poolrad.data} error={poolrad.error} />
-          {alarms.length > 3 && <ul>{alarms.map((alarm, i) => <li key={i} title={evidence(alarm)}>{alarm.source}: {alarm.text}</li>)}</ul>}
-          {[
-            ['Tasks', {...board.reference.tasks, items: taskRows}, ['ID', 'Task / status', 'Age', 'Assignee'],
-              row => [row.id, <>{row.title}<small>{row.status}</small></>, taskAge(row.age_s), row.assignees.join(', ') || '—']],
-            ['Lanes', board.reference.lanes, ['Pane', 'Lane', 'Status'],
-              row => [row.pane_id, row.tab_label, <LaneStatus row={row} />]],
-            ['Schedules', board.reference.schedules, ['ID', 'Schedule', 'Target', 'Status'],
-              row => [row.id, row.name, row.target_label || row.target, row.running ? 'running' : 'stopped']],
-          ].map(([name, source, columns, cells]) => <div key={name} className="ops-table">
-            <h2>{name}</h2><small>{evidence(source)}</small>
-            {source.state !== 'ok' ? <p>{source.error || 'Unavailable'}</p> :
-              <div className="dash-table-wrap"><table><thead><tr>{columns.map(c => <th key={c}>{c}</th>)}</tr></thead>
-                <tbody>{source.items.map((row, i) => <tr key={row.id || row.pane_id || i}>{cells(row).map((v, j) => <td key={j}>{v}</td>)}</tr>)}</tbody>
-              </table></div>}
-          </div>)}
-        </section>
-      </>}
-    </div>
-  </DashShell>;
-}
-export default OpsBoard;

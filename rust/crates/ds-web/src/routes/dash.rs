@@ -79,7 +79,10 @@ async fn dash_route(
     }
 
     if name == "poolrad" {
-        return redirect(StatusCode::TEMPORARY_REDIRECT, "/dash/operations#poolrad");
+        return redirect(
+            StatusCode::TEMPORARY_REDIRECT,
+            "/dash/projects?project=poolrad",
+        );
     }
     let Some(html) = backend.index_html() else {
         return detail_response(StatusCode::NOT_FOUND, "Desk UI is not built");
@@ -407,7 +410,7 @@ mod tests {
             redirect_response(response),
             (
                 StatusCode::TEMPORARY_REDIRECT,
-                "/dash/operations#poolrad".into()
+                "/dash/projects?project=poolrad".into()
             )
         );
         assert_eq!(*backend.reads.lock().unwrap(), 0);

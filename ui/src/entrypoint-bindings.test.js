@@ -21,7 +21,7 @@ const localExports = {
   'project-terminal-targets.js': ['nextTerminalList', 'terminalActionForLane', 'terminalListReason', 'terminalTargetForPane'],
 };
 
-const entrypoints = ['main.jsx', 'DeskShared.jsx', 'ProjectsView.jsx', 'OperationsView.jsx',
+const entrypoints = ['main.jsx', 'DeskShared.jsx', 'ProjectsView.jsx', 'PoolradReport.jsx',
   'PlayView.jsx', 'PoolradProgress.jsx', 'ConversationView.jsx', 'ConversationWidgets.jsx'];
 
 const mainBundle = (file) => {

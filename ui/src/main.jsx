@@ -14,7 +14,6 @@ const MailboxBrowser = lazy(() => import('./MailboxBrowser'));
 const TasksView = lazy(() => import('./TasksView'));
 const ProjectInformation = lazy(() => import('./ProjectInformation'));
 const Projects = lazy(() => import('./ProjectsView'));
-const OpsBoard = lazy(() => import('./OperationsView'));
 const PlayWorkspace = lazy(() => import('./PlayView'));
 const ChannelStandalone = lazy(() => import('./ConversationView'));
 
@@ -46,11 +45,10 @@ function StandaloneDesk({ view, known }) {
   if (view === 'cos' && new URLSearchParams(window.location.search).get('panel') !== 'conversation') return <DashShell standalone view="cos"><OwnerInbox api={api} /></DashShell>;
   if (view === 'tasks') return <DashShell standalone view="tasks"><TasksView api={api} /></DashShell>;
   if (view === 'projects') return <Projects standalone />;
-  if (view === 'databases') return <DashShell standalone view="databases"><div className="dash-body">
-    <div className="ops-heading"><div><div className="eyebrow">{DASH_ROUTES.databases.eyebrow}</div><h1>{DASH_ROUTES.databases.title}</h1><p>{DASH_ROUTES.databases.subtitle}</p></div></div>
+  if (view === 'knowledge') return <DashShell standalone view="knowledge"><div className="dash-body">
+    <div className="ops-heading"><div><div className="eyebrow">{DASH_ROUTES.knowledge.eyebrow}</div><h1>{DASH_ROUTES.knowledge.title}</h1><p>{DASH_ROUTES.knowledge.subtitle}</p></div></div>
     <ProjectInformation api={api} />
   </div></DashShell>;
-  if (view === 'operations') return <OpsBoard standalone />;
   if (view === 'play') return <PlayWorkspace standalone />;
   return <ChannelStandalone key={view} channel={view} />;
 }

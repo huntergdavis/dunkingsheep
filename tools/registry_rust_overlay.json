@@ -1247,7 +1247,8 @@
     "page_size",
     "cursor",
     "priority",
-    "page_group"
+    "page_group",
+    "project"
    ]
   },
   "pr_author_correct": {

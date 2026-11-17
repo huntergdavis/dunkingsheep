@@ -25,7 +25,7 @@ use axum::{
     Router,
 };
 use ds_web::{
-    ops_board_runtime::OpenDb,
+    project_reporting::OpenDb,
     web_server::{self, DeskConfig, DeskError},
     RequestScheme,
 };
@@ -89,7 +89,6 @@ fn fixture() -> (TempDir, DeskConfig) {
         usage_refresh_s: 1800,
         usage_backoff_s: vec![300, 600, 1800],
         usage_max_age_s: 3600,
-        board_interval_s: 3600,
         gh_program: dir.join("missing-gh"),
         tmux_program: dir.join("missing-tmux"),
         proc_root: dir.join("proc"),
@@ -502,28 +501,25 @@ fn public_routes_answer_without_auth_and_protected_routes_fail_closed() {
 }
 
 #[test]
-fn an_absent_daemon_leaves_the_board_unavailable_and_never_zero() {
+fn retired_board_is_absent_and_shared_resources_do_not_need_the_daemon() {
     let (_root, config) = fixture();
     let server = Server::start(config);
     let addr = server.addr;
     let cookie = login(addr);
     let cookie_header = format!("vp_session={cookie}");
     let session = [("Cookie", cookie_header.as_str())];
-
-    let board = request(addr, "GET", "/api/ops-board", &session, None);
-    assert_eq!(board.status, 200, "{}", board.text());
-    let body = board.json();
-    assert_eq!(body["no_model"], true);
-    let backlog = &body["brief"]["backlog"];
-    assert_eq!(backlog["state"], "unavailable");
     assert_eq!(
-        backlog["open"],
-        Value::Null,
-        "an unreadable backlog is null, never zero"
+        request(addr, "GET", "/api/ops-board", &session, None).status,
+        404
     );
-    assert_eq!(body["brief"]["lanes"]["state"], "unavailable");
-    assert_eq!(body["brief"]["lanes"]["working"], Value::Null);
-
+    assert_eq!(
+        request(addr, "GET", "/api/project-resources", &[], None).status,
+        401
+    );
+    let resources = request(addr, "GET", "/api/project-resources", &session, None);
+    assert_eq!(resources.status, 200, "{}", resources.text());
+    assert_eq!(resources.json()["host"]["scope"], "shared_host");
+    assert!(resources.json()["budget"]["providers"].is_array());
     assert_eq!(server.shutdown(), Ok(()));
 }
 
@@ -765,7 +761,7 @@ fn mounted_methods(unmatched: &Probe, answer: &Probe) -> Vec<String> {
 /// `PYTHON_ROUTES` and the mounted routes must agree both ways, and the table must be Python's.
 /// The router is probed directly, below the path gate, so each route is judged by what the router
 /// mounts. HEAD is not compared: axum answers HEAD for every GET route, and FastAPI's APIRoute does
-/// not. `POST /api/ops-board/question` is a Rust UI extension, not part of the Python route table.
+/// not. `POST /api/tasks/question` is a Rust UI extension, not part of the Python route table.
 #[test]
 fn python_routes_match_the_mounted_routes() {
     let (_root, config) = fixture();
@@ -1344,36 +1340,24 @@ fn owner_question_is_available_through_composed_desk_without_weakening_auth() {
     let server = Server::start(config);
     let addr = server.addr;
     let payload = r#"{"task_id":"t1"}"#;
-    let anonymous = request(addr, "POST", "/api/ops-board/question", &[], Some(payload));
+    let anonymous = request(addr, "POST", "/api/tasks/question", &[], Some(payload));
     assert_eq!(anonymous.status, 401, "{}", anonymous.text());
     let cookie = format!("vp_session={}", login(addr));
     let cross = [
         ("Cookie", cookie.as_str()),
         ("Origin", "https://evil.example"),
     ];
-    let rejected = request(
-        addr,
-        "POST",
-        "/api/ops-board/question",
-        &cross,
-        Some(payload),
-    );
+    let rejected = request(addr, "POST", "/api/tasks/question", &cross, Some(payload));
     assert_eq!(rejected.status, 403, "{}", rejected.text());
     let session = [("Cookie", cookie.as_str())];
-    let found = request(
-        addr,
-        "POST",
-        "/api/ops-board/question",
-        &session,
-        Some(payload),
-    );
+    let found = request(addr, "POST", "/api/tasks/question", &session, Some(payload));
     assert_eq!(found.status, 200, "{}", found.text());
     assert_eq!(found.json()["version"], "3");
     assert_eq!(found.json()["options"][0]["label"], "alpha");
     let missing = request(
         addr,
         "POST",
-        "/api/ops-board/question",
+        "/api/tasks/question",
         &session,
         Some(r#"{"task_id":"missing"}"#),
     );

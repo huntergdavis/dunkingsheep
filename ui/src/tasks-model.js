@@ -1,6 +1,6 @@
 export function taskQuery(filters, cursor = null) {
   const query = new URLSearchParams({ view: filters.view });
-  for (const key of ['status', 'priority', 'assignee']) if (filters[key]) query.set(key, filters[key]);
+  for (const key of ['status', 'priority', 'assignee', 'project', 'kind', 'needs_owner']) if (filters[key]) query.set(key, filters[key]);
   if (cursor) query.set('cursor', cursor);
   return query.toString();
 }

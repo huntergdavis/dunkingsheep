@@ -42,6 +42,6 @@ test('t5241: a Databases deep link selects a project or the global store, and su
     assert.equal(requestedStore(storeSearch(selected)), selected);
   }
   assert.equal(storeSearch(''), '');
-  assert.equal(informationHref('alpha'), '/dash/databases?project=alpha');
-  assert.equal(informationHref('a b'), '/dash/databases?project=a%20b');
+  assert.equal(informationHref('alpha'), '/dash/knowledge?project=alpha');
+  assert.equal(informationHref('a b'), '/dash/knowledge?project=a%20b');
 });

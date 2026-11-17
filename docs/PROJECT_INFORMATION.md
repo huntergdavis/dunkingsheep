@@ -1,6 +1,6 @@
 # Project information browser (t3250)
 
-The desk's Projects view has an **Information** panel: a read-only browser of each project's
+The desk's Projects view has a **Knowledge** panel (also available at `/dash/knowledge`): a read-only browser of each project's
 context store (`<project dir>/.dunkingsheep/`) and of the global store
 (`$DUNKINGSHEEP_DIR/context`). Ground truths are listed first, apart from facts, provisional
 entries and history; each entry shows its type, authority, source, when it was stated, and
@@ -27,7 +27,7 @@ inferred from where lanes run.
 
 Viewing never writes: no store, cache or index file is created or changed (search is a
 substring match over the entries read for the request). A file in a store that is a link, or
-that resolves outside the store, is skipped and counted. Entry text is shown as text; long
+that resolves outside the store, is skipped and counted. Entry text is rendered as sanitized Markdown; long
 bodies are truncated with a marker, and at most 500 entries are returned per request.
 
 ## Who
