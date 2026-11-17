@@ -707,7 +707,7 @@ async fn submit(
         };
         let email: Value =
             serde_json::from_str(&email_json).map_err(|_| json!({"type":"serverFail"}))?;
-        if let Some(reason) = submission_refusal(&email, &submission) {
+        if let Some(reason) = submission_refusal(&email, submission) {
             refused.insert(
                 key.clone(),
                 json!({"type":"forbiddenToSend","description":reason}),
