@@ -41,6 +41,80 @@ fn spec(tab: bool) -> AgentSpec {
         ..Default::default()
     }
 }
+
+#[test]
+fn env_prefixed_agents_preserve_launch_argv_and_agent_registry_kind() {
+    for raw in [false, true] {
+        for tab in [false, true] {
+            for argv in [
+                vec!["env", "TMPDIR=/private scratch", "codex", "--no-daemon"],
+                vec![
+                    "/usr/bin/env",
+                    "-u",
+                    "UNUSED",
+                    "TMPDIR=/private",
+                    "/opt/bin/claude",
+                ],
+                vec!["env", "TMPDIR=/outer", "env", "TMPDIR=/inner", "codex"],
+            ] {
+                let (dir, mut backend) = fixture();
+                let mut spec = spec(tab);
+                spec.argv = argv.into_iter().map(str::to_string).collect();
+                let kind = crate::flock::launched_program(&spec.argv).unwrap();
+                let pane = if raw {
+                    backend.start_agent_raw(&spec, false).unwrap().unwrap()
+                } else {
+                    backend.start_agent(&spec).unwrap()
+                };
+                assert_eq!(pane.command, kind);
+                let saved: Value = serde_json::from_slice(
+                    &std::fs::read(dir.path().join("registry.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(saved["panes"]["%2"]["agent_kind"], kind);
+                let calls = std::fs::read_to_string(dir.path().join("calls")).unwrap();
+                let command = crate::flock::commands_layout::shlex_join(&spec.argv);
+                assert!(
+                    calls.contains(&super::tmux::agent_launch(&command)),
+                    "{calls}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn env_prefix_does_not_allow_unknown_or_missing_agent_programs() {
+    for raw in [false, true] {
+        for (argv, expected) in [
+            (
+                vec!["env", "TMPDIR=/private", "/opt/bin/not-an-agent"],
+                "unsupported agent kind",
+            ),
+            (vec!["env", "TMPDIR=/private"], "command is required"),
+            (vec![], "command is required"),
+        ] {
+            let (dir, mut backend) = fixture();
+            let mut spec = spec(false);
+            spec.argv = argv.into_iter().map(str::to_string).collect();
+            let error = if raw {
+                backend
+                    .start_agent_raw(&spec, false)
+                    .unwrap()
+                    .unwrap_err()
+                    .message
+            } else {
+                backend.start_agent(&spec).unwrap_err().message
+            };
+            assert!(error.contains(expected), "{error}");
+            if expected == "unsupported agent kind" {
+                assert!(error.contains("not-an-agent"), "{error}");
+            }
+            assert!(!dir.path().join("calls").exists());
+            assert!(!dir.path().join("registry.json").exists());
+        }
+    }
+}
 #[test]
 fn raw_agent_terminal_launch_registry_and_focus_match_python() {
     for (tab, focus) in [(false, false), (false, true), (true, false), (true, true)] {
