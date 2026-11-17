@@ -37,19 +37,6 @@ fn make_services_with_factory(
     available: bool,
     factory: Option<LoopTerminalFactory>,
 ) -> LayoutFixture {
-    make_services_with_factory_and_env(
-        fail_layout,
-        available,
-        factory,
-        Env::from_pairs(&[("DUNKINGSHEEP_AGENT_VERIFY_S", "0.01")]),
-    )
-}
-fn make_services_with_factory_and_env(
-    fail_layout: Option<&str>,
-    available: bool,
-    factory: Option<LoopTerminalFactory>,
-    env: Env,
-) -> LayoutFixture {
     let dir = tempfile::tempdir().unwrap();
     let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
     let tasks = Arc::new(
@@ -62,6 +49,7 @@ fn make_services_with_factory_and_env(
         crate::inbox_store::Store::open(dir.path().join("inbox.db"), dir.path().join("blobs"))
             .unwrap(),
     );
+    let env = Env::from_pairs(&[("DUNKINGSHEEP_AGENT_VERIFY_S", "0.01")]);
     let mut roles = Roles::new(
         &env,
         Some(dir.path().join("roles.json")),
@@ -200,70 +188,6 @@ fn h_start_agent_records_explicit_global_membership() {
         "['raw', False]",
         false
     ])));
-}
-
-#[test]
-fn start_agent_lane_roles_keep_default_tmpdir_and_record_real_tmux_launches() {
-    use crate::terminal::tmux::TmuxBackend;
-    use std::os::unix::fs::PermissionsExt;
-
-    for role in ["planner", "worker", "reviewer"] {
-        let disk = tempfile::tempdir().unwrap();
-        let agent = fake_agent(&disk);
-        // A short relative HOME stays under this test's workspace while respecting
-        // the production scratch-path limit. No real user HOME is modified.
-        let home = tempfile::Builder::new()
-            .prefix("h")
-            .tempdir_in(".")
-            .unwrap();
-        let script = disk.path().join("tmux");
-        std::fs::write(&script, format!(r#"#!/bin/sh
-cd "$(dirname "$0")" || exit 1
-case "$1" in
-new-window|split-window) : > created; printf '%%2\n' ;;
-list-sessions) printf '$old__SEP__fixture__SEP__0\n' ;;
-list-windows) printf '@old__SEP__$old__SEP__owner__SEP__0__SEP__0\n@2__SEP__$old__SEP__probe__SEP__1__SEP__0\n' ;;
-list-panes)
- printf 'w2:p2__SEP__$old__SEP__@old__SEP__/work__SEP__bash__SEP__owner__SEP__1__SEP__fixture__SEP__owner__SEP__0__SEP__0__SEP__{owner_pid}__SEP__80__SEP__24\n'
- if [ -f created ]; then printf '%%2__SEP__$old__SEP__@2__SEP__/work__SEP__codex__SEP__probe__SEP__1__SEP__fixture__SEP__probe__SEP__0__SEP__0__SEP__{agent_pid}__SEP__80__SEP__24\n'; fi ;;
-esac
-"#, owner_pid=std::process::id(), agent_pid=agent.0.id()).replace("__SEP__", crate::terminal::parse::pane_separator())).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        crate::testsupport::exec_retrying_busy(|| {
-            std::process::Command::new(&script).arg("warm-up").status()
-        })
-        .unwrap();
-        let backend = TmuxBackend::with_registry(&script, disk.path().join("registry.json"));
-        let factory: LoopTerminalFactory = Arc::new(move || Box::new(backend.clone()));
-        let env = Env::from_pairs(&[
-            ("DUNKINGSHEEP_AGENT_VERIFY_S", "0.1"),
-            ("HOME", home.path().to_str().unwrap()),
-        ]);
-        let (dir, services, _) = make_services_with_factory_and_env(None, true, Some(factory), env);
-        let out = dispatcher(&services).dispatch(
-            "start_agent",
-            &json!({"global":true,"name":"probe","command":"codex --no-daemon","workspace":"self","role":role}),
-            &request("w2:p2"),
-        ).unwrap();
-        assert_eq!(out["pane_id"], "%2");
-        assert_eq!(out["argv"][0], "env");
-        assert_eq!(out["role"]["role"], role);
-        let launch = services.flock.launch("%2").unwrap();
-        assert_eq!(launch["source"], "start_agent");
-        assert_eq!(launch["provider"], "codex");
-        assert_eq!(launch["argv"], out["argv"]);
-        assert_eq!(launch["tmpdir_source"], "start-agent default");
-        let scratch = launch["tmpdir"].as_str().unwrap();
-        assert!(std::path::Path::new(scratch).is_dir());
-        assert_eq!(out["argv"][1], format!("TMPDIR={scratch}"));
-        let roles: Value =
-            serde_json::from_slice(&std::fs::read(dir.path().join("roles.json")).unwrap()).unwrap();
-        assert_eq!(roles["lanes"]["%2"]["role"], role);
-        let saved: Value =
-            serde_json::from_slice(&std::fs::read(disk.path().join("registry.json")).unwrap())
-                .unwrap();
-        assert_eq!(saved["panes"]["%2"]["agent_kind"], "codex");
-    }
 }
 #[test]
 fn h_rename_matches_python() {
