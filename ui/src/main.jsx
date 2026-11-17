@@ -42,6 +42,7 @@ function StandaloneDesk({ view, known }) {
     </DashShell>;
   }
   if (view === 'cos' && new URLSearchParams(window.location.search).get('panel') === 'mailboxes') return <DashShell standalone view="cos"><MailboxBrowser api={api} /></DashShell>;
+  if (view === 'cos' && new URLSearchParams(window.location.search).get('panel') === 'webmail') return <DashShell standalone view="cos"><p><a href="/dash/cos">Back to Inbox</a></p><iframe title="Dunking Sheep mail" src="/webmail/en/mail/" style={{width:'100%', height:'80vh', border:0}} /></DashShell>;
   if (view === 'cos' && new URLSearchParams(window.location.search).get('panel') !== 'conversation') return <DashShell standalone view="cos"><OwnerInbox api={api} /></DashShell>;
   if (view === 'tasks') return <DashShell standalone view="tasks"><TasksView api={api} /></DashShell>;
   if (view === 'projects') return <Projects standalone />;

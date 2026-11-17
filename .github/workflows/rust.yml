@@ -59,7 +59,9 @@ jobs:
 
   build-and-test:
     name: cargo build + test
-    runs-on: ubuntu-latest
+    # Process-name fixtures and Python-oracle wording are validated on 24.04.
+    # ubuntu-latest moved to 26.04 on 2026-11-16; keep this boundary explicit.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Restore pinned Python test oracle
@@ -70,12 +72,15 @@ jobs:
       # ships an older one. Build 3.6 from the upstream release tarball (sha256 pinned, cached).
       # Boring fallback: if the download fails the image's tmux is used, with a warning, so an
       # outage upstream does not block CI. A tarball with the wrong hash fails the job.
+      - name: Identify runner ABI for native tmux cache
+        id: tmux-abi
+        run: echo "abi=$(lsb_release -is)-$(lsb_release -rs)" >> "$GITHUB_OUTPUT"
       - name: Cache tmux 3.6
         id: tmux-cache
         uses: actions/cache@v4
         with:
           path: ~/tmux-3.6
-          key: tmux-3.6-136db80cfbfb-${{ runner.os }}-${{ runner.arch }}-v1
+          key: tmux-3.6-136db80cfbfb-${{ runner.os }}-${{ runner.arch }}-${{ steps.tmux-abi.outputs.abi }}-v2
       - name: Build tmux 3.6 (production version)
         if: steps.tmux-cache.outputs.cache-hit != 'true'
         run: |

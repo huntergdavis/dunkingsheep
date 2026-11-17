@@ -1882,3 +1882,43 @@ fn registered_api_handlers_are_admitted_by_the_production_path_gate() {
     assert_eq!(server.shutdown(), Ok(()));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// JMAP discovery is outside /api, so also exercise it at the production boundary.
+#[test]
+fn jmap_discovery_is_admitted_by_the_production_path_gate() {
+    let (_root, config) = fixture();
+    std::fs::create_dir_all(config.ui_dist.join("webmail/en/mail")).unwrap();
+    std::fs::write(
+        config.ui_dist.join("webmail/en/mail/index.html"),
+        "mail-shell",
+    )
+    .unwrap();
+    let server = Server::start(config);
+    let anonymous = request(server.addr, "GET", "/.well-known/jmap", &[], None);
+    assert_eq!(anonymous.status, 401);
+    let cookie = format!("vp_session={}", login(server.addr));
+    let signed_in = request(
+        server.addr,
+        "GET",
+        "/.well-known/jmap",
+        &[("Cookie", cookie.as_str())],
+        None,
+    );
+    assert_eq!(signed_in.status, 200);
+    let session: serde_json::Value = serde_json::from_str(&signed_in.text()).unwrap();
+    assert_eq!(session["apiUrl"], "/api/jmap");
+    let mail = request(
+        server.addr,
+        "GET",
+        "/webmail/en/mail/folder/inbox",
+        &[],
+        None,
+    );
+    assert_eq!(mail.status, 200);
+    assert_eq!(mail.text(), "mail-shell");
+    assert!(mail
+        .header("content-security-policy")
+        .unwrap()
+        .contains("connect-src 'self'"));
+    assert_eq!(server.shutdown(), Ok(()));
+}

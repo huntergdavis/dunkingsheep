@@ -1,0 +1,3 @@
+[submodule "integrations/webmail/bulwark"]
+	path = integrations/webmail/bulwark
+	url = https://github.com/bulwarkmail/webmail.git
