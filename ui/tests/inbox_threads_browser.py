@@ -1,5 +1,6 @@
 """Synthetic thread/reply workflow; no production daemon, auth, or transport calls."""
 from thread_page_fixture import project
+from inbox_actions import open_thread
 import json,os,threading
 from pathlib import Path
 from http.server import SimpleHTTPRequestHandler,ThreadingHTTPServer
@@ -43,7 +44,7 @@ try:
      return fulfill(route,dict(outcome='stored',message_id='i12',thread=new))
     return fulfill(route,{'channels':[],'ok':True})
    page=browser.new_page(viewport={'width':width,'height':900});errors=[];page.on('pageerror',lambda e:errors.append(str(e)));page.route('**/api/**',mock)
-   page.goto(base+'/dash/cos',wait_until='domcontentloaded')
+   page.goto(base+'/dash/cos',wait_until='domcontentloaded');open_thread(page)
    reader=page.get_by_role('article',name='Selected conversation');reader.get_by_role('heading',name='Conversation i1',exact=True).wait_for()
    for body in ('ROOT QUESTION','LANE ANSWER','HUMAN FOLLOW UP'):
     reader.get_by_text(body,exact=True).wait_for();assert reader.get_by_text(body,exact=True).count()==1
@@ -58,21 +59,21 @@ try:
    # An addressed agent row appears alone; opening its recorded link loads the VP history.
    human.append({**vp[1],'conversation_source':'human','recipient_route_kind':'human'})
    vp.append({**row(13,'SYSTEM ALERT EVENT',kind='vp',root=13,sender='system'),'audience':'agent','kind_labels':['System','Alert','Agent-only']})
-   nav=page.get_by_role('navigation',name='Inbox views');nav.get_by_role('button',name='VP',exact=True).click();nav.get_by_role('button',name='Your inbox',exact=True).click()
+   nav=page.get_by_role('navigation',name='Inbox views');nav.get_by_role('button',name='VP',exact=True).click();nav.get_by_role('button',name='Your inbox',exact=True).click();open_thread(page)
    reader=page.get_by_role('article',name='Selected conversation');reader.get_by_role('heading',name='Conversation i10',exact=True).wait_for()
    reader.get_by_text('VP FOLLOW UP',exact=True).wait_for();assert reader.get_by_text('VP FOLLOW UP',exact=True).count()==1
    assert reader.get_by_text('VP ROOT',exact=True).count()==0
    reader.get_by_role('button',name='Open VP thread i10',exact=True).click()
    page.get_by_role('heading',name='Conversation i10',exact=True).wait_for()
    reader.get_by_text('VP ROOT',exact=True).wait_for();assert reader.get_by_text('VP ROOT',exact=True).count()==1
-   page.locator('.owner-inbox-row').filter(has_text='SYSTEM ALERT EVENT').click()
+   open_thread(page, 'SYSTEM ALERT EVENT')
    reader.get_by_text('System · Agent-only · Alert',exact=True).first.wait_for()
-   page.locator('.owner-inbox-row').filter(has_text='VP FOLLOW UP').click()
+   open_thread(page, 'VP FOLLOW UP')
    form=page.get_by_role('form',name='Reply to message');form.get_by_role('textbox',name='Reply message').fill('HUMAN JOINS VP THREAD');form.get_by_role('button',name='Send reply',exact=True).click()
-   reader.get_by_text('SYSTEM ALERT EVENT',exact=True).wait_for();assert page.get_by_text('VP ROOT',exact=True).count()==0
-   nav.get_by_role('button',name='Your inbox',exact=True).click();reader=page.get_by_role('article',name='Selected conversation');reader.get_by_text('HUMAN JOINS VP THREAD',exact=True).wait_for();assert reader.get_by_text('VP ROOT',exact=True).count()==1
+   page.get_by_role('article',name='Selected conversation').wait_for(state='detached');open_thread(page, 'SYSTEM ALERT EVENT');reader.get_by_text('SYSTEM ALERT EVENT',exact=True).wait_for();assert page.get_by_text('VP ROOT',exact=True).count()==0
+   nav.get_by_role('button',name='Your inbox',exact=True).click();open_thread(page);reader=page.get_by_role('article',name='Selected conversation');reader.get_by_text('HUMAN JOINS VP THREAD',exact=True).wait_for();assert reader.get_by_text('VP ROOT',exact=True).count()==1
    if os.environ.get('INBOX_THREAD_SCREENSHOT_DIR'):page.screenshot(path=str(Path(os.environ['INBOX_THREAD_SCREENSHOT_DIR'])/f'inbox-thread-{width}.png'),full_page=True)
-   nav.get_by_role('button',name='Historical / prior versions',exact=True).click();page.get_by_text('LEGACY BODY',exact=True).first.wait_for();assert page.get_by_role('form',name='Reply to message').count()==0
+   nav.get_by_role('button',name='Historical / prior versions',exact=True).click();open_thread(page);page.get_by_role('article',name='Selected conversation').get_by_text('LEGACY BODY',exact=True).wait_for();assert page.get_by_role('form',name='Reply to message').count()==0
    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth');assert not errors,errors
    print(json.dumps(dict(width=width,thread_chain='PASS',draft_failure_and_bad_receipt='PASS',single_flight='PASS',vp_promotion_cache_invalidation='PASS',historical_no_reply='PASS',addressed_agent_no_promotion_and_vp_link='PASS',system_alert_agent_only_labels='PASS')),flush=True);page.close()
   browser.close()

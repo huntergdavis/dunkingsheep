@@ -42,23 +42,28 @@ try:
             dialogs = []
             page.on('dialog', lambda d: (dialogs.append(d.message), d.dismiss()))
             page.route('**/api/**', api)
-            # Projects no longer holds the panel; each project links to its information.
+            # Panels stay closed until requested; global knowledge lives on the VP card.
             page.goto(base + '/dash/projects', wait_until='domcontentloaded')
             link = page.locator('.project-information-link').filter(has_text='Knowledge').first
             link.wait_for()
-            assert page.locator('.project-information').count() == 0, 'the panel moved to Databases'
+            assert page.locator('.project-information').count() == 0, 'knowledge should be lazy'
             assert link.get_attribute('href') == '/dash/knowledge?project=alpha'
-            assert page.locator('a[href="/dash/knowledge"]').count() >= 1, 'Databases is in the navigation'
+            assert page.locator('.dash-nav a[href="/dash/knowledge"]').count() == 0
+            assert page.locator('.dash-nav a[href="/dash/tasks"]').count() == 0
+            vp = page.locator('.vp-project')
+            vp.get_by_role('button', name='Knowledge', exact=True).click()
+            page.get_by_text('This store has no entries yet.').wait_for()
+            assert page.get_by_label('Information store').input_value() == 'global'
+            vp.get_by_role('button', name='Knowledge', exact=True).click()
             link.click()
-            page.wait_for_url('**/dash/knowledge?project=alpha')
+            page.wait_for_url('**/dash/projects?project=alpha&panel=knowledge')
             page.get_by_role('heading', name='Knowledge', exact=True).first.wait_for()
-            store = page.get_by_label('Information store')
             page.get_by_role('heading', name='Ground truths (1)').wait_for()
-            assert store.input_value() == 'project:alpha', 'the link opened the project focused'
+            assert page.get_by_label('Information store').count() == 0
             # The deep link survives a reload.
             page.reload(wait_until='domcontentloaded')
             page.get_by_role('heading', name='Ground truths (1)').wait_for()
-            assert page.get_by_label('Information store').input_value() == 'project:alpha'
+            assert 'project=alpha' in page.url
             rule = page.locator('[data-info-entry="alpha-rule"]')
             assert 'authority: owner' in rule.inner_text() and 'source: owner mail' in rule.inner_text()
             assert 'stale: re-check before trusting' in page.locator('[data-info-entry="alpha-fact"]').inner_text()
@@ -73,11 +78,13 @@ try:
             page.get_by_label('Search information').fill('nothing-like-this')
             page.get_by_text('No entry matches the search.').wait_for()
             page.get_by_label('Search information').fill('')
+            page.goto(base + '/dash/knowledge?project=global', wait_until='domcontentloaded')
+            store = page.get_by_label('Information store')
             store.select_option('project:broken')
             page.get_by_text('The mapping for this project is invalid: the directory is not an absolute path.').wait_for()
             store.select_option('global')
             page.get_by_text('This store has no entries yet.').wait_for()
-            assert page.url.endswith('/dash/knowledge?project=global'), page.url
+            assert 'panel=vp-knowledge' in page.url and 'store=global' in page.url, page.url
             assert not page.evaluate('document.documentElement.scrollWidth > window.innerWidth'), f'page scrolls sideways at {width}'
             page.close()
         browser.close()
@@ -85,4 +92,4 @@ try:
     assert info and all(method == 'GET' for method, _ in info), 'the panel only reads'
 finally:
     server.shutdown()
-print('databases tab (project information) browser check passed at 360, 768 and 1280')
+print('VP and project knowledge browser check passed at 360, 768 and 1280')

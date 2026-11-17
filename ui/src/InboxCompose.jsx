@@ -7,6 +7,7 @@ import './inbox-compose.css';
 export default function InboxCompose({ api, onSent }) {
   const [open, setOpen] = useState(false);
   const [recipient, setRecipient] = useState('owner');
+  const [search, setSearch] = useState('');
   const [fleet, setFleet] = useState(null);
   const [load, setLoad] = useState({ status: 'loading' });
   const [attempt, setAttempt] = useState(0);
@@ -55,10 +56,11 @@ export default function InboxCompose({ api, onSent }) {
     <button ref={opener} aria-expanded={open} onClick={() => setOpen(true)}>Compose message</button>
     {open && <form onSubmit={send}>
       <h2>New inbox message</h2>
+      <label>Find an agent<input type="search" value={search} disabled={busy} onChange={event => setSearch(event.target.value)} placeholder="Name, project or pane" /></label>
       <label>To<select aria-label="Message recipient" value={recipient} disabled={busy} onChange={event => { setRecipient(event.target.value); setReceipt(''); setError(''); }}>
         <option value="owner">VP conversation</option>
         {!owner && !target && <option value={recipient} disabled>{recipient} · unavailable; choose a recipient</option>}
-        {targets.map(row => <option key={row.pane_id} value={row.pane_id}>{row.project} · {row.label}</option>)}
+        {targets.filter(row => row.pane_id === recipient || [row.label,row.project,row.pane_id].join(' ').toLowerCase().includes(search.toLowerCase())).map(row => <option key={row.pane_id} value={row.pane_id}>{row.project} · {row.label}</option>)}
       </select></label>
       {roster.kind !== 'ready' && <p role={roster.kind === 'failed' ? 'alert' : 'status'}>{roster.text} {roster.retry && <button type="button" disabled={busy} onClick={() => setAttempt(value => value + 1)}>Reload recipients</button>}</p>}
       {roster.kind === 'ready' && <button type="button" disabled={busy} onClick={() => setAttempt(value => value + 1)}>Reload recipients</button>}

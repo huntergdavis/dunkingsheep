@@ -50,7 +50,7 @@ try:
             page.get_by_role('button',name='Read question & answer').click()
             page.get_by_role('button',name='Approve',exact=True).click()
             page.get_by_text('Decision recorded.',exact=False).wait_for()
-            page.get_by_role('button',name='Knowledge',exact=True).click()
+            page.locator('.project-group:not(.vp-project)').get_by_role('button',name='Knowledge',exact=True).click()
             page.get_by_text('Show text',exact=True).click()
             page.get_by_role('heading',name='Safe heading').wait_for()
             assert page.locator('.project-information script').count()==0

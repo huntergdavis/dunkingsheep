@@ -3,9 +3,7 @@
 // is the order of the navigation links.
 export const DASH_ROUTES = {
   projects: { eyebrow: 'PROJECTS', title: 'Projects', subtitle: 'Live lanes by explicit project membership' },
-  knowledge: { eyebrow: 'KNOWLEDGE', title: 'Knowledge', subtitle: 'Each project\'s information store and the global store' },
   cos: { eyebrow: 'INBOX', title: 'Inbox', subtitle: 'Browse Your inbox and VP history' },
-  tasks: { eyebrow: 'TASKS', title: 'Tasks', subtitle: 'Current work and closed tasks' },
   play: { eyebrow: 'LIVE GAME', title: 'Play Pool of Radiance', subtitle: 'Private DOS run · save states' },
 };
 
@@ -15,7 +13,7 @@ export const DASH_HOME = `/dash/${DEFAULT_DASH_VIEW}`;
 // Retired dashboards and where their bookmarks land (t4646). The separate Terminals view is
 // gone: lane terminals and messages live in Projects. The query string is kept, so
 // /dash/fleet?pane=%7 opens that lane's terminal in Projects.
-export const DASH_REDIRECTS = { fleet: 'projects', operations: 'projects', databases: 'knowledge' };
+export const DASH_REDIRECTS = { fleet: 'projects', operations: 'projects', databases: 'projects', knowledge: 'projects', tasks: 'projects' };
 
 // `standalone` is false only outside /dash (the bare '/' entry), where the default view is shown.
 export function resolveDashRoute(path) {
@@ -29,6 +27,17 @@ export function resolveDashRoute(path) {
 // The address a retired dashboard path should be replaced with, query string kept, or null when
 // the path needs no change.
 export function canonicalDashLocation(path, search = '', hash = '') {
+  const params = new URLSearchParams(search);
+  if (/^\/dash\/cos\/?$/.test(path) && params.get('panel') === 'webmail') {
+    params.delete('panel');
+    return `/dash/cos${params.size ? `?${params}` : ''}${hash}`;
+  }
+  if (/^\/dash\/(knowledge|databases|tasks)\/?$/.test(path)) {
+    if (path.includes('tasks')) params.set('panel', 'vp-tasks');
+    else if (params.get('project') && params.get('project') !== 'global') params.set('panel', 'knowledge');
+    else { params.delete('project'); params.set('panel', 'vp-knowledge'); params.set('store', 'global'); }
+    return `/dash/projects?${params}${hash}`;
+  }
   const match = /^\/dash\/([a-z]+)\/?$/.exec(path);
   if (!match || !Object.hasOwn(DASH_REDIRECTS, match[1])) return null;
   return `/dash/${DASH_REDIRECTS[match[1]]}${typeof search === 'string' ? search : ''}${typeof hash === 'string' ? hash : ''}`;

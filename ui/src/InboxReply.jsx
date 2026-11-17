@@ -30,7 +30,8 @@ export default function InboxReply({ api, parent, onSent, draftValue, onDraftCha
     finally { sending.current = false; setBusy(false); }
   }
   return <form className="inbox-compose" aria-label="Reply to message" onSubmit={send}>
-    <h3>Reply to {parent.message_id}</h3>
+    <h3>Reply to {parent.sender || (parent.sender_kind === 'human' ? 'this conversation' : 'recorded sender')}</h3>
+    <small>In reply to {parent.message_id} · routed using the recorded conversation</small>
     <label>Reply<textarea aria-label="Reply message" value={draft} disabled={busy} rows={4} onChange={event => setDraft(event.target.value)} /></label>
     <button type="submit" disabled={busy || !draft.trim() || Array.from(draft).length > 16000}>{busy ? 'Sending…' : 'Send reply'}</button>
     {receipt && <p role="status">{receipt}</p>}
