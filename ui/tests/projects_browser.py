@@ -35,7 +35,7 @@ try:
             page.route('**/api/**',mock)
             page.goto(base+'/dash/projects',wait_until='domcontentloaded')
             page.get_by_role('heading',name='Project: alpha').wait_for()
-            assert page.locator('.project-group:not(.project-information)').count()==6
+            assert page.locator('.project-group:not(.project-information):not(.vp-project)').count()==6
             assert page.get_by_text('Writer A').count()==1
             fresh=page.locator('[data-lane-model="%21"]').inner_text()
             assert 'launched as model-a medium' in fresh and 'launch flag, launched 3 h ago' in fresh and 'seen' not in fresh, fresh
@@ -50,7 +50,7 @@ try:
             assert page.get_by_role('heading',name='Project: Global').count()==1
             assert page.get_by_role('heading',name='Global scope').count()==1
             page.get_by_label('Filter projects').select_option('project:beta')
-            assert page.locator('.project-group:not(.project-information)').count()==1
+            assert page.locator('.project-group:not(.project-information):not(.vp-project)').count()==1
             assert page.get_by_text('Reviewer B').count()==1
             assert page.get_by_text('Writer A').count()==0
             assert page.get_by_role('link',name='Reviewer B').get_attribute('href')=='/dash/projects?pane=%252'

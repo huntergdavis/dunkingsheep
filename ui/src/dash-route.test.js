@@ -15,7 +15,7 @@ test('the bare desk, /dash and /dash/ open Projects', () => {
 });
 
 test('every dashboard keeps its own route, Inbox included, and Projects is first in the nav', () => {
-  assert.deepEqual(Object.keys(DASH_ROUTES), ['projects', 'knowledge', 'cos', 'tasks', 'play']);
+  assert.deepEqual(Object.keys(DASH_ROUTES), ['projects', 'cos', 'play']);
   for (const key of Object.keys(DASH_ROUTES)) {
     assert.deepEqual(viewForPath(`/dash/${key}`), { view: key, known: true });
     assert.deepEqual(resolveDashRoute(`/dash/${key}/`), { standalone: true, view: key, known: true });
@@ -28,7 +28,7 @@ test('every dashboard keeps its own route, Inbox included, and Projects is first
 // t4646: the Terminals view is retired; its bookmarks land on Projects with the lane kept.
 test('the retired Terminals path opens Projects and keeps the pane deep link', () => {
   assert.equal(Object.hasOwn(DASH_ROUTES, 'fleet'), false);
-  assert.deepEqual(DASH_REDIRECTS, { fleet: 'projects', operations: 'projects', databases: 'knowledge' });
+  assert.deepEqual(DASH_REDIRECTS, { fleet: 'projects', operations: 'projects', databases: 'projects', knowledge: 'projects', tasks: 'projects' });
   assert.deepEqual(viewForPath('/dash/fleet'), { view: 'projects', known: true });
   assert.deepEqual(resolveDashRoute('/dash/fleet/'), { standalone: true, view: 'projects', known: true });
   assert.equal(canonicalDashLocation('/dash/fleet', '?pane=%257'), '/dash/projects?pane=%257');
@@ -57,4 +57,11 @@ test('main.jsx routes through this module and the brand link opens the landing v
   assert.match(src, /viewForPath\(/);
   assert.doesNotMatch(src, /const DASH_ROUTES = \{/);
   assert.doesNotMatch(src, /: 'cos'\}? known=/);
+});
+
+test('retired mail and standalone task/knowledge links open the native views', () => {
+  assert.equal(canonicalDashLocation('/dash/cos', '?panel=webmail'), '/dash/cos');
+  assert.equal(canonicalDashLocation('/dash/tasks', '?needs_owner=true'), '/dash/projects?needs_owner=true&panel=vp-tasks');
+  assert.equal(canonicalDashLocation('/dash/knowledge', '?project=global'), '/dash/projects?panel=vp-knowledge&store=global');
+  assert.equal(canonicalDashLocation('/dash/databases', '?project=alpha'), '/dash/projects?project=alpha&panel=knowledge');
 });

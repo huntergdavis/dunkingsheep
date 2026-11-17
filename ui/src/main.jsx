@@ -2,17 +2,15 @@ import { ServerTimeZone } from './Timestamp';
 import './viewportReport';
 import React, { useEffect, useLayoutEffect, useState, lazy, Suspense } from 'react';
 import { createRoot } from 'react-dom/client';
-import '@chatscope/chat-ui-kit-styles/dist/default/styles.min.css';
 import './style.css';
 import './dash.css';
 import './scrollbars.css';
 import { canonicalDashLocation, DASH_ROUTES, resolveDashRoute, viewForPath } from './dash-route.js';
 import { ThemeContext, validTheme, storedTheme, api, DashShell, Login } from './DeskShared';
 import ChunkErrorBoundary from './ChunkErrorBoundary';
-const OwnerInbox = lazy(() => import('./OwnerInbox'));
+// The primary control surface is small: avoid a session → chunk → headers waterfall.
+import OwnerInbox from './OwnerInbox';
 const MailboxBrowser = lazy(() => import('./MailboxBrowser'));
-const TasksView = lazy(() => import('./TasksView'));
-const ProjectInformation = lazy(() => import('./ProjectInformation'));
 const Projects = lazy(() => import('./ProjectsView'));
 const PlayWorkspace = lazy(() => import('./PlayView'));
 const ChannelStandalone = lazy(() => import('./ConversationView'));
@@ -41,14 +39,8 @@ function StandaloneDesk({ view, known }) {
     </DashShell>;
   }
   if (view === 'cos' && new URLSearchParams(window.location.search).get('panel') === 'mailboxes') return <DashShell standalone view="cos"><MailboxBrowser api={api} /></DashShell>;
-  if (view === 'cos' && new URLSearchParams(window.location.search).get('panel') === 'webmail') return <DashShell standalone view="cos"><p><a href="/dash/cos">Back to Inbox</a></p><iframe title="Dunking Sheep mail" src="/webmail/en/mail/" style={{width:'100%', height:'80vh', border:0}} /></DashShell>;
   if (view === 'cos' && new URLSearchParams(window.location.search).get('panel') !== 'conversation') return <DashShell standalone view="cos"><OwnerInbox api={api} /></DashShell>;
-  if (view === 'tasks') return <DashShell standalone view="tasks"><TasksView api={api} /></DashShell>;
   if (view === 'projects') return <Projects standalone />;
-  if (view === 'knowledge') return <DashShell standalone view="knowledge"><div className="dash-body">
-    <div className="ops-heading"><div><div className="eyebrow">{DASH_ROUTES.knowledge.eyebrow}</div><h1>{DASH_ROUTES.knowledge.title}</h1><p>{DASH_ROUTES.knowledge.subtitle}</p></div></div>
-    <ProjectInformation api={api} />
-  </div></DashShell>;
   if (view === 'play') return <PlayWorkspace standalone />;
   return <ChannelStandalone key={view} channel={view} />;
 }

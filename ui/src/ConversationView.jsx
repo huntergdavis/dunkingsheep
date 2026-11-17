@@ -1,3 +1,4 @@
+import '@chatscope/chat-ui-kit-styles/dist/default/styles.min.css';
 import Timestamp from './Timestamp';
 import React, { useEffect, useState } from 'react';
 import { useMessageScroll, mergeMessages } from './useMessageScroll';

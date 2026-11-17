@@ -100,7 +100,7 @@ function Projects({ standalone = false }) {
     {!roster && !error && <p>Loading projects…</p>}
     {terminalList.state === 'error' && <p role="status">{terminalListReason(terminalList.status)}.</p>}
     {deepLinkPane && <p role="status">Selected lane {deepLinkPane}{terminalActionForLane(terminalList, deepLinkPane).reason ? ` · ${terminalActionForLane(terminalList, deepLinkPane).reason}` : ''}</p>}
-    {ownerAction && <section className="project-group"><h2>VP of Agentry</h2><button type="button" onClick={() => setTerminalTarget(ownerAction.target)}>Open VP terminal</button></section>}
+    <section className="project-group vp-project"><h2>VP of Agentry</h2><p>Fleet-wide work and shared knowledge</p>{ownerAction && <button type="button" onClick={() => setTerminalTarget(ownerAction.target)}>Open VP terminal</button>}<VpPanels /></section>
     {(roster || stores) && <><label>Show <select aria-label="Filter projects" value={effectiveSelected} onChange={e => { setSelected(e.target.value); const url = new URL(window.location.href); if(e.target.value.startsWith("project:")) url.searchParams.set("project",e.target.value.slice(8)); else url.searchParams.delete("project"); window.history.replaceState(null,"",url); }}><option value="all">All groups</option>{ordered.map(group => <option key={group.key} value={group.key}>{group.title}</option>)}</select></label>
       {!ordered.length && <p>No live agent lanes are reported.</p>}
       {ordered.filter(group => effectiveSelected === 'all' || group.key === effectiveSelected).map(group => <section className="project-group" key={group.key}><h2>{group.title} <small>({group.lanes.length})</small>{group.project !== undefined && <a className="project-information-link" href={informationHref(group.project)}>Knowledge</a>}</h2><div className="ops-table-wrap"><table><thead><tr><th>Lane</th><th>Activity</th><th>Mail</th><th>Task</th><th>Model</th></tr></thead><tbody>{group.lanes.map(lane => <tr key={lane.pane_id}><td className={lane.pane_id === deepLinkPane ? 'lane-deep-link' : undefined}><a aria-current={lane.pane_id === deepLinkPane ? 'true' : undefined} href={`/dash/projects?pane=${encodeURIComponent(lane.pane_id)}`}>{laneDisplayName(lane, lane.pane_id)}</a><small> {lane.pane_id}</small><LaneUsage lane={lane} budget={budget} />{(action => action.target
@@ -127,7 +127,7 @@ function Projects({ standalone = false }) {
 export default Projects;
 
 function ProjectPanels({ project }) {
-  const [tab, setTab] = useState('');
+  const [tab, setTab] = useState(() => new URLSearchParams(window.location.search).get('panel') === 'knowledge' && new URLSearchParams(window.location.search).get('project') === project ? 'knowledge' : '');
   return <div className="project-panels">
     <div className="project-panel-tabs" aria-label={`${project} details`}>
       {['work','knowledge', ...(project === 'poolrad' ? ['report'] : [])].map(name => <button key={name} aria-pressed={tab === name} onClick={() => setTab(tab === name ? '' : name)}>{name === 'work' ? 'Work & decisions' : name === 'knowledge' ? 'Knowledge' : 'Poolrad report'}</button>)}
@@ -136,6 +136,27 @@ function ProjectPanels({ project }) {
       {tab === 'work' && <TasksView key={project} api={api} project={project} embedded />}
       {tab === 'knowledge' && <ProjectInformation key={project} api={api} project={project} />}
       {tab === 'report' && <PoolradReport />}
+    </Suspense>
+  </div>;
+}
+
+function VpPanels() {
+  const [tab, setTab] = useState(() => new URLSearchParams(window.location.search).get('panel') || '');
+  function choose(next) {
+    const value = next === tab ? '' : next;
+    setTab(value);
+    const url = new URL(window.location.href);
+    if (value) url.searchParams.set('panel', value); else url.searchParams.delete('panel');
+    window.history.replaceState(null, '', url);
+  }
+  return <div className="project-panels">
+    <div className="project-panel-tabs" aria-label="VP details">
+      <button aria-pressed={tab === 'vp-tasks'} onClick={() => choose('vp-tasks')}>Tasks</button>
+      <button aria-pressed={tab === 'vp-knowledge'} onClick={() => choose('vp-knowledge')}>Knowledge</button>
+    </div>
+    <Suspense fallback={<p role="status">Loading VP details…</p>}>
+      {tab === 'vp-tasks' && <TasksView api={api} />}
+      {tab === 'vp-knowledge' && <ProjectInformation api={api} initialStore={new URLSearchParams(window.location.search).get('store') || 'global'} embedded />}
     </Suspense>
   </div>;
 }

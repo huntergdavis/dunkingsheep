@@ -1009,32 +1009,26 @@ async fn serve_static(root: &Path, request: Request) -> Response {
             request.uri().query().map(str::to_owned),
         ),
     };
+    // Retire every old client path even if stale generated files remain on disk.
+    if decoded == "/webmail" || decoded.starts_with("/webmail/") {
+        return Redirect::temporary("/dash/cos").into_response();
+    }
     let headers = request.headers().clone();
     let root_owned = root.to_path_buf();
     let head = method == Method::HEAD;
     let lookup_path = decoded.clone();
     let looked = tokio::task::spawn_blocking(move || lookup(&root_owned, &lookup_path, head)).await;
-    let mut response = match looked {
+    match looked {
         Ok(Lookup::File(file)) => file_response(file, StatusCode::OK),
         Ok(Lookup::DirectoryWithoutSlash) => {
             let location = absolute_location(&headers, &decoded, query.as_deref());
             Redirect::temporary(&location).into_response()
         }
-        Ok(Lookup::NotFoundPage(_)) if decoded.starts_with("/webmail/en/mail/") => {
-            match read_static_file(&root.join("webmail/en/mail/index.html"), head) {
-                Lookup::File(file) => file_response(file, StatusCode::OK),
-                _ => not_found(),
-            }
-        }
         Ok(Lookup::NotFoundPage(Some(page))) => file_response(page, StatusCode::NOT_FOUND),
         Ok(Lookup::NotFoundPage(None)) => not_found(),
         Ok(Lookup::Denied) => unauthorized(),
         Err(_) => not_found(),
-    };
-    if decoded.starts_with("/webmail/") {
-        response.headers_mut().insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'self'"));
     }
-    response
 }
 
 /// What a static lookup resolved to, before any HTTP shape is applied.
@@ -1314,25 +1308,24 @@ mod desk_channel_tests;
 mod webmail_host_tests {
     use super::*;
     #[tokio::test]
-    async fn jmap_mail_folder_reload_serves_mail_shell_with_local_connections_only() {
+    async fn retired_mail_paths_redirect_even_with_stale_assets() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("webmail/en/mail")).unwrap();
-        std::fs::write(dir.path().join("webmail/en/mail/index.html"), "mail-shell").unwrap();
-        let request = Request::builder()
-            .uri("/webmail/en/mail/folder/inbox")
-            .body(Body::empty())
-            .unwrap();
-        let response = serve_static(dir.path(), request).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(response.headers()[header::CONTENT_SECURITY_POLICY]
-            .to_str()
-            .unwrap()
-            .contains("connect-src 'self'"));
-        assert_eq!(
-            axum::body::to_bytes(response.into_body(), 1024)
-                .await
-                .unwrap(),
-            "mail-shell"
-        );
+        std::fs::write(
+            dir.path().join("webmail/en/mail/index.html"),
+            "retired-shell",
+        )
+        .unwrap();
+        for path in [
+            "/webmail",
+            "/webmail/en/mail/",
+            "/webmail/en/mail/folder/inbox",
+            "/webmail/en/mail/index.html",
+        ] {
+            let request = Request::builder().uri(path).body(Body::empty()).unwrap();
+            let response = serve_static(dir.path(), request).await;
+            assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+            assert_eq!(response.headers()[header::LOCATION], "/dash/cos");
+        }
     }
 }

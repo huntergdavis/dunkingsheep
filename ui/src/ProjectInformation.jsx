@@ -17,16 +17,15 @@ function Entry({ entry }) {
   </article>;
 }
 
-// t5241: the Databases tab. The chosen store is in the address (?project=<name> or
-// ?project=global), so a project's Information link opens it and a reload keeps it.
-export default function ProjectInformation({ api, project = null }) {
+// Project cards pin their store. The VP panel selects any mapped store and retains it in the URL.
+export default function ProjectInformation({ api, project = null, initialStore = null, embedded = false }) {
   const [list, setList] = useState(null);
   const [listError, setListError] = useState('');
-  const [selected, setSelectedState] = useState(() => project ? `project:${project}` : requestedStore(window.location.search));
+  const [selected, setSelectedState] = useState(() => project ? `project:${project}` : initialStore || requestedStore(window.location.search));
   const setSelected = value => {
     setSelectedState(value);
-    const url = `${window.location.pathname}${storeSearch(value)}${window.location.hash}`;
-    window.history.replaceState(window.history.state, '', url);
+    if (embedded) { const url = new URL(window.location.href); url.searchParams.set('store', value); window.history.replaceState(null, '', url); }
+    else if (!project) { const url = `${window.location.pathname}${storeSearch(value)}${window.location.hash}`; window.history.replaceState(window.history.state, '', url); }
   };
   const [query, setQuery] = useState('');
   const [view, setView] = useState(null);

@@ -71,10 +71,12 @@ try:
             page.route('**/api/**', mock)
             page.goto(base + '/dash/cos', wait_until='domcontentloaded')
             messages = page.locator('.front-desk-markdown')
-            messages.first.wait_for()
-            assert messages.count() == 1
+            page.locator('.owner-inbox-row').first.wait_for()
+            assert messages.count() == 0
             for index in range(2):
+                if index: page.get_by_role('button',name='Back to inbox',exact=True).click()
                 page.locator('.owner-inbox-row').nth(index).click()
+                page.get_by_role('button',name='Format text',exact=True).click()
                 message = messages.first
                 message.wait_for()
                 assert message.locator('table tbody tr').count() == 1
@@ -91,11 +93,11 @@ try:
             raw = page.evaluate("async () => (await (await fetch('/api/owner-thread?limit=50')).json()).items.map(x => x.body)")
             assert raw == [RAW, RAW]
             assert page.locator('.owner-inbox-row').count() == 2
-            page.get_by_role('link', name='Open conversation / send a message').click()
+            page.get_by_role('link', name='Long-form conversation').click()
             page.locator('.conversation .front-desk-markdown').first.wait_for()
             assert page.locator('.conversation .front-desk-markdown').count() == 2
             page.get_by_role('link', name='Back to Inbox', exact=True).click()
-            page.locator('.owner-inbox-reader').wait_for()
+            page.locator('.owner-inbox-row').first.wait_for()
             page.close()
         browser.close()
 finally:

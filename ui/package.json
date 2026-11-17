@@ -10,7 +10,7 @@
     "format:css": "node tools/format-css.cjs --check",
     "format:css:check": "node tools/format-css.cjs --check",
     "format:css:write": "node tools/format-css.cjs --write",
-    "prebuild": "node ../integrations/webmail/ensure.mjs"
+    "prebuild": "node tools/retire-webmail.mjs"
   },
   "dependencies": {
     "@chatscope/chat-ui-kit-react": "^2.0.3",

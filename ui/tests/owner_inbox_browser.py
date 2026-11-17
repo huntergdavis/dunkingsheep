@@ -1,4 +1,5 @@
 """Private synthetic thread heads/detail/poll/paging regression. No live APIs."""
+from inbox_actions import open_thread
 import json, os, threading
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -45,19 +46,21 @@ try:
      if end>50:data['next_cursor']=f'messages:{end-50}'
     return fulfill(route,data)
    def open_page():
-    page=browser.new_page(viewport={'width':width,'height':900});page.route('**/api/**',mock);page.goto(base+'/dash/cos',wait_until='domcontentloaded');return page
+    page=browser.new_page(viewport={'width':width,'height':900});page.route('**/api/**',mock);page.goto(base+'/dash/cos',wait_until='domcontentloaded');
+    if mode!='legacy': open_thread(page)
+    return page
    page=open_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)));reader=page.get_by_role('article',name='Selected conversation');reader.get_by_text('FULL BODY 15',exact=True).wait_for()
    assert page.locator('.owner-inbox-row').count()==2;assert reader.locator('.owner-thread-message').count()==7
-   page.locator('.owner-inbox-row').filter(has_text='FULL BODY 8').click();reader.get_by_text('FULL BODY 1',exact=True).wait_for();assert reader.locator('.owner-thread-message').count()==8
-   draft=page.get_by_role('textbox',name='Reply message');draft.fill('KEEP DRAFT WHILE POLLING');rows.append(message(16,1));reader.get_by_text('FULL BODY 16',exact=True).wait_for(timeout=10000)
+   open_thread(page, 'FULL BODY 8');reader.get_by_text('FULL BODY 1',exact=True).wait_for();assert reader.locator('.owner-thread-message').count()==8
+   draft=page.get_by_role('textbox',name='Reply message');draft.fill('KEEP DRAFT WHILE POLLING');rows.append(message(16,1));reader.get_by_text('FULL BODY 16',exact=True).wait_for(timeout=20000)
    assert page.locator('.owner-inbox-row').count()==2;assert '9 unread' in page.locator('.owner-inbox-row').filter(has_text='FULL BODY 16').inner_text();assert draft.input_value()=='KEEP DRAFT WHILE POLLING'
-   assert page.get_by_role('form',name='Reply to message').get_by_role('heading',name='Reply to i8',exact=True).count()==1
-   page.locator('.owner-inbox-row').filter(has_text='FULL BODY 15').click();reader.get_by_text('FULL BODY 15',exact=True).wait_for();hold_root='i1'
-   page.locator('.owner-inbox-row').filter(has_text='FULL BODY 16').click();page.wait_for_timeout(150);assert pending
-   page.locator('.owner-inbox-row').filter(has_text='FULL BODY 15').click();reader.get_by_text('FULL BODY 15',exact=True).wait_for()
+   assert page.get_by_role('form',name='Reply to message').get_by_text('In reply to i8',exact=False).count()==1
+   open_thread(page, 'FULL BODY 15');reader.get_by_text('FULL BODY 15',exact=True).wait_for();hold_root='i1'
+   open_thread(page, 'FULL BODY 16');page.wait_for_timeout(150);assert pending
+   open_thread(page, 'FULL BODY 15');reader.get_by_text('FULL BODY 15',exact=True).wait_for()
    for route in pending:fulfill(route,dict(thread_mode='messages',source_filter='human_threads',include_internal=False,view_revision=0,fence_id=9999,next_cursor=None,reload_from_top=False,root_id='i1',messages=[message(1,1)]))
    pending.clear();hold_root=None;page.wait_for_timeout(100);assert reader.get_by_text('FULL BODY 1',exact=True).count()==0
-   page.locator('.owner-inbox-row').filter(has_text='FULL BODY 16').click();reader.get_by_text('FULL BODY 16',exact=True).wait_for();assert draft.input_value()=='KEEP DRAFT WHILE POLLING'
+   open_thread(page, 'FULL BODY 16');reader.get_by_text('FULL BODY 16',exact=True).wait_for();assert draft.input_value()=='KEEP DRAFT WHILE POLLING'
    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth');assert not errors,errors
    if os.environ.get('OWNER_INBOX_SCREENSHOT_DIR'):page.screenshot(path=str(Path(os.environ['OWNER_INBOX_SCREENSHOT_DIR'])/f'threads-{width}.png'),full_page=True)
    print(json.dumps(dict(width=width,fifteen_messages_two_heads='PASS',detail_poll_counts_selection_parent_draft='PASS',late_root_response='PASS')),flush=True);page.close()

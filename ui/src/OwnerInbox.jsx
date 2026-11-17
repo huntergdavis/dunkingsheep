@@ -1,6 +1,6 @@
 import Timestamp from './Timestamp';
 import React, { useEffect, useRef, useState } from 'react';
-import MessageBody from './MessageBody';
+import InboxBody from './InboxBody';
 import InboxCompose from './InboxCompose';
 import InboxReply from './InboxReply';
 import { HISTORICAL_REASONS, INBOX_VIEWS, messageKindLabels, validateThreadPage, mergeThreadHeads, mergeThreadMessages } from './inbox-views.js';
@@ -31,9 +31,8 @@ export default function OwnerInbox({ api }) {
   return <div className="owner-inbox">
     <header className="owner-inbox-heading">
       <div><h1>{view.label}</h1><p>{view.description}</p></div>
-      <a href="/dash/cos?panel=webmail">Open mail interface</a>
       <a href="/dash/cos?panel=mailboxes">Browse all mailboxes</a>
-      <a href="/dash/cos?panel=conversation">Open conversation / send a message</a>
+      <a href="/dash/cos?panel=conversation">Long-form conversation</a>
     </header>
     <nav className="owner-inbox-views" aria-label="Inbox views">
       {Object.entries(INBOX_VIEWS).map(([name, entry]) => <button key={name} type="button" ref={node => { buttons.current[name] = node; }} aria-pressed={viewName === name}
@@ -56,6 +55,7 @@ function ThreadList({ api, viewName, attempt, requestedRoot, drafts, setDraft, t
   const [notice, setNotice] = useState('');
   const [olderBusy, setOlderBusy] = useState(false);
   const [restart, setRestart] = useState(0);
+  const [query, setQuery] = useState('');
   const state = useRef({ live: true, sequence: 0, chain: 0, revision: null, initialized: false, olderBusy: false });
   useEffect(() => { state.current.live = true; return () => { state.current.live = false; state.current.sequence++; state.current.chain++; }; }, []);
   function reset(message) {
@@ -75,12 +75,14 @@ function ThreadList({ api, viewName, attempt, requestedRoot, drafts, setDraft, t
         state.current.revision = data.view_revision;
         if (!state.current.initialized) { setCursor(data.next_cursor); state.current.initialized = true; }
         setHeads(previous => mergeThreadHeads(changed ? [] : previous || [], data.threads));
-        setSelectedRoot(previous => previous ?? data.threads[0]?.thread_id ?? null);
+
         setError('');
       } catch (e) { if (live && sequence === state.current.sequence) setError(e.message); }
     }
-    load(); const timer = setInterval(load, 5000);
-    return () => { live = false; clearInterval(timer); };
+    load(); const refreshVisible = () => { if (!document.hidden) load(); };
+    const timer = setInterval(refreshVisible, 15000);
+    document.addEventListener('visibilitychange', refreshVisible);
+    return () => { live = false; clearInterval(timer); document.removeEventListener('visibilitychange', refreshVisible); };
   }, [api, viewName, attempt, restart]);
   async function older() {
     if (!cursor || state.current.olderBusy) return;
@@ -107,11 +109,12 @@ function ThreadList({ api, viewName, attempt, requestedRoot, drafts, setDraft, t
     </div>
     {heads === null && !error && <p role="status">Loading inbox…</p>}
     {heads !== null && !heads.length && <p role="status">No conversations in this inbox yet.</p>}
-    {(heads?.length > 0 || selectedRoot) && <div className="owner-inbox-columns">
+    {(heads?.length > 0 || selectedRoot) && <div className={`owner-inbox-columns ${selectedRoot ? 'has-selection' : ''}`}>
       <section className="owner-inbox-list" aria-label="Inbox conversations">
+        <label className="inbox-search">Filter loaded conversations<input type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="Sender, subject or preview" /></label>
         <p className="owner-inbox-pages">{heads?.length || 0} conversations loaded</p>
-        <ul>{(heads || []).map(head => <li key={head.thread_id}>
-          <button className="owner-inbox-row" aria-current={selectedRoot === head.thread_id ? 'true' : undefined} onClick={() => setSelectedRoot(head.thread_id)}>
+        <ul>{(heads || []).filter(head => [senderLabel(head.latest), head.latest.subject, head.latest.preview].join(' ').toLowerCase().includes(query.toLowerCase())).map(head => <li key={head.thread_id}>
+          <button className={`owner-inbox-row ${head.unread_count ? 'is-unread' : ''}`} aria-current={selectedRoot === head.thread_id ? 'true' : undefined} onClick={() => setSelectedRoot(head.thread_id)}>
             <strong>{senderLabel(head.latest)}</strong><Timestamp value={head.latest.created_at} />
             {head.latest.subject && <span>{head.latest.subject}</span>}
             <span className="owner-inbox-preview">{head.latest.preview.trim().split('\n').find(line => line.trim()) || '(Empty message)'}</span>
@@ -120,13 +123,14 @@ function ThreadList({ api, viewName, attempt, requestedRoot, drafts, setDraft, t
           </button>
         </li>)}</ul>
       </section>
+      {!selectedRoot && <div className="inbox-empty-reader"><span aria-hidden="true">✉</span><h2>Select a conversation</h2><p>Read and reply here, or compose a message to any live agent.</p></div>}
       {selectedRoot && <ThreadReader key={`${selectedRoot}:${state.current.revision}`} api={api} viewName={viewName} root={selectedRoot} attempt={attempt}
-        drafts={drafts} setDraft={setDraft} targets={targets} setTarget={setTarget} refresh={refresh} openVp={openVp} />}
+        drafts={drafts} setDraft={setDraft} targets={targets} setTarget={setTarget} refresh={refresh} openVp={openVp} onBack={() => setSelectedRoot(null)} />}
     </div>}
   </>;
 }
 
-function ThreadReader({ api, viewName, root, attempt, drafts, setDraft, targets, setTarget, refresh, openVp }) {
+function ThreadReader({ api, viewName, root, attempt, drafts, setDraft, targets, setTarget, refresh, openVp, onBack }) {
   const [messages, setMessages] = useState(null);
   const parentId = targets[`${viewName}:${root}`] ?? null;
   const setParentId = value => setTarget(`${viewName}:${root}`, value);
@@ -157,8 +161,10 @@ function ThreadReader({ api, viewName, root, attempt, drafts, setDraft, targets,
         setParentId(previous => previous ?? data.messages.at(-1)?.message_id ?? null); setError('');
       } catch (e) { if (live && sequence === state.current.sequence) setError(e.message); }
     }
-    load(); const timer = setInterval(load, 5000);
-    return () => { live = false; clearInterval(timer); };
+    load(); const refreshVisible = () => { if (!document.hidden) load(); };
+    const timer = setInterval(refreshVisible, 15000);
+    document.addEventListener('visibilitychange', refreshVisible);
+    return () => { live = false; clearInterval(timer); document.removeEventListener('visibilitychange', refreshVisible); };
   }, [api, viewName, root, attempt, restart]);
   async function older() {
     if (!cursor || state.current.busy) return;
@@ -175,7 +181,7 @@ function ThreadReader({ api, viewName, root, attempt, drafts, setDraft, targets,
   }
   const parent = messages?.find(message => message.message_id === parentId) || messages?.at(-1);
   return <article className="owner-inbox-reader" aria-label="Selected conversation">
-    <header><h2>Conversation {root}</h2><p>{INBOX_VIEWS[viewName].label}</p></header>
+    <header><button type="button" className="inbox-back" onClick={onBack}>Back to inbox</button><h2>Conversation {root}</h2><p>{INBOX_VIEWS[viewName].label}</p></header>
     {notice && <p role="status">{notice}</p>}
     {error && <p role="alert">Conversation unavailable. {error} <button type="button" onClick={() => setRestart(value => value + 1)}>Retry conversation</button></p>}
     {messages === null && !error && <p role="status">Loading conversation…</p>}
@@ -188,7 +194,7 @@ function ThreadReader({ api, viewName, root, attempt, drafts, setDraft, targets,
         {message.parent_id && <p>Reply to {message.parent_id}{!messages.some(row => row.message_id === message.parent_id) ? ' · earlier message is not loaded' : ''}</p>}
         {message.unresolved_parent && <p>The earlier transport message is unavailable. This starts a new conversation.</p>}
         {viewName === 'historical' && message.reply_to && <p>Original reply reference: {message.reply_to}</p>}
-        <MessageBody body={message.body} frontDesk />
+        <InboxBody body={message.body} />
         {viewName !== 'historical' && <button type="button" aria-pressed={parent?.message_id === message.message_id} onClick={() => setParentId(message.message_id)}>Reply to {message.message_id}</button>}
         {viewName === 'human_threads' && message.conversation_kind === 'vp' && <button type="button" onClick={() => openVp(root)}>Open VP thread {root}</button>}
       </section>)}
